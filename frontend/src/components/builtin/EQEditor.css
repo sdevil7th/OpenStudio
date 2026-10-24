@@ -288,3 +288,16 @@
     height: 30px;
   }
 }
+@container eq (min-width:1600px) and (min-height:900px) {
+  .eq-main { padding: 24px 32px 0; gap: 16px; }
+  .eq-workflow-bar { min-height: 48px; }
+  .eq-band-count,.eq-latency-summary { font-size: 15px; }
+  .eq-band-heading { min-height: 48px; margin-bottom: -16px; padding-inline: 24px; }
+  .eq-inspector { min-height: 230px; justify-content: center; gap: clamp(28px, 3cqw, 100px); padding: 24px; }
+  .eq-inspector .suite-value { font-size: 24px; width: 90px; }
+  .eq-inspector .suite-parameter>span:first-child { font-size: 17px; }
+  .eq-inspector .suite-select { font-size: 16px; min-height: 40px; }
+  .eq-output { padding: 20px 32px; }
+  .eq-output-meter { width: 140px; height: 14px; }
+  .eq-output-value { font-size: 17px; }
+}

@@ -132,11 +132,11 @@ describe("NAM Rack approved-surface implementation contract", () => {
 
   it("preserves every remaining pedal size while centring the five-device PRE row", () => {
     expect(NAM_PRE_SIGNAL_LAYOUT).toEqual({
-      compressor: { x: 85, y: 42, w: 156, h: 232 },
-      octaver: { x: 251, y: 42, w: 120, h: 232 },
-      eqBoost: { x: 381, y: 42, w: 156, h: 232 },
-      precisionDrive: { x: 547, y: 42, w: 120, h: 232 },
-      distortion: { x: 677, y: 42, w: 156, h: 232 },
+      compressor: { x: 67, y: 42, w: 156, h: 232 },
+      octaver: { x: 233, y: 42, w: 156, h: 232 },
+      eqBoost: { x: 399, y: 42, w: 156, h: 232 },
+      precisionDrive: { x: 565, y: 42, w: 120, h: 232 },
+      distortion: { x: 695, y: 42, w: 156, h: 232 },
     });
 
     expect(NAM_AMP_FACEPLATE_LAYOUT.controlY).toBeCloseTo(745 / 10.35, 6);

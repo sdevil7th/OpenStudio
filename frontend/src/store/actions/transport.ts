@@ -946,6 +946,13 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       }));
     },
 
+    goToStart: async () => {
+      // Absolute project start is independent of the time selection and loop.
+      // Use the same native seek path for the transport button and shortcuts.
+      set({ scrollX: 0 });
+      await get().seekTo(0);
+    },
+
     seekTo: async (time) => {
       const { transport } = get();
       const wasPlaying = transport.isPlaying && !transport.isPaused;

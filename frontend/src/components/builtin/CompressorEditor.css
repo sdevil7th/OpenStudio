@@ -10,8 +10,8 @@
 }
 .compressor-meter-row {
   min-height: 150px;
-  flex-basis: 180px;
-  flex-grow: 1;
+  flex-basis: clamp(160px, 19cqi, 360px);
+  flex-grow: 0;
 }
 .compressor-meter-stats {
   width: 112px;

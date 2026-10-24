@@ -448,18 +448,16 @@ export function MenuBar() {
     },
     {
       label: "Zoom In",
-      shortcut: shortcut("view.zoomIn", "Ctrl++"),
+      shortcut: shortcut("view.zoomIn", "+"),
       onClick: () => {
-        const { pixelsPerSecond, setZoom } = useDAWStore.getState();
-        setZoom(Math.min(pixelsPerSecond * 1.5, 500));
+        getRegisteredAction("view.zoomIn")?.execute();
       },
     },
     {
       label: "Zoom Out",
-      shortcut: shortcut("view.zoomOut", "Ctrl+-"),
+      shortcut: shortcut("view.zoomOut", "-"),
       onClick: () => {
-        const { pixelsPerSecond, setZoom } = useDAWStore.getState();
-        setZoom(Math.max(pixelsPerSecond / 1.5, 10));
+        getRegisteredAction("view.zoomOut")?.execute();
       },
     },
     {

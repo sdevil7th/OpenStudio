@@ -5,6 +5,7 @@
 #include "BuiltInIRBrightness.h"
 #include "BuiltInIRSourceBlend.h"
 #include "BuiltInIRGeometry.h"
+#include "BuiltInReverbReturnLevels.h"
 
 // Source/shape edits run on the bridge's state-mutation worker. Complete FFT
 // engines are prepared before atomic publication; the callback only swaps,
@@ -25,6 +26,13 @@ public:
         double sourceBlendLeft = 0, sourceBlendRight = 1;
     };
     BuiltInConvolution() = default;
+    // Response/layout publication identity; never takes the metadata lock in
+    // the audio callback. The standalone dispatcher uses it only to abandon
+    // an already-proven, inaudible compatibility-engine sleep interval.
+    std::uint64_t publicationRevision() const noexcept
+    {
+        return publishedRevision.load(std::memory_order_acquire);
+    }
     ~BuiltInConvolution() { delete pendingEq.exchange(nullptr);delete pending.exchange(nullptr); delete active; delete fading; collect(); }
     bool loadFile(const juce::File& file, double seconds = 0, BuiltInIRPreparation* progress=nullptr)
     {
@@ -54,14 +62,16 @@ public:
         Shape next;
         next.end = static_cast<double>(tree.getProperty("irTrimSeconds",0.0));
         if (!readShape(tree.getProperty("irShape"),next)) return false;
-        return restore(tree.getProperty("irData"),tree.getProperty("irName").toString(),next);
+        const auto name=tree.getProperty("irName").toString();
+        const bool generated=static_cast<bool>(tree.getProperty("irGeneratedDefault",name=="Studio room (generated)"));
+        return restore(tree.getProperty("irData"),name,next,nullptr,generated);
     }
     bool edit(const juce::var& values, BuiltInIRPreparation* progress=nullptr)
     {
-        juce::MemoryBlock bytes; juce::String name; Shape next;
-        { const juce::ScopedLock lock(controlLock); bytes=sourceBytes; name=sourceName; next=shape; }
+        juce::MemoryBlock bytes; juce::String name; Shape next;bool generated=false;
+        { const juce::ScopedLock lock(controlLock); bytes=sourceBytes; name=sourceName; next=shape;generated=sourceGeneratedDefault; }
         if (!readShape(values,next)) return false;
-        return restore(juce::var(bytes),name,next,progress);
+        return restore(juce::var(bytes),name,next,progress,generated);
     }
     bool trim(double seconds)
     {
@@ -71,6 +81,7 @@ public:
     {
         const juce::ScopedLock lock(controlLock);
         state.setProperty("irData",juce::var(sourceBytes),nullptr); state.setProperty("irName",sourceName,nullptr);
+        state.setProperty("irGeneratedDefault",sourceGeneratedDefault,nullptr);
         state.setProperty("irTrimSeconds",shape.end,nullptr);
         // Nested binary ValueTree preserves exact doubles; JSON decimal rounding can
         // otherwise move crop endpoints on full-state recall.
@@ -103,7 +114,7 @@ public:
             samples.setSample(ch,i,i>=480?filtered[ch]*.025f*std::exp(-6.9f*static_cast<float>(i)/57600.0f):0);
         }
         samples.setSample(0,480,.45f);samples.setSample(1,617,.4f);
-        return publish(std::move(samples),sourceRate,"Studio room (generated)",Shape{},progress);
+        return publish(std::move(samples),sourceRate,"Studio room (generated)",Shape{},progress,true);
     }
     void prepare(double sampleRate,int block)
     {
@@ -112,11 +123,11 @@ public:
         const juce::ScopedLock preparationGuard(preparationLock);
         renderRate=sampleRate;maximumBlock=juce::jmax(1,block);
         delete pending.exchange(nullptr);delete active;active=nullptr;delete fading;fading=nullptr;collect();
-        juce::MemoryBlock bytes;Shape settings;
-        {const juce::ScopedLock lock(controlLock);bytes=sourceBytes;settings=shape;}
+        juce::MemoryBlock bytes;Shape settings;bool generated=false;
+        {const juce::ScopedLock lock(controlLock);bytes=sourceBytes;settings=shape;generated=sourceGeneratedDefault;}
         targetCrossTerms.store(static_cast<float>(settings.crossTerms));
         juce::AudioBuffer<float> samples;double sourceRate=0;
-        if(decode(juce::var(bytes),samples,sourceRate))active=build(samples,sourceRate,settings).release();
+        if(decode(juce::var(bytes),samples,sourceRate)){active=build(samples,sourceRate,settings).release();active->generatedDefault=generated;}
         delete pendingEq.exchange(nullptr);equalizer.prepare(settings,sampleRate);previousEqualizer=equalizer;
         eqFade.reset(sampleRate,.05);eqFade.setCurrentAndTargetValue(1);
         {const juce::ScopedLock lock(controlLock);eqResponse=equalizer.response();eqSampleRate=sampleRate;tailSeconds.store(processedDuration+equalizer.tail);}
@@ -134,7 +145,7 @@ public:
         validPre=0;position=0;low={};high={};initialized=false;
         drainRemaining=0;processedFrames=0;
     }
-    void process(juce::AudioBuffer<float>& buffer,float delayMs,float lowCut,float highCut,float width,bool selected,bool applyOuterFilters=true)
+    void process(juce::AudioBuffer<float>& buffer,float delayMs,float lowCut,float highCut,float width,bool selected,bool applyOuterFilters=true,const float* returnBlend=nullptr)
     {
         if(!fading)if(auto* next=pending.exchange(nullptr))
         {
@@ -192,7 +203,10 @@ public:
             for(int i=0;i<count;++i)
             {
                 const float amount=fade.getNextValue();
-                for(int ch=0;ch<juce::jmin(4,buffer.getNumChannels());++ch){const float wet=active->output.getSample(ch,i);buffer.setSample(ch,start+i,fading?fading->output.getSample(ch,i)*(1-amount)+wet*amount:wet);}
+                const float calibration=returnBlend?returnBlend[start+i]:0;
+                const float activeGain=active->generatedDefault?BuiltInReverbReturnLevels::gain(7,calibration):1;
+                const float fadingGain=fading&&fading->generatedDefault?BuiltInReverbReturnLevels::gain(7,calibration):1;
+                for(int ch=0;ch<juce::jmin(4,buffer.getNumChannels());++ch){float wet=active->output.getSample(ch,i);if(activeGain!=1)wet*=activeGain;float previous=fading?fading->output.getSample(ch,i):0;if(fadingGain!=1)previous*=fadingGain;buffer.setSample(ch,start+i,fading?previous*(1-amount)+wet*amount:wet);}
             }
             if(fading&&!fade.isSmoothing()){retire(fading);fading=nullptr;}
         }
@@ -240,7 +254,7 @@ private:
         juce::dsp::Convolution cross{juce::dsp::Convolution::NonUniform{512}};
         juce::AudioBuffer<float> output,crossBuffer;
         juce::SmoothedValue<float> crossGain;
-        bool matrix=false,splitOutputs=false;Kernel* next=nullptr;
+        bool matrix=false,splitOutputs=false,generatedDefault=false;Kernel* next=nullptr;
         // Offset the cross engine's internal partition clock by half a tail
         // partition. Priming with silence changes no causal output or latency,
         // but avoids running all four long-tail FFT accumulations in one small
@@ -279,10 +293,11 @@ private:
     BuiltInIRColour::Eq equalizer,previousEqualizer;juce::SmoothedValue<float> eqFade;
     Kernel* active=nullptr;Kernel* fading=nullptr;
     std::atomic<Kernel*> pending{nullptr},retired{nullptr};
+    std::atomic<std::uint64_t> publishedRevision {0};
     // Neither lock is acquired by audio process/reset/retire. Schema reads only
     // take the short metadata lock, never the expensive FFT preparation lock.
     juce::CriticalSection preparationLock,controlLock;
-    juce::MemoryBlock sourceBytes;juce::String sourceName;Shape shape;
+    juce::MemoryBlock sourceBytes;juce::String sourceName;Shape shape;bool sourceGeneratedDefault=false;
     BuiltInIRDecay decayEstimate;
     double geometrySourceRate=48000;
     double duration=0,processedDuration=0,renderRate=0;int maximumBlock=1,sourceChannels=2;
@@ -358,11 +373,11 @@ private:
             ||bytes->getSize()!=20u+static_cast<size_t>(channels)*static_cast<size_t>(count)*4u)return false;
         samples.setSize(channels,count);for(int ch=0;ch<channels;++ch)for(int i=0;i<count;++i)samples.setSample(ch,i,stream.readFloat());return true;
     }
-    bool restore(const juce::var& data,const juce::String& name,const Shape& next,BuiltInIRPreparation* progress=nullptr)
+    bool restore(const juce::var& data,const juce::String& name,const Shape& next,BuiltInIRPreparation* progress=nullptr,bool generated=false)
     {
         if(progress&&!progress->advance(BuiltInIRPreparation::reading))return false;
         juce::AudioBuffer<float> samples;double sourceRate=0;if(!decode(data,samples,sourceRate))return false;
-        return publish(std::move(samples),sourceRate,name,next,progress);
+        return publish(std::move(samples),sourceRate,name,next,progress,generated);
     }
     static juce::AudioBuffer<float> shaped(const juce::AudioBuffer<float>& source,double sourceRate,const Shape& values,BuiltInIRPreparation* progress=nullptr)
     {
@@ -441,7 +456,7 @@ private:
         }
         kernel->diagonal.prepare({renderRate,static_cast<juce::uint32>(maximumBlock),2});return kernel;
     }
-    bool publish(juce::AudioBuffer<float>&& samples,double sourceRate,const juce::String& name,Shape next,BuiltInIRPreparation* progress=nullptr)
+    bool publish(juce::AudioBuffer<float>&& samples,double sourceRate,const juce::String& name,Shape next,BuiltInIRPreparation* progress=nullptr,bool generated=false)
     {
         if(progress&&!progress->advance(BuiltInIRPreparation::validating))return false;
         if(next.outputLayout==1&&samples.getNumChannels()!=4)return false;
@@ -456,7 +471,7 @@ private:
         if(progress&&!progress->advance(BuiltInIRPreparation::shaping))return false;
         const juce::ScopedLock preparationGuard(preparationLock);collect();
         bool unchangedIR=false,unchangedEq=false,unchangedAnalysis=false;BuiltInIRDecay nextDecay;double nextDuration=0;std::array<float,96> envelope{};
-        {const juce::ScopedLock lock(controlLock);unchangedIR=sourceBytes==bytes&&sameImpulse(shape,next);unchangedEq=sameEq(shape,next);unchangedAnalysis=shape.octaveAnalysis==next.octaveAnalysis;nextDuration=processedDuration;envelope=waveform;nextDecay=decayEstimate;}
+        {const juce::ScopedLock lock(controlLock);unchangedIR=sourceGeneratedDefault==generated&&sourceBytes==bytes&&sameImpulse(shape,next);unchangedEq=sameEq(shape,next);unchangedAnalysis=shape.octaveAnalysis==next.octaveAnalysis;nextDuration=processedDuration;envelope=waveform;nextDecay=decayEstimate;}
         juce::AudioBuffer<float> processed;
         if(!unchangedIR||!unchangedAnalysis)
         {
@@ -471,6 +486,7 @@ private:
         if(progress&&!progress->advance(BuiltInIRPreparation::preparing))return false;
         BuiltInIRColour::Eq eq;eq.prepare(next,renderRate>0?renderRate:48000);const auto nextResponse=eq.response();
         std::unique_ptr<Kernel> kernel;if(renderRate>0&&!unchangedIR)kernel=buildShaped(std::move(processed),sourceRate,next);
+        if(kernel)kernel->generatedDefault=generated;
         std::unique_ptr<EqUpdate> update;if(renderRate>0&&!unchangedEq){update=std::make_unique<EqUpdate>();update->eq=eq;}
         // The previous unpublished engine is destroyed after metadata unlock.
         std::unique_ptr<Kernel> replaced;std::unique_ptr<EqUpdate> replacedEq;
@@ -478,8 +494,9 @@ private:
         const juce::ScopedLock metadataGuard(controlLock);
         if(kernel)replaced.reset(pending.exchange(kernel.release()));
         if(update)replacedEq.reset(pendingEq.exchange(update.release()));
-        sourceBytes=std::move(bytes);sourceName=name;sourceChannels=samples.getNumChannels();geometrySourceRate=sourceRate;duration=fullDuration;shape=next;
+        sourceBytes=std::move(bytes);sourceName=name;sourceGeneratedDefault=generated;sourceChannels=samples.getNumChannels();geometrySourceRate=sourceRate;duration=fullDuration;shape=next;
         targetCrossTerms.store(static_cast<float>(next.crossTerms),std::memory_order_relaxed);
-        decayEstimate=std::move(nextDecay);processedDuration=nextDuration;waveform=envelope;eqResponse=nextResponse;eqSampleRate=eq.rate;tailSeconds.store(processedDuration+eq.tail);return true;
+        decayEstimate=std::move(nextDecay);processedDuration=nextDuration;waveform=envelope;eqResponse=nextResponse;eqSampleRate=eq.rate;tailSeconds.store(processedDuration+eq.tail);
+        publishedRevision.fetch_add(1,std::memory_order_release);return true;
     }
 };

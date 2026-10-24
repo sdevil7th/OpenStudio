@@ -1,6 +1,6 @@
-/* Approved revision 04 faceplate. Layout stays inside the native client area. */
+/* Studio space editor. Native response data and contextual controls share the workbench. */
 .reverb-editor {
-  container: reverb / inline-size;
+  container: reverb / size;
   --color-daw-text: #e4e7d9;
   --color-daw-text-muted: #a2b5a0;
   --color-daw-text-secondary: #c5d4bc;
@@ -18,7 +18,7 @@
   background: #273d3a;
 }
 .reverb-bank {
-  width: 196px;
+  width: clamp(180px, 18cqi, 360px);
   background: linear-gradient(105deg,#172b29,#203632);
   border-right: 1px solid #54716866;
   padding: 20px 12px 12px;
@@ -114,8 +114,8 @@
   letter-spacing: 1.2px;
 }
 .reverb-console {
-  padding: 20px 26px 0;
-  background: radial-gradient(ellipse at 40% 10%,#405d53 0,transparent 66%),linear-gradient(120deg,#344b43,#263e37);
+  padding: clamp(14px, 2.2cqi, 48px) clamp(18px, 2.5cqi, 56px) 0;
+  background: #293c34;
   box-shadow: inset 0 1px #849b8640;
 }
 .reverb-machine-heading {
@@ -134,7 +134,7 @@
   color: #a5baab;
 }
 .reverb-machine-title h2 {
-  font-size: 30px;
+  font-size: clamp(23px, 2.8cqi, 48px);
   font-weight: 500;
   letter-spacing: -.5px;
   line-height: 1.15;
@@ -182,9 +182,9 @@
   color: #b2c9b4;
 }
 .reverb-primary {
-  grid-template-columns: 1fr 1.6fr 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1.25fr 1fr 1fr 1fr;
   gap: 11px;
-  min-height: 212px;
+  min-height: clamp(158px, 20cqi, 350px);
   padding: 19px 0 16px;
 }
 .reverb-face .suite-parameter {
@@ -199,17 +199,10 @@
   font-weight: 600;
 }
 .reverb-face .suite-knob {
-  --reverb-knob-size: 70px;
+  --reverb-knob-size: clamp(58px, 6.7cqi, 135px);
   width: var(--reverb-knob-size);
   height: var(--reverb-knob-size);
-  filter: drop-shadow(0 4px 3px #101e1780);
   background: conic-gradient(from 225deg,#b3ce9d 0deg,#b3ce9d var(--suite-sweep),#10271c var(--suite-sweep),#10271c 270deg,transparent 270deg);
-}
-.reverb-face .suite-knob::before {
-  inset: 3px;
-  border: 5px solid #2b4231;
-  background: radial-gradient(circle at 38% 25%,#3a4b35,#182a20 72%);
-  box-shadow: inset 0 1px 1px #bac79266,0 2px 5px #0008;
 }
 .reverb-face .suite-knob::after {
   width: 2px;
@@ -217,8 +210,8 @@
 }
 .reverb-face .suite-value {
   color: #e9e9d9;
-  font-size: 17px;
-  width: 66px;
+  font-size: clamp(17px, 1.8cqi, 32px);
+  width: clamp(66px, 6.8cqi, 116px);
   min-height: 27px;
   background: transparent;
 }
@@ -248,11 +241,11 @@
   font-size: 10px;
 }
 .reverb-decay .suite-knob {
-  --reverb-knob-size: 114px;
+  --reverb-knob-size: clamp(78px, 8.5cqi, 170px);
 }
 .reverb-decay .suite-value {
-  font-size: 25px;
-  width: 82px;
+  font-size: clamp(22px, 2.3cqi, 38px);
+  width: clamp(82px, 8cqi, 145px);
 }
 .reverb-tick-caption {
   display: block;
@@ -272,6 +265,8 @@
   padding-right: 20px;
   max-width: 120px;
 }
+.reverb-workbench { grid-template-columns: minmax(0, 1fr); }
+.reverb-desktop-response { display: none; }
 .reverb-character {
   background: #1b2a22;
   border: 1px solid #83937880;
@@ -316,19 +311,20 @@
   scrollbar-color: #6b805e #223629;
 }
 .reverb-detail-controls {
-  min-height: 95px;
+  min-height: clamp(95px, 13cqb, 280px);
+  align-items: center;
 }
 .reverb-context-body .suite-knob {
-  --reverb-knob-size: 48px;
+  --reverb-knob-size: clamp(44px, 4.6cqi, 100px);
 }
 .reverb-context-body .suite-parameter>span:first-child {
   font-size: 10px;
   letter-spacing: .3px;
 }
 .reverb-context-body .suite-value {
-  font-size: 14px;
-  min-height: 24px;
-  width: 59px;
+  font-size: clamp(14px, 1.5cqi, 27px);
+  min-height: 28px;
+  width: clamp(59px, 6cqi, 108px);
 }
 .reverb-detail-controls>label {
   min-width: 110px;
@@ -371,7 +367,7 @@
 }
 .reverb-levels .suite-parameter {
   display: grid;
-  grid-template-columns: 46px 48px;
+  grid-template-columns: var(--reverb-level-label-width,46px) 48px;
   gap: 3px 7px;
 }
 .reverb-levels .suite-parameter>span:first-child {
@@ -394,13 +390,20 @@
 }
 .reverb-levels .suite-value {
   font-size: 14px;
-  width: 32px;
+  width: var(--reverb-level-value-width,32px);
   padding: 0;
   text-align: left;
   min-height: 22px;
 }
-.reverb-levels[aria-disabled=true] {
+.reverb-balance[aria-disabled=true] {
   opacity: .6;
+}
+.reverb-levels [data-param=outputTrimDb] {
+  --reverb-level-label-width: 72px;
+  --reverb-level-value-width: 52px;
+}
+.reverb-levels [data-param=outputTrimDb]>span:last-child {
+  gap: 2px;
 }
 .reverb-spill>span {
   display: block;
@@ -497,8 +500,9 @@
   }
   .reverb-output {
     gap: 10px;
+    flex-wrap: wrap;
   }
-  .reverb-levels {
+  .reverb-levels,.reverb-balance {
     gap: 12px;
   }
   .reverb-output .suite-button {
@@ -507,7 +511,7 @@
   }
 }
 @container reverb (max-width:760px) {
-  .reverb-bank,.reverb-machine-title,.reverb-spill,.reverb-output-label,.reverb-tick-caption {
+  .reverb-bank,.reverb-machine-title,.reverb-output-label,.reverb-tick-caption {
     display: none;
   }
   .reverb-console {
@@ -610,11 +614,11 @@
     min-height: 32px;
     padding: 5px 8px;
   }
-  .reverb-levels {
+  .reverb-levels,.reverb-balance {
     gap: 18px;
   }
   .reverb-levels .suite-parameter {
-    grid-template-columns: 35px 43px;
+    grid-template-columns: var(--reverb-level-label-width,35px) 43px;
     gap: 3px 6px;
   }
   .reverb-levels .suite-knob {
@@ -622,7 +626,7 @@
   }
   .reverb-levels .suite-value {
     font-size: 13px;
-    width: 28px;
+    width: var(--reverb-level-value-width,28px);
     min-height: 20px;
   }
   .reverb-telemetry {
@@ -643,4 +647,29 @@
   .reverb-ir-identity p {
     max-width: 140px;
   }
+}
+
+@container reverb (min-width:1600px) and (min-height:900px) {
+  .reverb-workbench:has(.reverb-desktop-response) { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
+  .reverb-desktop-response { display: flex; }
+  .reverb-detail-controls { justify-content: space-evenly; gap: 30px; }
+  .reverb-machine { font-size: 18px; min-height: 48px; }
+  .reverb-detail-tabs button { font-size: 16px; }
+  .reverb-face .suite-parameter>span:first-child { font-size: 18px; }
+  .reverb-context-body .suite-parameter>span:first-child { font-size: 16px; }
+  .reverb-telemetry { font-size: 14px; min-height: 40px; }
+}
+@container reverb (max-height:560px) {
+  .reverb-machine-heading { min-height: 36px; padding-bottom: 7px; }
+  .reverb-primary { min-height: 122px; padding-block: 8px; }
+  .reverb-decay .suite-knob { --reverb-knob-size: 58px; }
+  .reverb-face .suite-parameter { gap: 3px; }
+  .reverb-tick-caption, .reverb-overline, .reverb-hold>span { display: none; }
+  .reverb-output { order: -1; padding-block: 7px; min-height: 58px; }
+  .reverb-machine-heading { order: -3; }
+  .reverb-primary { order: -2; }
+  .reverb-spill>span { display: none; }
+  .reverb-telemetry { display: none; }
+  .reverb-workbench { min-height: 100px; }
+  .reverb-console { overflow-y: auto; }
 }

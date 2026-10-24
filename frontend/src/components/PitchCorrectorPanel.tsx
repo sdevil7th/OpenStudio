@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { nativeBridge, PitchCorrectorData, PitchHistoryFrame } from "../services/NativeBridge";
-import { FACTORY_PRESETS, PRESET_CATEGORIES, PitchCorrectorPreset } from "./pitchCorrectorPresets";
+import { nativeBridge, type BuiltInPluginAddress, type PitchCorrectorData, type PitchHistoryFrame } from "../services/NativeBridge";
+import { FACTORY_PRESETS, PRESET_CATEGORIES, parsePitchCorrectorPreset, type PitchCorrectorPreset } from "./pitchCorrectorPresets";
+import { applyPitchCorrectorPreset, capturePitchCorrectorPreset, savePitchCorrectorPreset } from "../services/pitchCorrectorPresets";
+import { getProjectEpoch } from "../utils/projectLifetime";
 import { ProfiledRangeInput } from "./ui";
 
 // Scale names matching C++ PitchMapper::Scale enum
@@ -88,6 +90,24 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
   const [abSlot, setAbSlot] = useState<"A" | "B">("A");
   const [slotA, setSlotA] = useState<PitchCorrectorPreset["params"] | null>(null);
   const [slotB, setSlotB] = useState<PitchCorrectorPreset["params"] | null>(null);
+  const [presetBusy, setPresetBusy] = useState(false);
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const presetOperationRef = useRef(false);
+  const targetGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const presetAddressRef = useRef<BuiltInPluginAddress | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    ++targetGenerationRef.current;
+    presetAddressRef.current = null;
+    setSlotA(null);
+    setSlotB(null);
+    setAbSlot("A");
+    setActivePreset(null);
+    setPresetError(null);
+    return () => { mountedRef.current = false; ++targetGenerationRef.current; };
+  }, [trackId, fxIndex]);
 
   // Responsive canvas size
   const [canvasWidth, setCanvasWidth] = useState(500);
@@ -279,88 +299,91 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
     nativeBridge.setPitchCorrectorParam(trackId, fxIndex, param, value);
   }, [trackId, fxIndex]);
 
-  // Capture current params as a snapshot
-  const captureCurrentParams = useCallback((): PitchCorrectorPreset["params"] | null => {
-    if (!data) return null;
-    return {
-      key: data.key, scale: data.scale, retuneSpeed: data.retuneSpeed,
-      correctionStrength: data.correctionStrength, humanize: data.humanize,
-      formantCorrection: data.formantCorrection, formantShift: data.formantShift,
-      mix: data.mix, transpose: data.transpose, noteEnables: [...data.noteEnables],
+  // Serialize recalls and ignore a dialog/readback that outlives its target/project.
+  const runPresetAction = useCallback(async (action: (assertCurrent: () => void) => Promise<void>) => {
+    if (presetOperationRef.current) return;
+    presetOperationRef.current = true;
+    setPresetBusy(true);
+    setPresetError(null);
+    const generation = targetGenerationRef.current;
+    const epoch = getProjectEpoch();
+    const assertCurrent = () => {
+      if (generation !== targetGenerationRef.current || epoch !== getProjectEpoch())
+        throw new Error("The Pitch Correct target changed. Reopen it from the current FX chain.");
     };
-  }, [data]);
-
-  // Apply a preset's params to the backend
-  const applyPresetParams = useCallback((params: PitchCorrectorPreset["params"]) => {
-    if (params.key !== undefined) setParam("key", params.key);
-    if (params.scale !== undefined) setParam("scale", params.scale);
-    setParam("retuneSpeed", params.retuneSpeed);
-    setParam("correctionStrength", params.correctionStrength);
-    setParam("humanize", params.humanize);
-    setParam("formantCorrection", params.formantCorrection ? 1 : 0);
-    setParam("formantShift", params.formantShift);
-    setParam("mix", params.mix);
-    if (params.transpose !== undefined) setParam("transpose", params.transpose);
-    if (params.noteEnables) {
-      for (let i = 0; i < 12; i++) {
-        setParam(`noteEnable_${i}`, params.noteEnables[i] ? 1 : 0);
-      }
+    try { await action(assertCurrent); }
+    catch (error) {
+      if (generation === targetGenerationRef.current)
+        setPresetError(error instanceof Error ? error.message : "The preset operation failed.");
+    } finally {
+      presetOperationRef.current = false;
+      if (mountedRef.current) setPresetBusy(false);
     }
-  }, [setParam]);
+  }, []);
 
-  const loadPreset = useCallback((preset: PitchCorrectorPreset) => {
-    const current = captureCurrentParams();
-    if (abSlot === "A") setSlotA(current);
-    else setSlotB(current);
+  const captureCurrentParams = useCallback(async () => {
+    const generation = targetGenerationRef.current;
+    const snapshot = await capturePitchCorrectorPreset(presetAddressRef.current ?? {
+      trackId, chain: "track", fxIndex,
+    });
+    if (generation === targetGenerationRef.current) presetAddressRef.current = snapshot.address;
+    return snapshot;
+  }, [trackId, fxIndex]);
 
-    applyPresetParams(preset.params);
+  const loadPreset = useCallback((preset: PitchCorrectorPreset) => runPresetAction(async assertCurrent => {
+    const current = await captureCurrentParams();
+    assertCurrent();
+    // Factory templates change voicing while retaining the user's key/mask mode.
+    await applyPitchCorrectorPreset(current.address, { signalPath: current.params.signalPath, ...preset.params });
+    assertCurrent();
+    if (abSlot === "A") setSlotA(current.params);
+    else setSlotB(current.params);
     setActivePreset(preset.name);
     setShowPresetMenu(false);
-  }, [captureCurrentParams, abSlot, applyPresetParams]);
+  }), [runPresetAction, captureCurrentParams, abSlot]);
 
-  // A/B toggle
-  const toggleAB = useCallback(() => {
-    const current = captureCurrentParams();
-    if (abSlot === "A") {
-      setSlotA(current);
-      if (slotB) applyPresetParams(slotB);
-      setAbSlot("B");
-    } else {
-      setSlotB(current);
-      if (slotA) applyPresetParams(slotA);
-      setAbSlot("A");
-    }
-  }, [captureCurrentParams, abSlot, slotA, slotB, applyPresetParams]);
+  const toggleAB = useCallback(() => runPresetAction(async assertCurrent => {
+    const current = await captureCurrentParams();
+    assertCurrent();
+    const target = abSlot === "A" ? slotB : slotA;
+    if (target) await applyPitchCorrectorPreset(current.address, target);
+    assertCurrent();
+    if (abSlot === "A") setSlotA(current.params);
+    else setSlotB(current.params);
+    setAbSlot(abSlot === "A" ? "B" : "A");
+    setActivePreset(null);
+  }), [runPresetAction, captureCurrentParams, abSlot, slotA, slotB]);
 
-  // Save user preset
-  const saveUserPreset = useCallback(async () => {
-    const params = captureCurrentParams();
-    if (!params) return;
+  const saveUserPreset = useCallback(() => runPresetAction(async assertCurrent => {
+    const current = await captureCurrentParams();
+    assertCurrent();
     const path = await nativeBridge.showSaveDialog("preset.ospreset", "Save Preset", "*.ospreset");
+    assertCurrent();
     if (!path) return;
-    const preset: PitchCorrectorPreset = {
-      name: path.split(/[/\\]/).pop()?.replace(/\.ospreset$/i, "") || "User Preset",
-      category: "User",
-      params,
-    };
-    await nativeBridge.saveProjectToFile(path, JSON.stringify(preset, null, 2));
-  }, [captureCurrentParams]);
+    await savePitchCorrectorPreset(path, current.params);
+    assertCurrent();
+    setShowPresetMenu(false);
+  }), [runPresetAction, captureCurrentParams]);
 
-  // Load user preset
-  const loadUserPreset = useCallback(async () => {
+  const loadUserPreset = useCallback(() => runPresetAction(async assertCurrent => {
+    const origin = await captureCurrentParams();
+    assertCurrent();
     const path = await nativeBridge.showOpenDialog("Load Preset", "*.ospreset");
+    assertCurrent();
     if (!path) return;
     const json = await nativeBridge.loadProjectFromFile(path);
-    if (!json) return;
-    try {
-      const preset = JSON.parse(json) as PitchCorrectorPreset;
-      if (preset.params) {
-        applyPresetParams(preset.params);
-        setActivePreset(preset.name);
-      }
-    } catch { /* invalid preset file */ }
+    assertCurrent();
+    if (!json) throw new Error("The Pitch Correct preset could not be read.");
+    const preset = parsePitchCorrectorPreset(JSON.parse(json));
+    const current = await capturePitchCorrectorPreset(origin.address);
+    assertCurrent();
+    await applyPitchCorrectorPreset(current.address, preset.params);
+    assertCurrent();
+    if (abSlot === "A") setSlotA(current.params);
+    else setSlotB(current.params);
+    setActivePreset(preset.name);
     setShowPresetMenu(false);
-  }, [applyPresetParams]);
+  }), [runPresetAction, captureCurrentParams, abSlot]);
 
   const key = data?.key ?? 0;
   const scale = data?.scale ?? 0;
@@ -374,15 +397,15 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
   const midiOutput = data?.midiOutput ?? false;
   const midiChannel = data?.midiChannel ?? 1;
   const noteEnables = data?.noteEnables ?? Array(12).fill(true);
+  const correctedMask = (data?.signalPath ?? 0) >= .5;
 
   // Auto-populate note enables when scale changes
   const handleScaleChange = (newScale: number) => {
     setParam("scale", newScale);
-    if (newScale < SCALE_INTERVALS.length && newScale !== 15) { // 15 = Custom
+    if (!correctedMask && newScale < SCALE_INTERVALS.length && newScale !== 15) { // 15 = Custom
       const intervals = SCALE_INTERVALS[newScale];
       for (let i = 0; i < 12; i++) {
-        const noteIdx = (i + key) % 12;
-        setParam(`noteEnable_${noteIdx}`, intervals[i] ? 1 : 0);
+        setParam(`noteEnable_${i}`, intervals[i] ? 1 : 0);
       }
     }
   };
@@ -405,6 +428,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
             <button
               className="px-2 py-0.5 text-[9px] bg-neutral-700 text-neutral-300 rounded hover:bg-neutral-600 max-w-24 truncate"
               onClick={() => setShowPresetMenu(!showPresetMenu)}
+              disabled={presetBusy}
               title={activePreset ? `Current preset: ${activePreset}` : "Browse and load presets"}
             >
               {activePreset || "Presets"}
@@ -416,11 +440,13 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
                   <button
                     className="flex-1 text-[9px] text-neutral-400 hover:text-white bg-neutral-700 rounded px-1 py-0.5"
                     onClick={saveUserPreset}
+                    disabled={presetBusy}
                     title="Save current settings as an .ospreset file"
                   >Save...</button>
                   <button
                     className="flex-1 text-[9px] text-neutral-400 hover:text-white bg-neutral-700 rounded px-1 py-0.5"
                     onClick={loadUserPreset}
+                    disabled={presetBusy}
                     title="Load an .ospreset  file from disk"
                   >Load...</button>
                 </div>
@@ -435,6 +461,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
                           activePreset === p.name ? "text-blue-400" : "text-neutral-300"
                         }`}
                         onClick={() => loadPreset(p)}
+                        disabled={presetBusy}
                         title={`${p.name} — Speed: ${p.params.retuneSpeed}ms, Strength: ${Math.round(p.params.correctionStrength * 100)}%`}
                       >
                         {p.name}
@@ -454,6 +481,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
                 : "bg-orange-600/20 text-orange-400 border-orange-500/50"
             }`}
             onClick={toggleAB}
+            disabled={presetBusy}
             title={`A/B comparison — currently on slot ${abSlot}. Click to switch.`}
           >
             {abSlot}
@@ -497,6 +525,8 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
           )}
         </div>
       </div>
+
+      {presetError && <p role="alert" className="px-3 py-2 text-xs text-daw-record">{presetError}</p>}
 
       {/* Pitch Display Canvas */}
       <div className="px-2 pt-2">
@@ -551,12 +581,12 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
         </div>
       </div>
 
-      {/* Note Enable Buttons */}
-      <div className="px-3 pt-2">
+      {/* Corrected named scales ignore this mask; Legacy restrictions remain visible. */}
+      {(!correctedMask || scale === 15) && <div className="px-3 pt-2">
         <label className="text-[9px] text-neutral-500 block mb-1 uppercase tracking-wider">Note Enables</label>
         <div className="flex gap-0.5">
           {NOTE_NAMES.map((name, i) => {
-            const noteIdx = (i + key) % 12;
+            const noteIdx = correctedMask ? i : (i - key + 12) % 12;
             const isEnabled = noteEnables[noteIdx];
             const isBlack = name.includes("#");
             return (
@@ -577,7 +607,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
             );
           })}
         </div>
-      </div>
+      </div>}
 
       {/* Knobs Row */}
       <div className="px-3 pt-3 pb-2 flex justify-between flex-wrap gap-2">
@@ -672,6 +702,7 @@ export function PitchCorrectorPanel({ trackId, fxIndex, onClose, onOpenGraphical
       <div className="px-3 py-1.5 border-t border-neutral-800 flex justify-between text-[8px] text-neutral-600 flex-wrap gap-1">
         <span>Detected: {data?.detectedPitch ? `${data.detectedPitch.toFixed(1)} Hz` : "--"}</span>
         <span>Corrected: {data?.correctedPitch ? `${data.correctedPitch.toFixed(1)} Hz` : "--"}</span>
+        <span title="Presets and A/B retain this processing mode">{correctedMask ? "Corrected" : "Legacy"}</span>
         <span>Latency: ~46ms</span>
       </div>
     </div>

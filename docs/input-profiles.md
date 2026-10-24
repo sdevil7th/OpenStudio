@@ -30,6 +30,16 @@ base profiles.
 
 ## Binding vocabulary
 
+The October 12, 2026 development checkout uses these **OpenStudio** defaults:
+`R` toggles Record, with Primary+R and physical numpad `*` as aliases. `1` or
+Home seeks to absolute project time zero and scrolls the timeline to its start.
+`+`/`=` and numpad Add zoom the timeline in; `-` and numpad Subtract zoom out.
+Primary+`+`/`-` remain aliases. Track Arm and Piano Roll Select Range use
+Primary+Shift+R in their separate scopes; Pitch Editor Select uses `V`.
+Other built-in profiles retain their documented bindings, and custom overrides
+continue to take priority. The shortcut window and control tooltips show the
+effective bindings for the active profile and platform.
+
 The Cubase profile maps **F6** to the track envelope panel, **Alt+R** to uniform all-track Read and **Alt+W** to uniform all-track Write (**Option** on macOS). Write enables Read; switching Write off leaves Read on, including on empty tracks. Master R/W is controlled separately. These bindings describe the development checkout and remain subject to custom overrides and editor focus.
 
 - **Primary** is Control on Windows/Linux and Command on macOS.
@@ -110,6 +120,29 @@ The action list is the authoritative view of the selected profile. Use
 shortcut examples in the manual show the OpenStudio default profile only.
 
 ## Mouse and wheel safety
+
+With the default Seek ruler mapping, a plain horizontal drag sets the
+project/loop range; it leaves the separate editing time selection unchanged.
+A vertical drag zooms time around the original pointer position: upwards zooms
+out and downwards zooms in. After the movement threshold, the gesture keeps its
+first chosen axis. A click seeks, and range handles resize their endpoints.
+This is horizontal timeline zoom, not track height.
+
+Explicit profile/custom ruler actions take priority: **Select time** sets or
+extends the edit selection, **Set loop** changes the project/loop range, and
+**Zoom to** fits a horizontal range. These actions do not become vertical zoom;
+an explicitly disabled mapping remains inert. The OpenStudio modifiers are
+Primary for loop range, Shift for time selection and Alt/Option for zoom range;
+inspect the active profile and custom overrides for the effective gestures.
+
+In the Piano Roll, Primary+note-body drag changes time while holding each
+note's exact pitch (and bypasses grid snapping); Shift+drag changes pitch while
+holding each note's exact time. Shift-click still toggles note selection.
+Primary+clip drag copies the full selected clip group, and Primary+track-header
+drag copies the selected whole tracks. Both show half-transparent previews and
+commit one Undo step. When a clip group needs new compatible destination tracks,
+the appended span preserves source row ordering and gaps; preview and committed
+placement agree.
 
 Vendor mouse profiles enable only gestures that have a documented OpenStudio
 equivalent and a valid hit target. Unsupported parameter-wheel gestures are

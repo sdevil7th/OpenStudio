@@ -3,6 +3,7 @@
 #include "UpdateManifest.h"
 #include <juce_cryptography/juce_cryptography.h>
 #include <filesystem>
+#include <cerrno>
 #include <vector>
 #include <stdexcept>
 #if defined(OPENSTUDIO_INSTALLER_TEST_FIXTURES)
@@ -244,6 +245,23 @@ bool validTransaction(const juce::File& transaction)
 }
 }
 
+bool ensurePrivateDirectory(const juce::File& directory)
+{
+    if (directory == juce::File()) return false;
+    struct stat info {};
+    if (::lstat(directory.getFullPathName().toRawUTF8(), &info) == 0)
+        return safePath(directory, true);
+    if (errno != ENOENT) return false;
+
+    const auto parent = directory.getParentDirectory();
+    if (parent == directory || !ensurePrivateDirectory(parent)) return false;
+    // A private mode does not acquire group/other permissions under a permissive
+    // umask. Do not chmod an existing path, including an EEXIST race winner.
+    if (::mkdir(directory.getFullPathName().toRawUTF8(), 0700) != 0 && errno != EEXIST)
+        return false;
+    return safePath(directory, true);
+}
+
 juce::File installedApplication()
 {
    #if JUCE_MAC
@@ -286,7 +304,7 @@ bool prepare(const juce::File& package, const juce::var& envelope,
         return false;
     }
     const auto root = stateRoot.getChildFile("install-transactions");
-    if (!root.createDirectory() || !safePath(root, true)) { error = "The updater state folder is not secure or writable."; return false; }
+    if (!ensurePrivateDirectory(root)) { error = "The updater state folder is not secure or writable."; return false; }
     transaction = root.getChildFile(juce::Uuid().toString());
     if (::mkdir(transaction.getFullPathName().toRawUTF8(), 0700) != 0) { error = "Cannot create an update transaction."; return false; }
     auto request = juce::var(new juce::DynamicObject());
@@ -398,7 +416,7 @@ static int runTransaction(const juce::File& transaction, const juce::String& tru
     const auto image = workspace.getChildFile("update.dmg");
     if (!package.copyFileTo(image) || juce::SHA256(image).toHexString() != platform["sha256"].toString()) return fail("Could not securely copy the update disk image.");
     const auto mount = workspace.getChildFile("mount");
-    if (!mount.createDirectory()) return fail("Could not create the disk image mount point.");
+    if (!ensurePrivateDirectory(mount)) return fail("Could not create the disk image mount point.");
     juce::String output;
     if (!command({ "/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", mount.getFullPathName(), image.getFullPathName() }, output))
         return fail("Could not mount the verified update disk image: " + output);
@@ -506,7 +524,7 @@ int runHelper(const juce::File& transaction)
 int selfTest(const juce::File& directory)
 {
     const auto root = directory.getChildFile(juce::Uuid().toString());
-    if (!root.createDirectory()) return 2;
+    if (!ensurePrivateDirectory(root)) return 2;
     const auto a = root.getChildFile("old app"), b = root.getChildFile("new app");
     if (!a.replaceWithText("old") || !b.replaceWithText("new")) return 2;
     const auto oldHash = fingerprint(a), newHash = fingerprint(b);
@@ -518,6 +536,49 @@ int selfTest(const juce::File& directory)
         value.getDynamicObject()->setProperty("pass", result);
         checks.add(value); pass = pass && result;
     };
+    auto modeOf = [](const juce::File& path) -> mode_t {
+        struct stat info {};
+        return ::lstat(path.getFullPathName().toRawUTF8(), &info) == 0
+            ? static_cast<mode_t>(info.st_mode & 0777) : static_cast<mode_t>(0);
+    };
+    struct ScopedTestUmask
+    {
+        explicit ScopedTestUmask(mode_t value) : previous(::umask(value)) {}
+        ~ScopedTestUmask() { ::umask(previous); }
+        mode_t previous;
+    };
+    for (const auto mask : { static_cast<mode_t>(0000), static_cast<mode_t>(0002),
+                             static_cast<mode_t>(0022), static_cast<mode_t>(0077) })
+    {
+        const ScopedTestUmask scopedMask(mask);
+        const auto parent = root.getChildFile("private-" + juce::String(static_cast<int>(mask)));
+        const auto child = parent.getChildFile("nested");
+        check(("private_directories_ignore_umask_" + juce::String(static_cast<int>(mask))).toRawUTF8(),
+              ensurePrivateDirectory(child) && modeOf(parent) == 0700 && modeOf(child) == 0700);
+    }
+    const auto existing = root.getChildFile("existing-secure");
+    const bool existingCreated = ensurePrivateDirectory(existing)
+        && ::chmod(existing.getFullPathName().toRawUTF8(), 0750) == 0;
+    check("existing_secure_directory_mode_preserved", existingCreated
+        && ensurePrivateDirectory(existing) && modeOf(existing) == 0750);
+    const auto insecure = root.getChildFile("existing-insecure");
+    const bool insecureCreated = ensurePrivateDirectory(insecure)
+        && ::chmod(insecure.getFullPathName().toRawUTF8(), 0775) == 0;
+    check("existing_insecure_directory_rejected_without_chmod", insecureCreated
+        && !ensurePrivateDirectory(insecure) && modeOf(insecure) == 0775);
+    check("insecure_ancestor_rejected_before_child_creation", insecureCreated
+        && !ensurePrivateDirectory(insecure.getChildFile("child"))
+        && !insecure.getChildFile("child").exists() && modeOf(insecure) == 0775);
+    const auto directoryLink = root.getChildFile("directory-link");
+    const bool linkCreated = ::symlink(existing.getFullPathName().toRawUTF8(),
+                                      directoryLink.getFullPathName().toRawUTF8()) == 0;
+    check("existing_directory_symlink_rejected", linkCreated
+        && !ensurePrivateDirectory(directoryLink) && modeOf(existing) == 0750);
+    check("symlink_ancestor_rejected_before_child_creation", linkCreated
+        && !ensurePrivateDirectory(directoryLink.getChildFile("child"))
+        && !existing.getChildFile("child").exists() && modeOf(existing) == 0750);
+    check("regular_file_cannot_be_private_directory", !ensurePrivateDirectory(a)
+        && a.loadFileAsString() == "old");
     check("atomic_file_replacement_retains_old_bytes", oldHash.isNotEmpty() && oldHash != newHash && swapVerified(a, b, oldHash, newHash)
         && fingerprint(a) == newHash && fingerprint(b) == oldHash);
     check("rollback_restores_exact_original", swapVerified(a, b, newHash, oldHash) && fingerprint(a) == oldHash);
@@ -546,25 +607,31 @@ int selfTest(const juce::File& directory)
     check("journal_markers_cannot_be_overwritten", writeMarker(root, "once", "one") && !writeMarker(root, "once", "two"));
     check("failed_exchange_preserves_target", !exchange(a, root.getChildFile("missing")) && a.loadFileAsString() == "old");
     const auto oldBundle = root.getChildFile("Old.app"), newBundle = root.getChildFile("New.app");
-    oldBundle.getChildFile("Contents").createDirectory(); newBundle.getChildFile("Contents").createDirectory();
+    const bool bundlesCreated = ensurePrivateDirectory(oldBundle.getChildFile("Contents"))
+        && ensurePrivateDirectory(newBundle.getChildFile("Contents"));
     oldBundle.getChildFile("Contents/file").replaceWithText("old bundle");
     newBundle.getChildFile("Contents/file").replaceWithText("new bundle");
     const auto oldBundleHash = fingerprint(oldBundle, true), newBundleHash = fingerprint(newBundle, true);
-    check("atomic_bundle_swap_and_rollback", swapVerified(oldBundle, newBundle, oldBundleHash, newBundleHash)
+    check("atomic_bundle_swap_and_rollback", bundlesCreated && swapVerified(oldBundle, newBundle, oldBundleHash, newBundleHash)
         && oldBundle.getChildFile("Contents/file").loadFileAsString() == "new bundle"
         && swapVerified(oldBundle, newBundle, newBundleHash, oldBundleHash)
         && oldBundle.getChildFile("Contents/file").loadFileAsString() == "old bundle");
     const auto escapingLink = oldBundle.getChildFile("escape");
     check("bundle_link_escape_rejected", ::symlink(a.getFullPathName().toRawUTF8(), escapingLink.getFullPathName().toRawUTF8()) == 0
         && fingerprint(oldBundle).isEmpty());
-    const auto tx = root.getChildFile(juce::Uuid().toString()); tx.createDirectory();
+    const auto tx = root.getChildFile(juce::Uuid().toString());
+    const bool txCreated = ensurePrivateDirectory(tx);
     cancel(tx); commit(tx);
-    check("cancelled_transaction_cannot_commit", exists(tx, "cancel") && !exists(tx, "commit"));
-    const auto unprepared = root.getChildFile(juce::Uuid().toString()); unprepared.createDirectory(); commit(unprepared);
-    check("unprepared_transaction_cannot_commit", !exists(unprepared, "commit"));
-    const auto prepared = root.getChildFile(juce::Uuid().toString()); prepared.createDirectory();
+    check("cancelled_transaction_cannot_commit", txCreated && exists(tx, "cancel") && !exists(tx, "commit"));
+    const auto unprepared = root.getChildFile(juce::Uuid().toString());
+    const bool unpreparedCreated = ensurePrivateDirectory(unprepared);
+    commit(unprepared);
+    check("unprepared_transaction_cannot_commit", unpreparedCreated && !exists(unprepared, "commit"));
+    const auto prepared = root.getChildFile(juce::Uuid().toString());
+    const bool preparedCreated = ensurePrivateDirectory(prepared);
     writeMarker(prepared, "ready", "ready"); commit(prepared);
-    check("prepared_transaction_requires_explicit_commit", prepared.getChildFile("commit").loadFileAsString() == "normal shutdown");
+    check("prepared_transaction_requires_explicit_commit", preparedCreated
+        && prepared.getChildFile("commit").loadFileAsString() == "normal shutdown");
 #if defined(OPENSTUDIO_INSTALLER_TEST_FIXTURES)
     runIntegrationFixtures(root, check);
 #endif
@@ -574,6 +641,7 @@ int selfTest(const juce::File& directory)
     return pass ? 0 : 2;
 }
 #else
+bool ensurePrivateDirectory(const juce::File& directory) { return directory.createDirectory().wasOk(); }
 juce::File installedApplication() { return {}; }
 bool prepare(const juce::File&, const juce::var&, const juce::File&, juce::File&, juce::String&, std::function<bool()>) { return false; }
 void cancel(const juce::File&) {}

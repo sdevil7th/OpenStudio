@@ -25,19 +25,20 @@ export function GateEditor(props: ApprovedEffectEditorProps) {
       </div>
       <div className="gate-meter-row flex shrink-0 gap-4"><LiveDynamicsHistory detector threshold={value("threshold")} /></div>
       <div className="core-main-controls gate-main flex shrink-0 items-center justify-around p-[8px_12px] gap-[18px]" aria-label="Gate primary controls">
-        {control("threshold", true, "Open threshold")}{control("hysteresis", false, "Hysteresis")}
-        <div className="gate-timing flex items-center">{control("attackMs", false, "Attack")}{control("holdMs", false, "Hold")}{control("releaseMs", false, "Release")}</div>
+        {control("threshold", true, expansion ? "Threshold" : "Open threshold")}{control("hysteresis", false, "Hysteresis", expansion)}
+        <div className="gate-timing flex items-center">{control("attackMs", false, "Attack")}{control("holdMs", false, "Hold", expansion)}{control("releaseMs", false, "Release")}</div>
         {control("range", true, "Max reduction")}
       </div>
+      {expansion && <p className="text-xs text-daw-text-muted" role="status">Expander uses a continuous gain curve. Hysteresis and Hold are retained for Gate mode.</p>}
       <div className="gate-detail-panels flex shrink-0 gap-3">
-        <section className="core-detail min-w-0 flex-1" aria-label="Gate detector">
-          <h3 className="core-panel-label px-4 pt-3 text-[10px] tracking-[1.5px]">DETECTOR <small>Hear the trigger signal</small></h3>
+        <details className="core-detail min-w-0 flex-1" aria-label="Gate detector">
+          <summary className="cursor-pointer px-4 py-3 text-xs">Detector &amp; sidechain <small className="ml-2 text-daw-text-muted">Key source, filters and listen</small></summary>
           <div className="core-detail-content flex flex-wrap items-center justify-around p-[14px_18px] gap-[20px]">{control("externalDetector", false, "Key source")}{control("sidechainHPF", false, "Low cut")}{control("sidechainLPF", false, "High cut")}{control("detectorListen", false, "Listen")}</div>
           {!expansion && p("transientResponse") && <div className="flex flex-wrap items-center gap-3 border-t border-daw-border-light p-3">{control("transientResponse", false, "Onset response")}<p className="core-detail-note min-w-0 flex-1 text-[12px] leading-[1.6]">{value("transientResponse") >= .5 ? "Peak and Auto detect short onsets immediately; Attack still controls opening. RMS retains its integration window." : "Legacy detector timing preserves saved projects and can soften or miss short bursts."}</p></div>}
-        </section>
-        <section className="core-detail gate-behavior min-w-0" aria-label="Gate behavior"><h3 className="core-panel-label px-4 pt-3 text-[10px] tracking-[1.5px]">BEHAVIOR</h3>
+        </details>
+        <details className="core-detail gate-behavior min-w-0" aria-label="Gate behavior"><summary className="cursor-pointer px-4 py-3 text-xs">Behavior &amp; mix</summary>
           <div className="core-detail-content flex flex-wrap items-center justify-around p-[14px_18px] gap-[20px]">{expansion && <>{control("expansionRatio", false, "Ratio")}{control("expansionKnee", false, "Knee")}</>}{control("mix", false, "Mix")}{control("rateIndependentDetector", false, "Rate-correct timing")}</div>
-        </section>
+        </details>
       </div>
     </div>
   </div></EffectMeterProvider>;

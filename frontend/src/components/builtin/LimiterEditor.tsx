@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useEditorOverview } from "./useEditorOverview";
+import { usePluginFeatureReveal } from "../../utils/pluginFeatureNavigation";
 import { findBuiltInParameter } from "../../utils/builtInExpandedSelectors";
 import { EQToolbar } from "./EQToolbar";
 import { changedEffectSettings, detailDescription, EffectDetailIndicator } from "./EffectDetailIndicator";
@@ -19,8 +21,13 @@ function LimiterLatency() {
 export function LimiterEditor(props: ApprovedEffectEditorProps) {
   const p = (id: string) => findBuiltInParameter(props.schema, id);
   const value = (id: string) => p(id)?.value ?? 0;
-  const style = value("limitingStyle"), edge = style === 6;
-  const [detail, setDetail] = useState("Timing & linking");
+  const style = value("limitingStyle"), edge = style === 6, classic = style === 0;
+  const [detail, setDetail] = useState<string | null>(null);
+  const editor = useRef<HTMLDivElement>(null);
+  const overview = useEditorOverview(editor);
+  usePluginFeatureReveal(editor, "limiter", ({ parameterId: id }) => {
+    if (id) setDetail(["unityAudition", "linkedEdits"].includes(id) ? "Monitoring" : ["oversampleQuality", "truePeak"].includes(id) ? "Quality" : "Timing & linking");
+  });
   const detailState: Record<string, string> = {
     "Timing & linking": changedEffectSettings(props.schema, ["lookaheadMs", "releaseMs", "transientLink", ...(!edge ? ["slowAttackMs", "automaticRelease", "releaseLink"] : [])]),
     Monitoring: changedEffectSettings(props.schema, ["unityAudition", "linkedEdits"]),
@@ -35,17 +42,19 @@ export function LimiterEditor(props: ApprovedEffectEditorProps) {
     } else props.onChange(parameter, next);
   };
   const control = createEffectParameterRenderer({ ...props, onChange: change });
-  return <EffectMeterProvider {...props}><div className="approved-effect-editor core-effect-editor limiter-approved flex min-h-0 min-w-0 flex-1 flex-col" data-suite-kind="limiter">
+  const renderDetail = (detail: string) => <div className="core-detail-content flex flex-wrap items-center justify-around p-[14px_18px] gap-[20px]">
+          {detail === "Timing & linking" ? <>{control("lookaheadMs", false, "Lookahead")}{!edge && control("slowAttackMs", false, "Attack", classic)}{control("releaseMs", false, "Release")}{!edge && control("automaticRelease", false, "Auto release", classic)}{control("transientLink", false, "Transient link", classic)}{!edge && control("releaseLink", false, "Release link", classic)}{classic && <p className="core-detail-note text-xs leading-relaxed">Classic uses linked peak recovery. Attack, Auto release and separate linking settings are retained for other algorithms.</p>}{edge && <p className="core-detail-note text-[12px] leading-[1.6]">Edge uses minimal peak hold and fast recovery. Slow attack, automatic recovery and release linking do not apply.</p>}</>
+            : detail === "Monitoring" ? <>{control("unityAudition", false, "Unity gain audition")}{control("linkedEdits", false, "Link threshold / ceiling")}<p className="core-detail-note text-[12px] leading-[1.6]">Linked edits preserve the threshold-to-ceiling distance within both controls’ limits.</p></>
+            : <>{control("oversampleQuality", false, "Oversampling")}<LimiterLatency /><p className="core-detail-note text-[12px] leading-[1.6]">True-peak protection remains independent of the chosen response. Loudness readings support comparison; target delivery requirements depend on the destination.</p></>}
+        </div>;
+
+  return <EffectMeterProvider {...props}><div ref={editor} className="approved-effect-editor core-effect-editor limiter-approved flex min-h-0 min-w-0 flex-1 flex-col" data-suite-kind="limiter">
     <EQToolbar {...props} />
     <div className="core-effect-face flex min-h-0 flex-1 flex-col overflow-y-auto p-[18px_24px] gap-[15px]">
       <div className="core-effect-topline flex shrink-0 flex-wrap items-center justify-between gap-[16px]">{control("limitingStyle", false, "Algorithm")}<div className="flex items-center gap-4">{control("truePeak", false, "True peak")}{control("oversampleQuality", false, "Oversampling")}</div></div>
-      <div className="limiter-main flex shrink-0 gap-5"><div className="limiter-input core-main-controls flex shrink-0 flex-col items-center justify-around p-[8px_12px] gap-[18px]">{control("threshold", true, "Threshold")}{control("continuousGain", false, "Continuous gain")}{control("ceiling", true, "Ceiling")}</div><LimiterMetering address={props.address} /></div>
-      <section className="core-detail shrink-0" aria-label="Limiter detail"><div className="core-detail-tabs flex flex-wrap p-[0_8px] gap-[3px]" role="group" aria-label="Limiter detail pages">{["Timing & linking", "Monitoring", "Quality"].map(tab => <button key={tab} type="button" aria-label={tab} aria-description={detailState[tab] || undefined} title={detailDescription(tab, detailState[tab])} aria-pressed={detail === tab} onClick={() => setDetail(tab)}>{tab}<EffectDetailIndicator summary={detailState[tab]} /></button>)}</div>
-        <div className="core-detail-content flex flex-wrap items-center justify-around p-[14px_18px] gap-[20px]">
-          {detail === "Timing & linking" ? <>{control("lookaheadMs", false, "Lookahead")}{!edge && control("slowAttackMs", false, "Attack")}{control("releaseMs", false, "Release")}{!edge && control("automaticRelease", false, "Auto release")}{control("transientLink", false, "Transient link")}{!edge && control("releaseLink", false, "Release link")}{edge && <p className="core-detail-note text-[12px] leading-[1.6]">Edge uses minimal peak hold and fast recovery. Slow attack, automatic recovery and release linking do not apply.</p>}</>
-            : detail === "Monitoring" ? <>{control("unityAudition", false, "Unity gain audition")}{control("linkedEdits", false, "Link threshold / ceiling")}<p className="core-detail-note text-[12px] leading-[1.6]">Linked edits preserve the threshold-to-ceiling distance within both controls’ limits.</p></>
-            : <>{control("oversampleQuality", false, "Oversampling")}<LimiterLatency /><p className="core-detail-note text-[12px] leading-[1.6]">True-peak protection remains independent of the chosen response. Loudness readings support comparison; target delivery requirements depend on the destination.</p></>}
-        </div>
+      <div className="limiter-main flex shrink-0 gap-5"><div className="limiter-input flex shrink-0 flex-col justify-between gap-3 p-4"><div className="flex items-start justify-around gap-5">{control("threshold", true, "Threshold", false, "fader")}{control("ceiling", true, "Ceiling", false, "fader")}</div><div className="flex flex-wrap justify-center gap-2">{control("continuousGain", false, "Continuous gain")}{control("linkedEdits", false, "Link threshold / ceiling")}</div></div><LimiterMetering address={props.address} /></div>
+      <section className="core-detail shrink-0" data-overview={overview} aria-label="Limiter detail"><div className="core-detail-tabs flex flex-wrap p-[0_8px] gap-[3px]" role="group" aria-label="Limiter detail pages">{["Timing & linking", "Monitoring", "Quality"].map(tab => <button key={tab} type="button" aria-label={tab} aria-description={detailState[tab] || undefined} title={detailDescription(tab, detailState[tab])} aria-expanded={detail === tab} onClick={() => setDetail(detail === tab ? null : tab)}>{tab}<EffectDetailIndicator summary={detailState[tab]} /></button>)}</div>
+        {(overview ? ["Timing & linking", "Monitoring", "Quality"] : detail ? [detail] : []).map(page => <section key={page}>{overview && <h3 className="border-t border-daw-border-light px-5 pt-5 text-lg">{page}</h3>}{renderDetail(page)}</section>)}
       </section>
     </div>
   </div></EffectMeterProvider>;

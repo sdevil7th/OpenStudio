@@ -1,6 +1,8 @@
 #pragma once
 #include <JuceHeader.h>
+#include "BuiltInReverbReturnLevels.h"
 #include "BuiltInReverbSpillover.h"
+#include "BuiltInSettledReverbTap.h"
 #include <array>
 #include <vector>
 
@@ -15,7 +17,7 @@ public:
         float preDelay = 0, lowCut = 20, highCut = 20000, width = 1;
         float drive = 6, wow = .2f, flutter = .1f, rate = .3f, emphasis = .5f;
         float bassRatio = 1, bassFrequency = 500;
-        bool hold = false, holdInput = false;
+        bool hold = false, holdInput = false, refined = false;
     };
 private:
     struct Delay
@@ -49,6 +51,7 @@ private:
     {
         Delay delay;
         juce::SmoothedValue<float> length, loss, bassLoss;
+        BuiltInSettledReverbTap settledTap;
         float base = 0, dampingState = 0, bassState = 0, preState = 0, postState = 0;
         double phase = 0, flutterPhase = 0;
         float randomFrom = 0, randomTo = 0;
@@ -56,7 +59,7 @@ private:
         float random() noexcept { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return static_cast<float>(seed & 0xffffffu) / 8388607.5f - 1; }
         void reset(int index) noexcept
         {
-            delay.reset(); dampingState = bassState = preState = postState = 0;
+            delay.reset(); settledTap.reset(); dampingState = bassState = preState = postState = 0;
             phase = static_cast<double>(index) / 17; flutterPhase = static_cast<double>(index) / 23;
             seed = 15731u + static_cast<juce::uint32>(index) * 789221u; randomFrom = random(); randomTo = random();
         }
@@ -88,6 +91,7 @@ private:
                 auto& line = lines[static_cast<size_t>(i)];
                 line.base = times[static_cast<size_t>(i)] * (mode == 1 ? .31f : mode == 2 ? .63f : 1.0f);
                 line.delay.prepare(static_cast<int>(rate * (line.base * 1.5f + .01f)));
+                line.settledTap.prepare(rate);
                 for (auto* value : {&line.length, &line.loss, &line.bassLoss}) value->reset(rate, .1);
             }
             for (auto& line : predelay) line.prepare(static_cast<int>(rate * .501));
@@ -154,7 +158,16 @@ private:
                 line.flutterPhase += (3 + speed * 13) * (1 + static_cast<float>(i) * .037f) / rate;
                 if (line.phase >= 1) { line.phase -= 1; line.randomFrom = line.randomTo; line.randomTo = line.random(); }
                 if (line.flutterPhase >= 1) line.flutterPhase -= 1;
-                const float raw = line.delay.read(line.length.getNextValue() + motion * (1 - held));
+                const float length = line.length.getNextValue();
+                const float original = line.delay.read(length + motion * (1 - held));
+                float raw = original;
+                if (line.settledTap.needsProcessing(settings.refined))
+                {
+                    const bool stationary = settings.refined
+                        && (held == 1 || (slowDepth == 0 && fastDepth == 0)) && !line.length.isSmoothing();
+                    raw = line.settledTap.process(original, length, settings.refined, stationary,
+                        [&line](float tap) noexcept { return line.delay.read(tap); });
+                }
                 line.dampingState = raw + damp * (line.dampingState - raw);
                 const float filtered = raw * held + line.dampingState * (1 - held);
                 line.bassState = filtered + bass * (line.bassState - filtered);
@@ -236,15 +249,18 @@ public:
             spillWeights.configure(i, active, spillover, engines[i].drain > 0);
         }
     }
-    std::array<float, 3> process(float left, float right) noexcept
+    std::array<float, 3> process(float left, float right, float returnBlend = 0) noexcept
     {
         if (!prepared) return {};
         std::array<float, 3> output {};
         for (size_t i = 0; i < engines.size(); ++i)
         {
-            const auto wet = engines[i].process(left, right, weights[i].getTargetValue() > 0);
+            const bool active = weights[i].getTargetValue() > 0;
             const float weight = weights[i].getNextValue(), wetWeight = spillWeights.next(i);
-            output[0] += wet[0] * wetWeight; output[1] += wet[1] * wetWeight; output[2] += weight;
+            if (!active && wetWeight <= 0 && engines[i].drain > 0) engines[i].reset();
+            const auto wet = engines[i].process(left, right, active);
+            const float returnWeight = BuiltInReverbReturnLevels::weighted(wetWeight, 21 + static_cast<int>(i), returnBlend);
+            output[0] += wet[0] * returnWeight; output[1] += wet[1] * returnWeight; output[2] += weight;
         }
         return output;
     }
@@ -255,4 +271,9 @@ public:
         return seconds;
     }
     juce::uint64 processingFrames(size_t slot) const noexcept { return engines[slot].frames; }
+    bool isDormant() const noexcept
+    {
+        for (const auto& engine : engines) if (engine.drain > 0) return false;
+        return true;
+    }
 };

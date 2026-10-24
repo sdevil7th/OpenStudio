@@ -1,11 +1,16 @@
 import { editorButton, editorSelect } from "./PluginEditorControls";
 import { useEffect, useRef, useState } from "react";
 import { nativeBridge, type BuiltInPluginAddress, type BuiltInPluginSchema, type ReverbResponseResult } from "../../services/NativeBridge";
+import "./ReverbResponsePanel.css";
 
 const db = (value: number) => 20 * Math.log10(Math.max(1e-6, value));
 const level = (value?: number) => value === undefined ? "Unavailable" : value === 0 ? "Silent" : `${db(value).toFixed(1)} dBFS`;
 
-export function ReverbResponsePanel({ schema, address }: { schema: BuiltInPluginSchema; address: BuiltInPluginAddress }) {
+export function ReverbResponsePanel({ schema, address, onFlush }: {
+  schema: BuiltInPluginSchema;
+  address: BuiltInPluginAddress;
+  onFlush: () => Promise<boolean>;
+}) {
   const [seconds, setSeconds] = useState(5);
   const [input, setInput] = useState(2);
   const [result, setResult] = useState<ReverbResponseResult | null>(null);
@@ -13,6 +18,7 @@ export function ReverbResponsePanel({ schema, address }: { schema: BuiltInPlugin
   const [error, setError] = useState("");
   const [progress, setProgress] = useState({ stage: 0, value: 0 });
   const current = useRef("");
+  const generation = useRef(0);
   const svg = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ width: 600, height: 165 });
   useEffect(() => {
@@ -21,32 +27,42 @@ export function ReverbResponsePanel({ schema, address }: { schema: BuiltInPlugin
     observer.observe(svg.current); return () => observer.disconnect();
   }, []);
   const timer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
-  const snapshot = JSON.stringify([address.instanceId, address.trackId, address.chain, schema.parameters.map(p => [p.id, p.value]), schema.modelState, schema.visualization?.sampleRate, schema.visualization?.tempoBpm]);
+  const identity = JSON.stringify([schema.instanceId, address.instanceId, address.trackId, address.chain, address.fxIndex]);
+  const snapshot = JSON.stringify([identity, schema.parameters.map(p => [p.id, p.value]), schema.modelState, schema.visualization?.sampleRate, schema.visualization?.tempoBpm]);
   const stop = () => {
+    ++generation.current;
     const id = current.current;
     current.current = "";
     clearInterval(timer.current);
     if (id) void nativeBridge.reverbResponse("release", id).catch(() => {});
   };
   useEffect(() => {
-    stop(); setBusy(false); setResult(null); setError("");
+    stop(); setBusy(false); setResult(null);
     return stop;
     // Changes invalidate the graph and cancel its worker. Meter-only polls do not.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot, seconds, input]);
+  // A failed write rolls the parameter snapshot back. Keep its error visible
+  // through that rollback; clear it for a new instance, window or attempt.
+  useEffect(() => setError(""), [identity, seconds, input]);
   const render = async () => {
-    stop(); const id = crypto.randomUUID(); current.current = id;
+    stop(); const started = generation.current;
     setBusy(true); setResult(null); setError(""); setProgress({ stage: 0, value: 0 });
-    let polling = false;
-    timer.current = setInterval(() => {
-      if (polling) return;
-      polling = true;
-      void nativeBridge.reverbResponse("status", id).then(status => {
-        if (current.current !== id) return;
-        if (status.success) setProgress({ stage: status.stage ?? 0, value: status.progress ?? 0 });
-      }).catch(() => {}).finally(() => { polling = false; });
-    }, 1000);
     try {
+      // Every entry point (including the wide overview and Find) must capture
+      // the processor only after queued parameter writes have reached it.
+      if (!await onFlush()) throw new Error("Pending parameter changes could not be applied. Retry the change before rendering a response.");
+      if (generation.current !== started) return;
+      const id = crypto.randomUUID(); current.current = id;
+      let polling = false;
+      timer.current = setInterval(() => {
+        if (polling) return;
+        polling = true;
+        void nativeBridge.reverbResponse("status", id).then(status => {
+          if (current.current !== id) return;
+          if (status.success) setProgress({ stage: status.stage ?? 0, value: status.progress ?? 0 });
+        }).catch(() => {}).finally(() => { polling = false; });
+      }, 1000);
       const response = await nativeBridge.reverbResponse("render", id, { address, seconds, input });
       if (current.current !== id) return;
       if (!response.success) throw new Error(response.error || "Response rendering failed");
@@ -55,9 +71,9 @@ export function ReverbResponsePanel({ schema, address }: { schema: BuiltInPlugin
         throw new Error("The response data was incomplete");
       setResult(response);
     } catch (reason) {
-      if (current.current === id) setError(reason instanceof Error ? reason.message : String(reason));
+      if (generation.current === started) setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      if (current.current === id) { stop(); setBusy(false); }
+      if (generation.current === started) { stop(); setBusy(false); }
     }
   };
   const right = size.width - 8, bottom = size.height - 20;

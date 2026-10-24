@@ -1,4 +1,3 @@
-// @ts-expect-error The app tsconfig omits Node builtin typings, while Vitest runs this source audit in Node.
 import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -17,6 +16,7 @@ import {
   namInstrumentLabelsAreCompatible,
   namInstrumentProfileTagIsCompatible,
   namStoredPresetMatchesInstrumentProfile,
+  namStoredPresetProfileMismatch,
   namPreEqBandLabelsForProfile,
   namPreEqBandsForProfile,
   normalizeNAMInstrumentProfile,
@@ -29,6 +29,13 @@ import {
 } from "../utils/namRackPresetTransactions";
 
 describe("NAM Rack instrument profile", () => {
+  it("flags only explicit canonical/sidecar disagreements without inferring a profile from a name", () => {
+    expect(namStoredPresetProfileMismatch({ instrumentProfile: "guitar", metadata: { instrumentProfile: "bass" } })).toEqual({ stored: "guitar", labelled: "bass" });
+    expect(namStoredPresetProfileMismatch({ instrumentProfile: "bass", metadata: { instrumentProfile: "guitar" } })).toEqual({ stored: "bass", labelled: "guitar" });
+    expect(namStoredPresetProfileMismatch({ instrumentProfile: "bass", metadata: { instrumentProfile: "bass" } })).toBeNull();
+    expect(namStoredPresetProfileMismatch({ instrumentProfile: "guitar" })).toBeNull();
+    expect(namStoredPresetProfileMismatch({ metadata: { instrumentProfile: "bass" } })).toBeNull();
+  });
   beforeEach(() => {
     resetNAMExplorerSessionForTests();
   });

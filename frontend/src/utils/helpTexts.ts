@@ -30,7 +30,10 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     getShortcutPlatform(),
   );
   const playShortcut = shortcut("transport.play", "Space");
-  const recordShortcut = shortcut("transport.record", "Ctrl+R");
+  const recordShortcut = shortcut("transport.record", "R");
+  const startShortcut = shortcut("transport.rewind", "1");
+  const zoomInShortcut = shortcut("view.zoomIn", "+");
+  const zoomOutShortcut = shortcut("view.zoomOut", "-");
   const loopShortcut = shortcut("transport.loop", "L");
   const newAudioTrackShortcut = shortcut("insert.audioTrack", "Ctrl+T");
   const newMidiTrackShortcut = shortcut("insert.midiTrack", "Ctrl+Shift+T");
@@ -100,7 +103,7 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     "navigation.hotkeys": {
       title: "Core Hotkeys",
       description:
-        "The fastest first-session keys are Play, Record, Add Track, Toggle Mixer, Split at Playhead, Split Tool, Delete, Save, Help Reference, and Command Palette. Custom bindings can override global and named editor scopes; an intentionally unassigned custom binding stays disabled.",
+        `Use ${startShortcut} to seek to absolute project time zero and reveal the beginning. ${zoomInShortcut} and ${zoomOutShortcut} zoom the timeline. Play, Record, Add Track, Toggle Mixer, Split, Delete, Save, Help Reference, and Command Palette are also available. Custom bindings can override global and named editor scopes; an intentionally unassigned custom binding stays disabled.`,
       shortcut: `${playShortcut} | ${recordShortcut} | ${newAudioTrackShortcut} | ${mixerShortcut} | ${splitAtCursorShortcut} | ${splitToolShortcut} | ${deleteShortcut} | ${saveShortcut} | ${commandPaletteShortcut}`,
     },
     "timeline": {
@@ -129,8 +132,8 @@ function buildHelpTexts(): Record<string, HelpEntry> {
     "transport": {
       title: "Transport Bar",
       description:
-        "Controls playback, recording, looping, metronome, and timeline position. The transport also exposes record-mode and ripple-mode status while working.",
-      shortcut: `${playShortcut}: Play/Pause | ${recordShortcut}: Record | ${loopShortcut}: Loop`,
+        "Controls playback, recording, looping, metronome, and timeline position. Record starts a take on armed audio, MIDI, or instrument tracks; pressing Record again finalizes it. The same command follows normal, overdub, replace, loop, and punch recording settings. Go to Start seeks to absolute time zero regardless of the time selection or loop range.",
+      shortcut: `${playShortcut}: Play/Pause | ${recordShortcut}: Record | ${startShortcut}: Go to Start | ${loopShortcut}: Loop`,
     },
     "transport.loopPunch": {
       title: "Loop, Punch & Metronome",

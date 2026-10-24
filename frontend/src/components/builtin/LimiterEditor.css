@@ -5,11 +5,11 @@
 }
 .limiter-main {
   min-height: 316px;
-  flex-grow: 1;
-  flex-basis: 340px;
+  flex-grow: 0;
+  flex-basis: clamp(340px, 34cqi, 680px);
 }
 .limiter-input {
-  width: 145px;
+  width: 34%;
 }
 .limiter-input .suite-button {
   font-size: 10px;
@@ -44,7 +44,7 @@
     flex-basis: 300px;
   }
   .limiter-input {
-    width: 108px;
+    width: 34%;
   }
   .limiter-metering .loudness-panel {
     padding: 10px;

@@ -2,26 +2,29 @@
   --instrument-accent: #b9a886;
 }
 .drums-topbar>label {
-  min-width: 140px;
+  min-width: 115px;
   flex: 1;
-  max-width: 230px;
+  max-width: 260px;
+  flex-direction: row;
+  align-items: center;
 }
+.drums-topbar>label>span { max-width: 84px; flex-shrink: 0; }
+.drums-topbar>label>select { flex: 1; min-width: 0; }
 .drums-kit-layout {
-  grid-template-columns: minmax(0,1.6fr) minmax(220px,1fr);
+  grid-template-columns: minmax(0,1.5fr) minmax(230px,1fr) minmax(165px,.7fr);
 }
-.drums-character {
-  grid-column: 1/-1;
-}
+.drums-character .instrument-controls>* { flex-basis: 65px; }
 .drums-pad-grid {
   grid-template-columns: repeat(4,minmax(0,1fr));
 }
 .drums-pad {
   position: relative;
-  min-height: 94px;
+  min-height: clamp(72px, 7cqi, 140px);
+  padding: 8px;
   border: 1px solid #4c5050;
   border-top: 3px solid #85908e;
   border-radius: 6px;
-  background: linear-gradient(#333d42,#242e34);
+  background: #263239;
   box-shadow: 0 3px 2px #0005;
   overflow: hidden;
 }
@@ -41,7 +44,7 @@
   border-top-color: #a89bb3;
 }
 .drums-pad[aria-pressed=true] {
-  background: linear-gradient(#43483f,#313930);
+  background: #42483a;
   border-color: var(--instrument-accent);
 }
 .drums-pad[data-audition=true] {
@@ -53,8 +56,11 @@
   color: var(--instrument-muted);
 }
 .drums-pad-index {
-  width: 100%;
-  font: 10px ui-monospace,monospace;
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  width: 12px;
+  font-size: 0;
   color: #a9b3b8;
   margin-bottom: auto;
 }
@@ -70,9 +76,9 @@
   box-shadow: 0 0 5px #daefaf88;
 }
 .drums-pad strong {
-  font-size: 12px;
+  font-size: clamp(12px, 1.05cqi, 18px);
   line-height: 1.25;
-  margin: 8px 0 4px;
+  margin: 0 0 3px;
   font-weight: 600;
 }
 .drums-pad-note {
@@ -131,20 +137,42 @@
 .drums-piece-mixer .instrument-controls {
   margin-bottom: 16px;
 }
-@container(max-width:790px) {
-  .drums-kit-layout,.drums-mapping-layout {
-    grid-template-columns: 1fr;
-  }
-  .drums-pad {
-    min-height: 84px;
-  }
-  .drums-pad-grid {
-    gap: 7px;
-  }
-  .drums-piece-mixer {
-    grid-template-columns: repeat(2,minmax(0,1fr));
-  }
-  .drums-master-strip>.instrument-slider {
-    min-width: 130px;
-  }
+.drums-pad-banks { display: none; }
+.drums-pad-banks button { padding-inline: 10px; border: 1px solid var(--instrument-line); border-radius: 4px; }
+.drums-pad-banks button[aria-pressed=true] { border-color: var(--instrument-accent); background: #b9a88615; }
+.drums-piece-inspector>header h3 { font-size: clamp(16px, 1.4cqi, 25px); color: var(--instrument-accent); }
+.drums-piece-inspector .instrument-controls>* { flex-basis: 52px; }
+.drums-piece-inspector .instrument-controls { gap: 8px; }
+.drums-piece-inspector .suite-knob { --suite-knob-size: clamp(42px, 4.4cqi, 90px); }
+.instrument-workspace[data-overview=true]>:is(.drums-topbar,.drums-kit-layout) { grid-column: 1/-1; }
+.instrument-workspace[data-overview=true] .drums-kit-layout { grid-template-columns: minmax(0,2fr) minmax(0,1fr); }
+.instrument-workspace[data-overview=true] .drums-mapping-layout { grid-template-columns: 1fr; }
+.instrument-workspace[data-overview=true] .drums-pad { min-height: clamp(95px,3cqi,115px); padding: clamp(12px,.6cqi,20px); }
+.instrument-workspace[data-overview=true] .drums-pad strong { font-size: clamp(15px,.85cqi,28px); }
+.instrument-workspace[data-overview=true] :is(.drums-pad-note,.drums-pad small,.drums-mapping-table>[role=row]) { font-size: clamp(12px,.6cqi,20px); }
+.instrument-workspace[data-overview=true] .drums-character .instrument-controls { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); }
+.instrument-workspace[data-overview=true] .drums-mapping-table { max-height: clamp(280px,12.5cqi,480px); }
+.instrument-workspace[data-overview=true] .drums-piece-mixer .instrument-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.instrument-workspace[data-overview=true] .drums-piece-mixer h4 { font-size: clamp(14px,.7cqi,22px); }
+@container instrument (max-width:700px) {
+  .drums-kit-layout,.drums-mapping-layout { grid-template-columns: 1fr; }
+  .drums-kit-layout[data-focus="Pads"]>:not(.drums-pads-panel),.drums-kit-layout[data-focus="Selected piece"]>:not(.drums-piece-inspector),.drums-kit-layout[data-focus="Character"]>:not(.drums-character) { display: none; }
+  .drums-pad-banks { display: flex; }
+  .drums-pad-grid[data-bank="Core kit"]>[data-bank="Cymbals & extras"],.drums-pad-grid[data-bank="Cymbals & extras"]>[data-bank="Core kit"] { display: none; }
+  .drums-pad { min-height: 60px; padding: 6px; }
+  .drums-pads-panel>header { display: none; }
+  .drums-pad-index { display: none; }
+  .drums-pad strong { margin-top: 0; }
+  .drums-pad-grid { gap: 6px; }
+  .drums-topbar>label { min-width: 100px; }
+  .drums-topbar>label>span { max-width: 50px; font-size: 10px; }
+  .drums-topbar { gap: 8px; margin-bottom: 8px; }
+  .drums-topbar>button { min-height: 30px; padding-inline: 8px; font-size: 11px; }
+  .drums-piece-inspector .instrument-controls>* { flex-basis: 65px; }
+  .drums-piece-inspector>label { flex-direction: row; align-items: center; margin-bottom: 10px; }
+  .drums-piece-inspector>label>select { flex: 1; }
+  .drums-piece-mixer { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .drums-master-strip { gap: 14px; padding: 7px 10px; }
+  .drums-master-strip>span { display: none; }
+  .drums-master-strip>.instrument-slider { min-width: 130px; max-width: none; }
 }

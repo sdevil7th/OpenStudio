@@ -6,6 +6,7 @@ import "./NAMRackHardware.css";
 import "./NAMRackDesignPortSourceFlow.css";
 import "./NAMRackFooter.css";
 import "./NAMRackHeader.css";
+import octaverFuzzFaceplate from "../assets/nam/design/bodies/octaver-fuzz-faceplate.svg";
 import {
   type CSSProperties,
   createContext,
@@ -17,6 +18,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -62,6 +64,7 @@ import type { NAMRackOversamplingFactor, RackModuleId, RackSectionId } from "./N
 import type { NAMRackCabMode } from "./NAMCabPresentation";
 import type { NAMRackAdvancedStageId } from "./NAMRackMixer";
 import { namMeterFraction } from "../utils/namMeterLevel";
+import { NAM_FUZZ_VOICE_LABELS, normalizeNAMFuzzVoice, resolveNAMFuzzCleanEntry } from "../utils/namOctaverFuzz";
 import { observeTONE3000AppendSentinel } from "../utils/tone3000InfiniteAppend";
 import { NAMRackControlTooltip } from "./NAMRackControlTooltip";
 import {
@@ -385,23 +388,21 @@ export function namPedalHardwareSizePercent(
 }
 
 export const NAM_PRE_SIGNAL_LAYOUT = {
-  // Five independent pedals occupy the same 748 px row that previously held
-  // Tape Echo. EQ Boost is immediately before Precision Drive in the signal
-  // path, while the wider 918 px artboard keeps the complete row centred.
-  compressor: { x: 85, y: 42, w: 156, h: 232 },
-  octaver: { x: 251, y: 42, w: 120, h: 232 },
-  eqBoost: { x: 381, y: 42, w: 156, h: 232 },
-  precisionDrive: { x: 547, y: 42, w: 120, h: 232 },
-  distortion: { x: 677, y: 42, w: 156, h: 232 },
+  // Octaver Fuzz shares the 156 px enclosure standard.
+  // Keep the five-pedal row centred on the unchanged 918 px artboard.
+  compressor: { x: 67, y: 42, w: 156, h: 232 },
+  octaver: { x: 233, y: 42, w: 156, h: 232 },
+  eqBoost: { x: 399, y: 42, w: 156, h: 232 },
+  precisionDrive: { x: 565, y: 42, w: 120, h: 232 },
+  distortion: { x: 695, y: 42, w: 156, h: 232 },
 } as const satisfies Record<string, DesignBox>;
 
 export const NAM_PRE_LOGICAL_SURFACE = {
   width: 918,
   height: 341,
-  row: { x: 85, y: 3, w: 748, h: 271 },
-  // Fit and overflow must be computed from the same row. The former mismatched
-  // 748/898 widths manufactured a scrollbar even when every pedal was visible.
-  scaleReference: { x: 85, y: 3, w: 748, h: 271 },
+  row: { x: 67, y: 42, w: 784, h: 232 },
+  // Fit and overflow must use the same complete row.
+  scaleReference: { x: 67, y: 42, w: 784, h: 232 },
 } as const;
 
 export const NAM_PRE_FX_HARDWARE_LAYOUT = {
@@ -897,6 +898,31 @@ export const NAM_COMPRESSOR_FACEPLATE_LAYOUT = {
     y: 90.75,
     size: NAM_PRE_FX_HARDWARE_LAYOUT.compressor.footSize,
     hitSize: 18.5,
+  },
+} as const;
+
+export const NAM_OCTAVER_FUZZ_FACEPLATE_LAYOUT = {
+  // Source coordinates match the dedicated 156x232 vector silkscreen asset.
+  // The seven rotaries and both switches retain separate interactive envelopes.
+  cleanKnob: { x: (34 / 156) * 100, y: (37 / 232) * 100, size: (22 / 156) * 100, hitSize: (37 / 156) * 100 },
+  cleanReadout: { x: (13 / 156) * 100, y: (51 / 232) * 100, w: (42 / 156) * 100, h: (12 / 232) * 100 },
+  columns: [22, 50, 78],
+  voiceDisplay: { x: (83 / 156) * 100, y: (51 / 232) * 100, w: (58 / 156) * 100, h: (12 / 232) * 100 },
+  voiceSelector: { x: (112 / 156) * 100, y: (37 / 232) * 100, size: (NAM_THREE_POSITION_SELECTOR_PX / 156) * 100, hitSize: (37 / 156) * 100 },
+  topY: (83 / 232) * 100,
+  lowerY: (127 / 232) * 100,
+  knobSize: NAM_PRE_FX_HARDWARE_LAYOUT.octaver.knobSize,
+  knobHitSize: (37 / 156) * 100,
+  titleY: (164 / 232) * 100,
+  powerXs: [28, 72],
+  ledY: 76.8,
+  footY: 89,
+  footHitSize: (37 / 156) * 100,
+  // Named painted zones exclude the photograph's transparent padding and rim.
+  safeZones: {
+    header: { x: 14, y: 18, w: 128, h: 46 },
+    knobs: { x: 14, y: 64, w: 128, h: 91 },
+    footer: { x: 24, y: 170, w: 108, h: 56 },
   },
 } as const;
 
@@ -1654,6 +1680,8 @@ function AssetControl({
   hardwareKind,
   panelRotaryVariant,
   exactSizeVariant,
+  onRequestValueEntry,
+  describedBy,
 }: {
   assetId: NAMDesignControlAssetId;
   className: string;
@@ -1686,6 +1714,8 @@ function AssetControl({
     | "panel-toggle"
     | "panel-knob"
     | "panel-led";
+  onRequestValueEntry?: () => void;
+  describedBy?: string;
 }) {
   const param = useBoundDesignParam(paramId);
   const context = useContext(DesignParamContext);
@@ -1755,7 +1785,8 @@ function AssetControl({
   );
   const showsDisabledFeedback = Boolean(!allowInteraction && disabledReason);
   const showsControlFeedback = showsLiveFeedback || showsDisabledFeedback;
-  const feedbackValue = showsDisabledFeedback ? disabledReason : valueLabel;
+  const feedbackValue = showsDisabledFeedback ? disabledReason
+    : onRequestValueEntry ? `${valueLabel} · Enter or right-click to type` : valueLabel;
 
   const clearFeedbackTimer = useCallback(() => {
     if (feedbackTimerRef.current !== null) {
@@ -1980,7 +2011,11 @@ function AssetControl({
       showFeedbackNow();
       const arrowMultiplier =
         event.shiftKey || event.ctrlKey || event.metaKey ? 1 : 4;
-      if ((event.key === "Enter" || event.key === " ") && isButtonLike) {
+      if (event.key === "Enter" && onRequestValueEntry) {
+        event.preventDefault();
+        event.stopPropagation();
+        onRequestValueEntry();
+      } else if ((event.key === "Enter" || event.key === " ") && isButtonLike) {
         event.preventDefault();
         event.stopPropagation();
         if (onButtonClick) onButtonClick(param, commitParamValue);
@@ -2017,6 +2052,7 @@ function AssetControl({
       isButtonLike,
       isToggleButton,
       onButtonClick,
+      onRequestValueEntry,
       param,
       showFeedbackNow,
       stepParam,
@@ -2071,6 +2107,8 @@ function AssetControl({
                 : undefined
           }
           aria-disabled={showsDisabledFeedback || undefined}
+          aria-describedby={describedBy}
+          aria-keyshortcuts={onRequestValueEntry ? "Enter" : undefined}
           aria-checked={
             interactive && isSwitchControl && param ? toggleActive : undefined
           }
@@ -2124,6 +2162,11 @@ function AssetControl({
           onClick={handleClick}
           onWheel={handleWheel}
           onDoubleClick={handleDoubleClick}
+          onContextMenu={onRequestValueEntry && interactive ? (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onRequestValueEntry();
+          } : undefined}
           onKeyDown={handleKeyDown}
         />
       )}
@@ -2590,11 +2633,13 @@ function ThreePositionRotarySelector({
   x,
   y,
   size,
+  hitSize = size * 1.28,
   paramId,
 }: {
   x: number;
   y: number;
   size: number;
+  hitSize?: number;
   paramId: string;
 }) {
   const param = useBoundDesignParam(paramId);
@@ -2641,7 +2686,7 @@ function ThreePositionRotarySelector({
         size={size}
         paramId={paramId}
         interaction="button"
-        hitSize={size * 1.28}
+        hitSize={hitSize}
         enableButtonDrag
         stateRotations={NAM_THREE_POSITION_SELECTOR_ROTATIONS}
         onButtonClick={(param, commitValue) => {
@@ -2722,6 +2767,11 @@ function ReverbVoiceDisplay({ paramId }: { paramId: string }) {
       {reverbVoiceDisplayLabel(param?.value ?? 0, param?.min ?? 0)}
     </span>
   );
+}
+
+function FuzzVoiceDisplay() {
+  const param = useBoundDesignParam("fuzzVoice");
+  return <span aria-hidden="true">{NAM_FUZZ_VOICE_LABELS[normalizeNAMFuzzVoice(param?.value)]}</span>;
 }
 
 function CompressorHPFReadout({
@@ -4526,16 +4576,103 @@ function AmpCaptureSelector({
   );
 }
 
+function FuzzCleanKnob() {
+  const param = useBoundDesignParam("fuzzCleanMix");
+  const enabled = useBoundDesignParam("fuzzEnabled");
+  const commitValue = useDesignParamCommit(param);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const editingRef = useRef(false);
+  const restoreFocusRef = useRef(false);
+  const controlRef = useRef<HTMLSpanElement | null>(null);
+  const descriptionId = useId();
+  const layout = NAM_OCTAVER_FUZZ_FACEPLATE_LAYOUT;
+  const percent = Math.round((param?.value ?? 0) * 1000) / 10;
+
+  useEffect(() => {
+    if (!editing && restoreFocusRef.current) {
+      restoreFocusRef.current = false;
+      controlRef.current?.querySelector<HTMLElement>('[role="slider"]')?.focus();
+    }
+  }, [editing]);
+
+  if (!param) return null;
+  const openEntry = () => {
+    setDraft(String(percent));
+    editingRef.current = true;
+    setEditing(true);
+  };
+  const finishEntry = (commit: boolean, restoreFocus: boolean) => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    if (commit) {
+      const entry = resolveNAMFuzzCleanEntry(param, draft);
+      if (entry.value !== null) commitValue(entry.value);
+    }
+    restoreFocusRef.current = restoreFocus;
+    setEditing(false);
+  };
+
+  return (
+    <span ref={controlRef} className="nam-fuzz-clean-control" data-editing={editing}>
+      <AssetControl
+        assetId={CONTROLS.knobBlack}
+        className="knob black fuzz-clean-knob"
+        {...layout.cleanKnob}
+        paramId="fuzzCleanMix"
+        semanticLabel="Fuzz Clean blend"
+        onRequestValueEntry={openEntry}
+        describedBy={descriptionId}
+      />
+      <Display {...layout.cleanReadout} className="fuzz-clean-readout">{percent}%</Display>
+      <span id={descriptionId} className="sr-only">
+        Blend the signal entering Fuzz, including active Direct, Down and Up voices,
+        with the fuzz sound. Enter or right-click to type a percentage; double-click
+        to reset. Arrow keys adjust; Shift adjusts finely.
+        {(enabled?.value ?? 0) < 0.5 ? " Fuzz is bypassed. This blend is saved for when you engage Fuzz." : " Fuzz is enabled."}
+        {" "}Level controls the entire blend before PRE EQ, Drive, Distortion,
+        Pedal Capture and Amp. At 100% Clean and 0 dB Level, Fuzz passes its incoming signal unchanged.
+        {" "}The rack Gate detects input before the pedals and applies its gain
+        after the pedals and models, before Cabinet. Adjust its Threshold and
+        Release for the input noise; raising Fuzz Level can drive later stages harder.
+      </span>
+      {editing && (
+        <input
+          autoFocus
+          type="number"
+          min={0}
+          max={100}
+          step={stepForParam(param) * 100}
+          value={draft}
+          aria-label="Fuzz Clean blend percentage"
+          aria-describedby={descriptionId}
+          className="nam-fuzz-clean-entry rounded border border-amber-300 bg-neutral-950 px-1 text-center text-xs tabular-nums text-amber-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+          style={{ "--clean-entry-x": `${layout.cleanKnob.x}%`, "--clean-entry-y": `${layout.cleanKnob.y}%` } as NativeStyle}
+          onFocus={(event) => event.currentTarget.select()}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          onBlur={() => finishEntry(true, false)}
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === "Enter" || event.key === "Escape") {
+              event.preventDefault();
+              finishEntry(event.key === "Enter", true);
+            }
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
 function PreFxStage({
   compressorGainReductionDb = 0,
 }: {
   compressorGainReductionDb?: number;
 }) {
-  const octaverParam = useBoundDesignParam("octaverEnabled");
   const instrumentProfile = useBoundDesignParam("instrumentProfile");
-  const octaverLabel = octaverParam?.label ?? "Octaver";
-  const octaverHardwareTitle =
-    octaverLabel === "Stereo Poly Octaver" ? "POLY OCTAVER" : "OCTAVER";
+  const octaverHardwareTitle = "OCTAVER FUZZ";
+  const octaverLayout = NAM_OCTAVER_FUZZ_FACEPLATE_LAYOUT;
   const eqBoostLayout = NAM_EQ_BOOST_FACEPLATE_LAYOUT;
   const driveLayout = NAM_PRECISION_DRIVE_FACEPLATE_LAYOUT;
   const preEqBands = namPreEqBandsForProfile(instrumentProfile?.value);
@@ -4642,61 +4779,60 @@ function PreFxStage({
           value="Compressor on / off"
         />
       </Stompbox>
-      <Stompbox
+      <Module
         box={NAM_PRE_SIGNAL_LAYOUT.octaver}
         name="octaver"
-        tone="olive"
-        title={octaverHardwareTitle}
-        titleY={67.5}
+        body={BODIES.olive}
+        bodyFit="fill"
+        className="stompbox octaver-fuzz"
+        controlsName={octaverHardwareTitle}
       >
+        <img src={octaverFuzzFaceplate} className="octaver-fuzz-faceplate" alt="" aria-hidden="true" draggable={false} />
+        <FuzzCleanKnob />
+        <Display {...octaverLayout.voiceDisplay} className="fuzz-voice-display"><FuzzVoiceDisplay /></Display>
+        <ThreePositionRotarySelector {...octaverLayout.voiceSelector} paramId="fuzzVoice" />
         <Knob
           kind="black"
-          x={28}
-          y={26}
+          x={octaverLayout.columns[0]}
+          y={octaverLayout.topY}
           size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.knobSize}
           rot={-30}
           paramId="octaverDownMix"
-          labelText="DOWN"
-          labelOffset={LABEL_OFFSET.above}
+          hitSize={octaverLayout.knobHitSize}
         />
         <Knob
           kind="black"
-          x={72}
-          y={26}
+          x={octaverLayout.columns[1]}
+          y={octaverLayout.topY}
           size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.knobSize}
           rot={30}
           paramId="octaverUpMix"
-          labelText="UP"
-          labelOffset={LABEL_OFFSET.above}
+          hitSize={octaverLayout.knobHitSize}
         />
         <Knob
           kind="black"
-          x={50}
-          y={45.5}
+          x={octaverLayout.columns[2]}
+          y={octaverLayout.topY}
           size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.knobSize}
           rot={0}
           paramId="octaverDirectMix"
-          labelText="DIRECT"
-          labelOffset={11.5}
+          hitSize={octaverLayout.knobHitSize}
         />
-        <Led
-          x={50}
-          y={74}
-          on
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.ledSize}
-          paramId="octaverEnabled"
-        />
-        <Foot
-          x={50}
-          y={88.3}
-          size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.footSize}
-          paramId="octaverEnabled"
-          hitSize={23}
-          showStateLabel
-          stateLabelY={79.5}
-          value={`${octaverLabel} on / off`}
-        />
-      </Stompbox>
+        {(["fuzzDrive", "fuzzTone", "fuzzLevelDb"] as const).map((paramId, index) => (
+          <Knob key={paramId} kind="black" x={octaverLayout.columns[index]} y={octaverLayout.lowerY}
+            size={octaverLayout.knobSize} hitSize={octaverLayout.knobHitSize} rot={0} paramId={paramId} />
+        ))}
+        {(["octaverEnabled", "fuzzEnabled"] as const).map((paramId, index) => (
+          <span key={paramId}>
+            <Led x={octaverLayout.powerXs[index]} y={octaverLayout.ledY} on
+              size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.ledSize} paramId={paramId} />
+            <Foot x={octaverLayout.powerXs[index]} y={octaverLayout.footY}
+              size={NAM_PRE_FX_HARDWARE_LAYOUT.octaver.footSize} paramId={paramId}
+              hitSize={octaverLayout.footHitSize}
+              value={`${index === 0 ? "Octave" : "Fuzz"} on / off`} />
+          </span>
+        ))}
+      </Module>
       <Stompbox
         box={NAM_PRE_SIGNAL_LAYOUT.eqBoost}
         name="eq-boost"
@@ -6205,13 +6341,27 @@ function SourceFlowSurface({
   config: NAMSourceFlowDesignConfig;
   onAction: (message: NAMSourceFlowDesignPortMessage) => void;
 }) {
-  const [compactDetailsOpen, setCompactDetailsOpen] = useState(false);
+  // Let the native details element own manual toggles. Its queued toggle event
+  // must not overwrite a reveal requested by an async capture result.
+  const compactDetailsRef = useRef<HTMLDetailsElement | null>(null);
+  const compactDetailsRevealPending = useRef(false);
+  const revealCompactDetails = useCallback(() => {
+    if (compactDetailsRef.current) compactDetailsRef.current.open = true;
+    else compactDetailsRevealPending.current = true;
+  }, []);
+  const attachCompactDetails = useCallback((element: HTMLDetailsElement | null) => {
+    compactDetailsRef.current = element;
+    if (element && compactDetailsRevealPending.current) {
+      element.open = true;
+      compactDetailsRevealPending.current = false;
+    }
+  }, []);
   const emit = (
     action: NAMSourceFlowDesignActionId,
     value = "",
     rowId = "",
   ) => {
-    if (action === "select-row") setCompactDetailsOpen(true);
+    if (action === "select-row") revealCompactDetails();
     onAction({
       type: "nam-source-flow-design-port",
       instanceId: "native-source-flow",
@@ -6224,8 +6374,8 @@ function SourceFlowSurface({
   const appendSentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (config.captures?.items.length || config.captures?.busy || config.captures?.error)
-      setCompactDetailsOpen(true);
-  }, [config.captures?.title, config.captures?.items.length, config.captures?.busy, config.captures?.error]);
+      revealCompactDetails();
+  }, [config.captures?.title, config.captures?.items.length, config.captures?.busy, config.captures?.error, revealCompactDetails]);
   const actionStyle: NativeStyle = {
     "--tone-action-count": Math.max(1, config.actions.length),
     "--tone-action-width": `${config.actions.length * 118 + Math.max(0, config.actions.length - 1) * 8}px`,
@@ -6518,8 +6668,7 @@ function SourceFlowSurface({
           {config.selectedAvailable ? (
             <details
               className="tone-compact-selection"
-              open={compactDetailsOpen}
-              onToggle={(event) => setCompactDetailsOpen(event.currentTarget.open)}
+              ref={attachCompactDetails}
             >
               <summary className="tone-compact-selection-summary" aria-label={`Show selected ${sourceResourceLabel} details and actions`}>
                 <span className="tone-compact-selection-copy">
@@ -7575,7 +7724,10 @@ export function NAMRackDesignPort({
                   <div
                     className="premium-stage-status"
                     data-tone={runtime.diagnosticTone ?? "idle"}
-                    title={runtime.diagnosticMessage}
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                    tabIndex={0}
                   >
                     <i aria-hidden="true" />
                     <span>{runtime.diagnosticMessage}</span>

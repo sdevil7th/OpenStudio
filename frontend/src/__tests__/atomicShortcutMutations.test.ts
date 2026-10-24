@@ -385,8 +385,9 @@ describe("atomic Timeline shortcut mutations", () => {
     let state = useDAWStore.getState();
     const duplicateIds = [...state.selectedClipIds];
     expect(duplicateIds).toHaveLength(2);
-    expect(state.tracks[0].clips[1]).toMatchObject({ id: duplicateIds[0], startTime: 3 });
-    expect(state.tracks[1].midiClips[1]).toMatchObject({ id: duplicateIds[1], startTime: 7 });
+    // One common six-second selection span preserves the three-second spacing.
+    expect(state.tracks[0].clips[1]).toMatchObject({ id: duplicateIds[0], startTime: 7 });
+    expect(state.tracks[1].midiClips[1]).toMatchObject({ id: duplicateIds[1], startTime: 10 });
     expect(commandManager.getUndoStack()).toHaveLength(1);
 
     state.undo();
@@ -871,6 +872,78 @@ describe("atomic selected-track shortcuts", () => {
     await vi.waitFor(() => expect(useDAWStore.getState().tracks.map((track) => track.id))
       .toEqual(["first", duplicateIds[0], "second", duplicateIds[1]]));
     expect(useDAWStore.getState().selectedTrackIds).toEqual(duplicateIds);
+  });
+
+  it("copies explicit track drag sources at the drop row with one stable undo command", async () => {
+    vi.spyOn(nativeBridge, "getTrackInputFX").mockResolvedValue([]);
+    vi.spyOn(nativeBridge, "getTrackFX").mockResolvedValue([]);
+    const first = createDefaultTrack("first", "First", "#111", "audio", []);
+    first.clips = [audioClip("original-audio", { startTime: 2.25, duration: 3.5 })];
+    const second = createDefaultTrack("second", "Second", "#222", "midi", [first]);
+    second.midiClips = [midiClip("original-midi", { startTime: 0.75, events: [
+      { timestamp: 0.2, type: "noteOn", note: 64, velocity: 90 },
+      { timestamp: 0.5, type: "noteOff", note: 64, velocity: 0 },
+    ] })];
+    const target = createDefaultTrack("target", "Target", "#333", "audio", [first, second]);
+    useDAWStore.setState({ tracks: [first, second, target], selectedTrackId: "target", selectedTrackIds: ["target"] });
+    const ids = await useDAWStore.getState().duplicateSelectedTracks({ trackIds: ["second", "first"], beforeTrackId: "target" });
+    expect(useDAWStore.getState().tracks.map((track) => track.id)).toEqual(["first", "second", ...ids, "target"]);
+    const audioCopy = useDAWStore.getState().tracks.find((track) => track.id === ids[0])!.clips[0];
+    const midiCopy = useDAWStore.getState().tracks.find((track) => track.id === ids[1])!.midiClips[0];
+    expect(audioCopy.startTime).toBe(2.25);
+    expect(audioCopy.id).not.toBe("original-audio");
+    expect(midiCopy.id).not.toBe("original-midi");
+    expect(midiCopy.events[0]).not.toBe(second.midiClips[0].events[0]);
+    expect(midiCopy.events[0]).toMatchObject({ timestamp: 0.2, type: "noteOn", note: 64, velocity: 90 });
+    expect(midiCopy.startTime).toBe(0.75);
+    expect(commandManager.getUndoStack()).toHaveLength(1);
+    useDAWStore.getState().undo();
+    await vi.waitFor(() => expect(useDAWStore.getState().tracks.map((track) => track.id)).toEqual(["first", "second", "target"]));
+    expect(useDAWStore.getState().selectedTrackIds).toEqual(["target"]);
+    useDAWStore.getState().redo();
+    await vi.waitFor(() => expect(useDAWStore.getState().tracks.map((track) => track.id)).toEqual(["first", "second", ...ids, "target"]));
+    expect(useDAWStore.getState().tracks.find((track) => track.id === ids[0])!.clips[0].id).toBe(audioCopy.id);
+  });
+
+  it("copies collapsed folder subtrees after their source and restores the complete hierarchy with Undo/Redo", async () => {
+    vi.spyOn(nativeBridge, "getTrackInputFX").mockResolvedValue([]);
+    vi.spyOn(nativeBridge, "getTrackFX").mockResolvedValue([]);
+    const folder = createDefaultTrack("folder", "Folder", "#111", "audio", []);
+    folder.isFolder = true;
+    folder.folderCollapsed = true;
+    const child = createDefaultTrack("child", "Child", "#222", "audio", [folder]);
+    child.parentFolderId = folder.id;
+    child.clips = [audioClip("child-clip")];
+    const outside = createDefaultTrack("outside", "Outside", "#333", "audio", [folder, child]);
+    useDAWStore.setState({ tracks: [folder, child, outside], selectedTrackId: folder.id, selectedTrackIds: [folder.id] });
+    const ids = await useDAWStore.getState().duplicateSelectedTracks();
+    expect(ids).toHaveLength(2);
+    const snapshot = useDAWStore.getState().tracks;
+    expect(snapshot.map((track) => track.id)).toEqual([folder.id, child.id, ...ids, outside.id]);
+    expect(snapshot.find((track) => track.id === ids[1])?.parentFolderId).toBe(ids[0]);
+    expect(snapshot.find((track) => track.id === ids[1])?.clips[0].id).not.toBe("child-clip");
+    expect(commandManager.getUndoStack()).toHaveLength(1);
+    useDAWStore.getState().undo();
+    await vi.waitFor(() => expect(useDAWStore.getState().tracks.map((track) => track.id)).toEqual([folder.id, child.id, outside.id]));
+    useDAWStore.getState().redo();
+    await vi.waitFor(() => expect(useDAWStore.getState().tracks).toEqual(snapshot));
+  });
+
+  it("copies a child before its parent as a top-level row and preserves that placement through Undo/Redo", async () => {
+    vi.spyOn(nativeBridge, "getTrackInputFX").mockResolvedValue([]);
+    vi.spyOn(nativeBridge, "getTrackFX").mockResolvedValue([]);
+    const folder = createDefaultTrack("folder", "Folder", "#111", "audio", []);
+    folder.isFolder = true;
+    const child = createDefaultTrack("child", "Child", "#222", "audio", [folder]);
+    child.parentFolderId = folder.id;
+    useDAWStore.setState({ tracks: [folder, child], selectedTrackId: child.id, selectedTrackIds: [child.id] });
+    const ids = await useDAWStore.getState().duplicateSelectedTracks({ trackIds: [child.id], beforeTrackId: folder.id });
+    expect(useDAWStore.getState().tracks[0]).toMatchObject({ id: ids[0], parentFolderId: undefined });
+    expect(useDAWStore.getState().tracks[2].parentFolderId).toBe(folder.id);
+    useDAWStore.getState().undo();
+    await vi.waitFor(() => expect(useDAWStore.getState().tracks).toHaveLength(2));
+    useDAWStore.getState().redo();
+    await vi.waitFor(() => expect(useDAWStore.getState().tracks[0]).toMatchObject({ id: ids[0], parentFolderId: undefined }));
   });
 
   it("deletes a selected folder subtree and restores it as one native-safe command", async () => {

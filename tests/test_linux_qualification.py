@@ -12,6 +12,73 @@ spec.loader.exec_module(qualification)
 
 
 class NativeDiagnosticsTests(unittest.TestCase):
+    @staticmethod
+    def runtime_report():
+        return {
+            'passed': True,
+            'checks': [{'name': 'json_document_posix_rename_failure_preserves_both_files',
+                        'status': 'pass'}],
+            'posixAtomicPublicationPermissionFailure': 'pass',
+            'subjectiveAudio': 'not_asserted', 'hardwareDrivers': 'not_asserted',
+        }
+
+    def test_runtime_safety_accepts_nonempty_native_checks_and_posix_failure_proof(self):
+        report = self.runtime_report()
+        report['checks'].extend({'name': f'native_contract_{index}', 'status': 'pass'}
+                                for index in range(368))
+        result = qualification.runtime_safety_check(report, 0)
+        self.assertEqual(result['status'], 'pass')
+        self.assertEqual(result['checkCount'], 369)
+        self.assertTrue(result['checksPassed'])
+        self.assertEqual(result['posixAtomicPublicationPermissionFailure'], 'pass')
+
+    def test_runtime_safety_rejects_missing_or_malformed_checks(self):
+        report = self.runtime_report()
+        del report['checks']
+        self.assertEqual(qualification.runtime_safety_check(report, 0)['status'], 'fail')
+        for checks in ([], None, True, 'pass', {'status': 'pass'}, [None], [{}]):
+            with self.subTest(checks=checks):
+                report['checks'] = checks
+                result = qualification.runtime_safety_check(report, 0)
+                self.assertEqual(result['status'], 'fail')
+                self.assertFalse(result['checksPassed'])
+
+    def test_runtime_safety_rejects_failed_check_despite_passing_summary(self):
+        report = self.runtime_report()
+        report['checks'].append({'name': 'recording_failure', 'status': 'fail'})
+        result = qualification.runtime_safety_check(report, 0)
+        self.assertEqual(result['status'], 'fail')
+        self.assertFalse(result['checksPassed'])
+
+    def test_runtime_safety_requires_posix_failure_to_be_asserted(self):
+        report = self.runtime_report()
+        del report['posixAtomicPublicationPermissionFailure']
+        result = qualification.runtime_safety_check(report, 0)
+        self.assertEqual(result['status'], 'fail')
+        self.assertEqual(result['posixAtomicPublicationPermissionFailure'], 'missing')
+        for status in ('not_asserted: root can bypass directory write permissions',
+                       'fail', None, True):
+            with self.subTest(status=status):
+                report['posixAtomicPublicationPermissionFailure'] = status
+                result = qualification.runtime_safety_check(report, 0)
+                self.assertEqual(result['status'], 'fail')
+                self.assertEqual(result['posixAtomicPublicationPermissionFailure'], status)
+
+    def test_runtime_safety_requires_true_summary_and_successful_exit(self):
+        report = self.runtime_report()
+        self.assertEqual(qualification.runtime_safety_check(report, 1)['status'], 'fail')
+        for passed in (False, None, 'true', 1):
+            with self.subTest(passed=passed):
+                report['passed'] = passed
+                self.assertEqual(qualification.runtime_safety_check(report, 0)['status'], 'fail')
+
+    def test_runtime_safety_rejects_malformed_report(self):
+        for report in (None, [], 'passed', True):
+            with self.subTest(report=report):
+                result = qualification.runtime_safety_check(report, 0)
+                self.assertEqual(result['status'], 'fail')
+                self.assertEqual(result['checkCount'], 0)
+
     def test_safe_recovery_boot_cannot_stand_in_for_normal_pitch_editing(self):
         report = {
             'startupMode': 'safe', 'success': True,
@@ -57,6 +124,9 @@ class NativeDiagnosticsTests(unittest.TestCase):
             'OPENSTUDIO_RECORDING_FIXTURES_ONLY': '1',
             'OPENSTUDIO_METRONOME_FIXTURES_ONLY': '1',
             'OPENSTUDIO_RT_SAFETY_FIXTURES_ONLY': '1',
+            'OPENSTUDIO_NAM_FUZZ_ONLY': '1',
+            'OPENSTUDIO_NAM_TWO_RACK_CPU_ONLY': '1',
+            'OPENSTUDIO_NAM_TWO_RACK_CPU_CONTRACTS_ONLY': '1',
         }
         env = qualification.qualification_environment(inherited)
         self.assertEqual(env, {'DISPLAY': ':2', 'OPENSTUDIO_FORCE_PACKAGED_FRONTEND': '1'})

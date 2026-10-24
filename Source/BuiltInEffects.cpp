@@ -293,6 +293,7 @@ double getFixedBiquadMagnitude(const OpenStudioIIRCoefficientSet& coefficients,
 
 OpenStudioEQ::OpenStudioEQ(bool standalone) : OpenStudioBuiltInEffect(standalone), bandCount(standalone ? maxBands : numBands)
 {
+    signalPath.store(standalone ? 1.0f : 0.0f);
     if(standalone) { matchCapture=std::make_unique<BuiltInAlignmentCapture>(); linearPhase=std::make_unique<BuiltInLinearPhaseEQ>(); spectralEQ=std::make_unique<BuiltInSpectralEQ>(); }
     for (int i = 0; i < bandCount; ++i)
     {
@@ -477,6 +478,8 @@ void OpenStudioEQ::resetTargetWeights(bool prepare)
 
 void OpenStudioEQ::reset()
 {
+    retainedFilterTail.store(0);
+    for (auto& tail : retainedBandTails) tail.store(0);
     if(const auto* map=publishedMIDIPrograms.load(std::memory_order_acquire);map&&map->prepared)map->prepared->reset();
     midiBankMSB.fill(0);midiBankLSB.fill(0);midiProgramObservation.store(0);midiProgramSampleOffset=0;
     draftPreview.reset(publishedSampleRate.load());
@@ -785,6 +788,10 @@ void OpenStudioEQ::updateBand(int b, int auditionIndex, bool forceImmediate)
     auto& targets =
         targetBandCoefficients[static_cast<size_t>(b)];
     targetStages[b] = buildBandTargets(b, shouldProcess, targets);
+    double bandTail = 0;
+    for (int stage = 0; stage < targetStages[b]; ++stage)
+        bandTail += BuiltInFilterTail::biquad(targets[static_cast<size_t>(stage)], cachedSampleRate);
+    BuiltInFilterTail::retain(retainedBandTails[static_cast<size_t>(b)], bandTail);
     activeStages[b] = juce::jmax(
         activeStages[b], targetStages[b]);
 
@@ -1515,7 +1522,7 @@ void OpenStudioEQ::processEQAudioBlock(juce::AudioBuffer<float>& fullBuffer)
                 buffer.setSample(channel, sample, buffer.getSample(channel, sample) * (1 - listen) + detectorListenScratch.getSample(channel, sample));
         }
     draftPreview.process(buffer);
-    sanitizeBuiltInBuffer(buffer, 2.5f);
+    sanitizeBuiltInBuffer(buffer, signalPath.load() >= .5f ? std::numeric_limits<float>::max() : 2.5f);
 
     if (needsDryCopy)
     {
@@ -1813,6 +1820,7 @@ void OpenStudioEQ::getEQStateInformationRaw(juce::MemoryBlock& destData, const s
     juce::ValueTree state("OpenStudioEQ");
     if (linearPhase) { state.setProperty("phaseMode", configuration[0], nullptr); state.setProperty("phaseQuality", configuration[1], nullptr); state.setProperty("spectralProcessing", configuration[4], nullptr); state.setProperty("linearBandDynamics", configuration[5], nullptr); state.setProperty("minimumPhaseFIR", configuration[2], nullptr); state.setProperty("analogResponse", configuration[3], nullptr); }
     if (supportsExternalKey()) { state.setProperty("externalDetector", configuration[6], nullptr); state.setProperty("detectorListenBand", read(detectorListenBand), nullptr); }
+    state.setProperty("signalPath", configuration[7], nullptr);
     state.setProperty("outputGain", read(outputGain), nullptr);
     state.setProperty("autoGain", read(autoGain), nullptr);
     state.setProperty("editorBypass", read(editorBypass), nullptr);
@@ -1859,6 +1867,7 @@ void OpenStudioEQ::setStateInformation(const void* data, int sizeInBytes)
     draftPreview.reset(publishedSampleRate.load());
     auto state = juce::ValueTree::readFromData(data, static_cast<size_t>(sizeInBytes));
     if (!state.isValid() || state.getType().toString() != "OpenStudioEQ") return;
+    signalPath.store(supportsExternalKey() && static_cast<float>(state.getProperty("signalPath", 0.0f)) >= .5f ? 1.0f : 0.0f);
     preparedMIDILatency.store(-1);
     externalDetector.store(supportsExternalKey() && static_cast<float>(state.getProperty("externalDetector", 0.0f)) >= .5f ? 1.0f : 0.0f);
     const auto finiteProperty = [&](const juce::Identifier& id, float fallback, float low, float high)
@@ -2739,7 +2748,13 @@ void OpenStudioCompressor::processStandaloneBlock(juce::AudioBuffer<float>& buff
             const float dry = read(ch, static_cast<float>(getLatencySamples()));
             const float shaped = useOriginalColour ? colouredAudio[static_cast<size_t>(ch)] : dry * gain;
             const float processed = vcaWeight == 0 ? shaped : shaped * priorWeight + vcaAudio[static_cast<size_t>(ch)] / vcaScale;
-            mixed[static_cast<size_t>(ch)] = dry * (1.0f - wet) + boundProcessedWetSample(noise[static_cast<size_t>(ch)]==0?processed:processed+noise[static_cast<size_t>(ch)]) * wet;
+            // Clean is a linear gain law. Retain the historical bound for
+            // coloured models and their outgoing crossfades/noise instead.
+            const bool cleanLinear = selected == 1 && !useOriginalColour && fetBlend == 0
+                && opticalWeight == 0 && vcaWeight == 0 && noise[static_cast<size_t>(ch)] == 0;
+            mixed[static_cast<size_t>(ch)] = dry * (1.0f - wet) + boundProcessedWetSample(
+                noise[static_cast<size_t>(ch)] == 0 ? processed : processed + noise[static_cast<size_t>(ch)],
+                cleanLinear ? std::numeric_limits<float>::max() : 2.5f) * wet;
         }
         const auto monitored=punchExtras.listen(mixed[0],channels==2?mixed[1]:mixed[0]);
         for(int ch=0;ch<channels;++ch){const float output=monitored[static_cast<size_t>(ch)];buffer.setSample(ch,i,output);outPeak=juce::jmax(outPeak,std::abs(output));}
@@ -3079,6 +3094,9 @@ void OpenStudioGate::processBlock(juce::AudioBuffer<float>& fullBuffer, juce::Mi
     const int numChannels = buffer.getNumChannels();
     if (numSamples <= 0 || numChannels <= 0)
         return;
+    // Standalone gating attenuates; it must not act as an unrelated clipper.
+    // The embedded NAM gate preserves its historical bounded wet path.
+    const float wetLimit = supportsExternalKey() ? std::numeric_limits<float>::max() : 2.5f;
     smoothedMix.setTargetValue(
         juce::jlimit(
             0.0f, 1.0f,
@@ -3185,7 +3203,7 @@ void OpenStudioGate::processBlock(juce::AudioBuffer<float>& fullBuffer, juce::Mi
             const float dry = buffer.getSample(ch, i);
             const float wet =
                 boundProcessedWetSample(
-                    dry * currentGain);
+                    dry * currentGain, wetLimit);
             buffer.setSample(
                 ch,
                 i,

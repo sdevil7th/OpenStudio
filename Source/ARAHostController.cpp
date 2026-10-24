@@ -242,7 +242,9 @@ ARAHostController::OpenStudioContentAccessController::createMusicalContextConten
     ARA::ARAMusicalContextHostRef, ARA::ARAContentType type,
     const ARA::ARAContentTimeRange*) noexcept
 {
-    return Converter::toHostRef (type);
+    if (!isMusicalContextContentAvailable(nullptr, type))
+        return nullptr;
+    return Converter::toHostRef (static_cast<std::uintptr_t>(type));
 }
 
 bool ARAHostController::OpenStudioContentAccessController::isAudioSourceContentAvailable (
@@ -278,6 +280,8 @@ const void* ARAHostController::OpenStudioContentAccessController::getContentRead
     ARA::ARAContentReaderHostRef contentReaderHostRef,
     ARA::ARAInt32 eventIndex) noexcept
 {
+    if (eventIndex < 0 || eventIndex >= getContentReaderEventCount(contentReaderHostRef))
+        return nullptr;
     if (Converter::fromHostRef (contentReaderHostRef) == ARA::kARAContentTypeTempoEntries)
     {
         if (eventIndex == 0)

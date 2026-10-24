@@ -43,6 +43,15 @@ import {
   ticksToSeconds,
 } from "../utils/snapToGrid";
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
+import { getRulerDragZoom, resolveRulerDragAxis } from "../utils/timelineRulerDrag";
+import {
+  RecordingPreviewScheduler,
+  recordingPeakX,
+  RECORDING_GEOMETRY_INTERVAL_MS,
+  RECORDING_PREVIEW_POLL_MS,
+  type RecordingWaveformCache,
+} from "../utils/recordingWaveformPreview";
+import { planTimelineClipCopy, type TimelineCopySource } from "../utils/timelineClipCopyPlan";
 import {
   guardModalContextMenu,
   modalPointerBoundaryProps,
@@ -238,15 +247,6 @@ interface TimelineProps {
 // Cache for waveform data to avoid re-fetching
 type WaveformCache = Map<string, WaveformPeak[]>;
 
-// Recording waveform cache (trackId -> peaks + width at fetch time)
-type RecordingWaveformData = {
-  peaks: WaveformPeak[];
-  widthPixels: number;
-  samplesPerPixel: number;
-  sampleRate: number;
-  recordingStartTime: number;
-};
-type RecordingWaveformCache = Map<string, RecordingWaveformData>;
 const AUDIO_RECORD_LOG_PREFIX = "[audio.record]";
 const EXTERNAL_MEDIA_EXTENSIONS = new Set([
   ".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif", ".wma", ".m4a", ".aac",
@@ -425,6 +425,7 @@ type TimelineDragState = {
   originalFadeOut?: number;
   multiClipInfo?: Array<{
     clipId: string;
+    sourceTrackId: string;
     trackIndex: number;
     originalStartTime: number;
     duration: number;
@@ -436,6 +437,19 @@ type TimelineDragState = {
 
 function getNewTrackTypeForTimelineClip(isMidi: boolean): "audio" | "midi" {
   return isMidi ? "midi" : "audio";
+}
+
+function getTimelineCopySources(gesture: TimelineDragState, tracks: readonly Track[]): TimelineCopySource[] {
+  if (gesture.multiClipInfo?.length) return gesture.multiClipInfo;
+  const owner = tracks.find(track => [...track.clips, ...track.midiClips].some(clip => clip.id === gesture.clipId));
+  if (!owner || !gesture.clipId) return [];
+  return [{
+    clipId: gesture.clipId,
+    sourceTrackId: owner.id,
+    originalStartTime: gesture.originalStartTime,
+    duration: gesture.originalDuration,
+    isMidi: owner.midiClips.some(clip => clip.id === gesture.clipId),
+  }];
 }
 
 type TimelineGestureUndoSnapshot = {
@@ -679,20 +693,87 @@ export function Timeline({
   >>({});
   const waveformCacheRef = useRef(waveformCache);
   waveformCacheRef.current = waveformCache;
-  const recordingWaveformCacheRef = useRef(recordingWaveformCache);
-  recordingWaveformCacheRef.current = recordingWaveformCache;
   // Marks recording-waveform updates as low-priority so React won't interrupt
   // the current RAF frame (playhead animation) to process them.
   const [, startRecordingWaveformTransition] = useTransition();
 
   // Zooming flag — suppresses waveform fetches during active zoom
   const isZoomingRef = useRef(false);
+  const ownsInlineRulerZoomRef = useRef(false);
   const zoomDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, forceRender] = useState(0); // trigger re-render when zoom ends
 
   // Scrolling flag — suppresses waveform fetches during active scroll (like zoom debounce)
   const isScrollingRef = useRef(false);
   const scrollDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const recordingViewportWidthRef = useRef(dimensions.width);
+  recordingViewportWidthRef.current = dimensions.width;
+  const recordingPreviewRef = useRef<RecordingPreviewScheduler | null>(null);
+  if (recordingPreviewRef.current === null) {
+    recordingPreviewRef.current = new RecordingPreviewScheduler({
+      readView: () => {
+        const state = useDAWStore.getState();
+        if (!state.transport.isRecording || state.recordingClips.length === 0) return null;
+        return {
+          clips: state.recordingClips.filter((clip) => {
+            const track = state.tracks.find((candidate) => candidate.id === clip.trackId);
+            return track && track.type !== "midi" && track.type !== "instrument";
+          }),
+          sampleRate: state.audioDeviceSetup?.sampleRate || 44100,
+          pixelsPerSecond: state.pixelsPerSecond,
+          scrollX: state.scrollX,
+          width: recordingViewportWidthRef.current,
+          currentTime: state.transport.currentTime,
+        };
+      },
+      isSuspended: () => isZoomingRef.current || isScrollingRef.current,
+      request: (trackId, samplesPerPixel, numPixels, startSample) =>
+        nativeBridge.getRecordingPeaks(trackId, samplesPerPixel, numPixels, startSample),
+      publish: (cache) => startRecordingWaveformTransition(() => setRecordingWaveformCache(cache)),
+      onError: (error) => console.error(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:error`, { error }),
+    });
+  }
+
+  // Observe the committed transform synchronously, including the separate sticky
+  // ruler, shortcuts and menu actions. Every zoom source shares one idle timer.
+  useEffect(() => {
+    const preview = recordingPreviewRef.current!;
+    preview.setActive(true);
+    isZoomingRef.current = useDAWStore.getState().isTimelineRulerZooming;
+    const unsubscribe = useDAWStore.subscribe((state, previous) => {
+      if (state.pixelsPerSecond !== previous.pixelsPerSecond
+        || state.isTimelineRulerZooming !== previous.isTimelineRulerZooming) {
+        isZoomingRef.current = true;
+        if (zoomDebounceRef.current) clearTimeout(zoomDebounceRef.current);
+        zoomDebounceRef.current = null;
+        // A held drag remains active even while the pointer is stationary.
+        // Start the idle delay only once the gesture releases ownership.
+        if (!state.isTimelineRulerZooming) {
+          zoomDebounceRef.current = setTimeout(() => {
+            isZoomingRef.current = false;
+            zoomDebounceRef.current = null;
+            forceRender((n) => n + 1);
+            void preview.poll();
+          }, 200);
+        }
+      }
+      if (state.pixelsPerSecond !== previous.pixelsPerSecond || state.scrollX !== previous.scrollX
+        || state.isTimelineRulerZooming !== previous.isTimelineRulerZooming
+        || state.recordingClips !== previous.recordingClips
+        || state.transport.isRecording !== previous.transport.isRecording
+        || state.audioDeviceSetup?.sampleRate !== previous.audioDeviceSetup?.sampleRate) {
+        preview.invalidate(!state.transport.isRecording || state.recordingClips.length === 0);
+      }
+    });
+    return () => {
+      unsubscribe();
+      preview.setActive(false);
+      if (zoomDebounceRef.current) clearTimeout(zoomDebounceRef.current);
+      zoomDebounceRef.current = null;
+      isZoomingRef.current = false;
+    };
+  }, []);
 
   // In-flight waveform fetches — prevents duplicate concurrent requests for same cache key
   const inFlightRef = useRef<Set<string>>(new Set());
@@ -1270,10 +1351,15 @@ export function Timeline({
       | "loop-create"
       | "time-select"
       | "zoom-create"
+      | "vertical-zoom"
       | "pending"; // pending = mousedown, not yet determined
     action: MouseModifierActionFor<"ruler_click">;
     handle?: "start" | "end";
     startX: number; // pixel X at mousedown (relative to ruler canvas)
+    startY?: number;
+    initialZoom?: number;
+    anchorTime?: number;
+    axisLock?: TimelineDragAxisLock | null;
     startTime: number; // time at mousedown
     currentTime?: number;
   } | null>(null);
@@ -1303,7 +1389,7 @@ export function Timeline({
     pasteClip,
     deleteClip,
     duplicateClip,
-    duplicateClipToPosition,
+    duplicateClipsToPositions,
     repeatClip,
     clipboard,
     addTrack,
@@ -1370,7 +1456,7 @@ export function Timeline({
       pasteClip: state.pasteClip,
       deleteClip: state.deleteClip,
       duplicateClip: state.duplicateClip,
-      duplicateClipToPosition: state.duplicateClipToPosition,
+      duplicateClipsToPositions: state.duplicateClipsToPositions,
       repeatClip: state.repeatClip,
       clipboard: state.clipboard,
       addTrack: state.addTrack,
@@ -1439,15 +1525,12 @@ export function Timeline({
       return;
     }
 
-    let previousTime = useDAWStore.getState().transport.currentTime;
-    const unsubscribe = useDAWStore.subscribe((state) => {
-      const nextTime = state.transport.currentTime;
-      if (nextTime === previousTime) return;
-      previousTime = nextTime;
-      setRecordingRenderTime(nextTime);
-    });
-
-    return () => unsubscribe();
+    // Clip growth does not need the playhead's 60 Hz React update rate.
+    // Playhead keeps its independent imperative transport subscription.
+    const updateGeometry = () => setRecordingRenderTime(useDAWStore.getState().transport.currentTime);
+    updateGeometry();
+    const timer = window.setInterval(updateGeometry, RECORDING_GEOMETRY_INTERVAL_MS);
+    return () => window.clearInterval(timer);
   }, [isRecording, recordingClips.length]);
 
   useEffect(() => {
@@ -1543,6 +1626,17 @@ export function Timeline({
     () => getTrackYPositions(tracks, trackHeight),
     [tracks, trackHeight],
   );
+  const copyPreviewPlan = useMemo(() => {
+    if (!dragState.copyOnDrag || !dragState.dragActivated || dragState.type !== "move") return null;
+    const fullTracks = useDAWStore.getState().tracks;
+    const sources = getTimelineCopySources(dragState, fullTracks);
+    const anchorTrackId = fullTracks.find(track => [...track.clips, ...track.midiClips].some(clip => clip.id === dragState.clipId))?.id;
+    return anchorTrackId ? planTimelineClipCopy({
+      sources, tracks: fullTracks, visibleTrackIds: tracks.map(track => track.id), anchorTrackId,
+      targetRowIndex: dragState.targetTrackIndex ?? dragState.trackIndex ?? 0,
+    }) : null;
+  }, [dragState, tracks]);
+  const copyGhostHeight = (copyPreviewPlan?.newTracks.length ?? 0) * trackHeight;
   // Master automation lanes add height below all tracks
   const masterVisibleLanes = useMemo(
     () => (masterAutomation?.showAutomation ? masterAutomation.lanes.filter((l) => l.visible) : []),
@@ -1550,7 +1644,7 @@ export function Timeline({
   );
   const masterAutoHeight = masterVisibleLanes.length > 0 ? trackHeight + masterVisibleLanes.length * AUTOMATION_LANE_HEIGHT : 0;
   const stageHeight = Math.max(
-    contentHeight + masterAutoHeight + bottomSpacerHeight,
+    contentHeight + copyGhostHeight + masterAutoHeight + bottomSpacerHeight,
     availableHeight,
     200,
   );
@@ -1762,7 +1856,7 @@ export function Timeline({
 
   // Handle scroll wheel for zoom with native listener to prevent browser zoom
   // Use requestAnimationFrame for smooth scrolling and zooming
-  const pendingScrollRef = useRef<{ x: number; y: number } | null>(null);
+  const pendingScrollRef = useRef<{ x: number; y: number; isFollow?: boolean } | null>(null);
   const pendingZoomRef = useRef<number | null>(null);
   const pendingTrackHeightRef = useRef<number | null>(null);
   const rafIdRef = useRef<number | null>(null);
@@ -1774,9 +1868,15 @@ export function Timeline({
   const ZOOM_SENSITIVITY = 0.0015;
 
   const applyPendingUpdates = useCallback(() => {
+    const committed = useDAWStore.getState();
+    if (pendingScrollRef.current?.isFollow
+      && (isZoomingRef.current || committed.isTimelineRulerZooming || !committed.autoScrollDuringPlayback
+        || pendingZoomRef.current !== null || accZoomDeltaRef.current !== 0)) {
+      pendingScrollRef.current = null;
+    }
     // Compute zoom from accumulated delta (coalesces all wheel events this frame)
     if (accZoomDeltaRef.current !== 0) {
-      const curZoom = pendingZoomRef.current ?? pixelsPerSecondRef.current;
+      const curZoom = pendingZoomRef.current ?? committed.pixelsPerSecond;
       const factor = Math.exp(-accZoomDeltaRef.current * ZOOM_SENSITIVITY);
       const newZoom = Math.max(
         MIN_PIXELS_PER_SECOND,
@@ -1785,38 +1885,51 @@ export function Timeline({
 
       // Anchor zoom to cursor position — the time under the cursor stays fixed
       const cursorX = zoomCursorXRef.current;
-      const curScrollX = pendingScrollRef.current?.x ?? scrollXRef.current;
+      const curScrollX = pendingScrollRef.current?.x ?? committed.scrollX;
       const timeAtCursor = (curScrollX + cursorX) / curZoom;
       const newScrollX = Math.max(0, timeAtCursor * newZoom - cursorX);
 
       pendingZoomRef.current = newZoom;
       pendingScrollRef.current = {
         x: newScrollX,
-        y: pendingScrollRef.current?.y ?? scrollYRef.current,
+        y: pendingScrollRef.current?.y ?? committed.scrollY,
       };
       accZoomDeltaRef.current = 0;
     }
 
-    // Apply all pending state in one batch
-    if (pendingZoomRef.current !== null) {
-      setZoom(pendingZoomRef.current);
-      pendingZoomRef.current = null;
+    // Publish zoom and its anchored scroll together; imperative subscribers must
+    // never see a new scale paired with the previous scroll offset.
+    const pendingZoom = pendingZoomRef.current;
+    const pendingScroll = pendingScrollRef.current;
+    pendingZoomRef.current = null;
+    pendingScrollRef.current = null;
+    if (pendingZoom !== null || pendingScroll !== null) {
+      const state = useDAWStore.getState();
+      useDAWStore.setState({
+        pixelsPerSecond: pendingZoom === null ? state.pixelsPerSecond
+          : Math.max(MIN_PIXELS_PER_SECOND, Math.min(MAX_PIXELS_PER_SECOND, pendingZoom)),
+        scrollX: Math.max(0, pendingScroll?.x ?? state.scrollX),
+        scrollY: Math.max(0, pendingScroll?.y ?? state.scrollY),
+      });
     }
     if (pendingTrackHeightRef.current !== null) {
       setTrackHeight(pendingTrackHeightRef.current);
       pendingTrackHeightRef.current = null;
     }
-    if (pendingScrollRef.current !== null) {
-      setScroll(pendingScrollRef.current.x, pendingScrollRef.current.y);
-      pendingScrollRef.current = null;
-    }
     rafIdRef.current = null;
-  }, [setScroll, setZoom, setTrackHeight]);
+  }, [setTrackHeight]);
 
   const scheduleRAF = useCallback(() => {
     if (rafIdRef.current === null) {
       rafIdRef.current = requestAnimationFrame(applyPendingUpdates);
     }
+  }, [applyPendingUpdates]);
+
+  const flushPendingZoom = useCallback(() => {
+    if (pendingZoomRef.current === null && accZoomDeltaRef.current === 0) return;
+    if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
+    rafIdRef.current = null;
+    applyPendingUpdates();
   }, [applyPendingUpdates]);
 
   const queueScroll = useCallback(
@@ -1825,7 +1938,7 @@ export function Timeline({
       newScrollY: number,
       options?: { suppressWaveformFetch?: boolean; isManual?: boolean },
     ) => {
-      pendingScrollRef.current = { x: newScrollX, y: newScrollY };
+      pendingScrollRef.current = { x: newScrollX, y: newScrollY, isFollow: options?.isManual === false };
       scheduleRAF();
 
       if (options?.isManual !== false) {
@@ -1876,14 +1989,11 @@ export function Timeline({
     [scheduleRAF],
   );
 
-  // Cleanup RAF + zoom debounce on unmount
+  // Cleanup pending scrolling and wheel/ruler frames on unmount
   useEffect(() => {
     return () => {
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
-      }
-      if (zoomDebounceRef.current) {
-        clearTimeout(zoomDebounceRef.current);
       }
       if (scrollDebounceRef.current) {
         clearTimeout(scrollDebounceRef.current);
@@ -2729,6 +2839,7 @@ export function Timeline({
       if (!hasTimelineClipDragStarted(rawDeltaX, rawDeltaY)) return;
       captureTimelineGestureUndo();
       gesture.dragActivated = true;
+      setTimelineDragState({ ...gesture });
     }
     const resizeDeltaTime = rawDeltaX / pps;
     const isMidi = found.kind === "midi";
@@ -2778,10 +2889,32 @@ export function Timeline({
     if (profiledDrag.axisLockRequested && constrainedDrag.axisLock !== "y") {
       targetTrackIdx = gesture.trackIndex ?? targetTrackIdx;
     }
+    // Keep a multi-track group intact when the pointer moves above its first row.
+    if (!gesture.copyOnDrag && gesture.multiClipInfo?.length) {
+      const firstTrack = Math.min(...gesture.multiClipInfo.map((info) => info.trackIndex));
+      targetTrackIdx = Math.max(targetTrackIdx, (gesture.trackIndex ?? found.trackIndex) - firstTrack);
+    }
+    const copyPlan = gesture.copyOnDrag ? planTimelineClipCopy({
+      sources: getTimelineCopySources(gesture, useDAWStore.getState().tracks),
+      tracks: useDAWStore.getState().tracks,
+      visibleTrackIds: latestTracks.map(track => track.id),
+      anchorTrackId: found.track.id,
+      targetRowIndex: targetTrackIdx,
+    }) : null;
+    if (gesture.copyOnDrag && !copyPlan) {
+      cancelActiveTimelineClipGesture();
+      return;
+    }
+    if (copyPlan) targetTrackIdx = copyPlan.targetAnchorRowIndex;
     const clampedTarget = Math.max(0, targetTrackIdx);
     const trackDelta = targetTrackIdx - (gesture.trackIndex ?? found.trackIndex);
     const multi = Boolean(gesture.multiClipInfo && gesture.multiClipInfo.length > 1);
-    const movingClips: TimelineClipSnapShape[] = multi
+    const movingClips: TimelineClipSnapShape[] = copyPlan ? copyPlan.placements.map(info => ({
+      clipId: info.clipId,
+      trackIndex: info.sourceRowIndex,
+      startTime: info.originalStartTime,
+      duration: info.duration,
+    })) : multi
       ? gesture.multiClipInfo!.map((info) => ({
           clipId: info.clipId,
           trackIndex: info.trackIndex,
@@ -2827,7 +2960,8 @@ export function Timeline({
         const viewportTop = scrollYRef.current;
         const viewportBottom = viewportTop + Math.max(0, availableHeightRef.current);
         const movingDestinationIndices = new Set(
-          movingClips.map((clip) => clip.trackIndex + trackDelta),
+          copyPlan ? copyPlan.placements.map(clip => clip.targetRowIndex)
+            : movingClips.map((clip) => clip.trackIndex + trackDelta),
         );
         const maxTrackIndex = Math.max(
           latestTracks.length - 1,
@@ -2854,7 +2988,9 @@ export function Timeline({
           movingClips,
           stationaryClips,
           rawDeltaTime: rawTimeDelta,
-          trackDelta,
+          trackDelta: copyPlan
+            ? copyPlan.placements[0].targetRowIndex - copyPlan.placements[0].sourceRowIndex
+            : trackDelta,
           viewport: {
             startTime: scrollXRef.current / pps,
             endTime: (scrollXRef.current + dimensionsWidthRef.current) / pps,
@@ -2898,7 +3034,7 @@ export function Timeline({
           : undefined,
       };
       setSnapGhostRender(snapGhostRef.current);
-      setShowGhostTrack(targetTrackIdx >= latestTracks.length);
+      setShowGhostTrack(Boolean(copyPlan?.newTracks.length));
       if (
         clampedTarget !== gesture.targetTrackIndex
         || constrainedDrag.axisLock !== (gesture.axisLock ?? null)
@@ -3050,7 +3186,11 @@ export function Timeline({
       trackId = crypto.randomUUID();
     }
 
-    await nativeBridge.addTrack(trackId, newTrackType);
+    const nativeTrackId = await nativeBridge.addTrack(trackId, newTrackType);
+    if (nativeTrackId !== trackId) {
+      if (nativeTrackId) await nativeBridge.removeTrack(nativeTrackId).catch(() => false);
+      throw new Error("The audio engine did not create the requested track");
+    }
     addTrack(
       {
         id: trackId,
@@ -3059,6 +3199,10 @@ export function Timeline({
       },
       { backendAlreadyCreated: true, recordUndo: false },
     );
+    if (!useDAWStore.getState().tracks.some(track => track.id === trackId)) {
+      await nativeBridge.removeTrack(trackId).catch(() => false);
+      throw new Error("Track creation was cancelled");
+    }
     return trackId;
   }, [addTrack]);
 
@@ -3175,27 +3319,73 @@ export function Timeline({
         return true;
       }
 
-      let targetTrackId = latestTracks[Math.max(0, Math.min(targetIdx, latestTracks.length - 1))]?.id;
-      const targetTrack = latestTracks.find((track) => track.id === targetTrackId);
-      const compatible = targetTrack
-        ? isMidi
-          ? targetTrack.type === "midi" || targetTrack.type === "instrument"
-          : targetTrack.type !== "midi" && targetTrack.type !== "instrument"
-        : false;
-
-      if (showGhostTrack || !targetTrackId || !compatible) {
-        const newTrackType = getNewTrackTypeForTimelineClip(isMidi);
-        targetTrackId = await createTimelineGeneratedTrack(newTrackType);
+      const infos = getTimelineCopySources(gesture, latestTracks);
+      const plan = planTimelineClipCopy({
+        sources: infos,
+        tracks: latestTracks,
+        visibleTrackIds: tracksRef.current.map(track => track.id),
+        anchorTrackId: found.track.id,
+        targetRowIndex: targetIdx,
+      });
+      if (!plan) {
+        cancelActiveTimelineClipGesture();
+        return false;
+      }
+      const createdTracks = new Map<number, string>();
+      const placements: Array<{ clipId: string; targetTrackId: string; targetStartTime: number }> = [];
+      const timeDelta = copyStartTime - gesture.originalStartTime;
+      let committed = false;
+      let contentChanged = false;
+      try {
+        for (const row of plan.newTracks) {
+          if (!ensureGestureIsEditable()) {
+            return false;
+          }
+          const targetTrackId = await createTimelineGeneratedTrack(row.type);
+          createdTracks.set(row.rowIndex, targetTrackId);
+          if (!ensureGestureIsEditable()) {
+            return false;
+          }
+        }
+        for (const info of plan.placements) {
+          const targetTrackId = info.targetTrackId ?? createdTracks.get(info.targetRowIndex);
+          if (!targetTrackId) {
+            cancelActiveTimelineClipGesture();
+            return false;
+          }
+          placements.push({ clipId: info.clipId, targetTrackId, targetStartTime: info.originalStartTime + timeDelta });
+        }
+        const state = useDAWStore.getState();
+        const copiedIds = duplicateClipsToPositions(placements, {
+          // Include any generated rows and copied automation in the gesture's one Undo step.
+          recordUndo: false,
+          syncBackend: false,
+          moveAutomation: shouldMoveAutomationWithItems(state.moveEnvelopesWithItems, Boolean(gesture.automationFollowInverted), Boolean(state.globalLocked || state.lockSettings.envelopes)),
+        });
+        contentChanged = copiedIds.length > 0;
+        if (copiedIds.length !== placements.length) {
+          cancelActiveTimelineClipGesture();
+          return false;
+        }
+        await syncClipsWithBackend();
         if (!ensureGestureIsEditable()) return false;
+        commitTimelineGestureUndo(infos.length > 1 ? "Copy timeline clips" : isMidi ? "Copy MIDI clip" : "Copy timeline clip");
+        committed = true;
+        resetDragState();
+        return true;
+      } catch (error) {
+        console.warn("Could not copy the timeline selection", error);
+        return false;
+      } finally {
+        if (!committed) {
+          cancelActiveTimelineClipGesture();
+          for (const id of createdTracks.values()) await nativeBridge.removeTrack(id).catch(() => false);
+          if (contentChanged) {
+            const restored = useDAWStore.getState();
+            await restored.syncClipsWithBackend().catch(error => console.warn("Could not restore copied content", error));
+          }
+        }
       }
-
-      if (targetTrackId && ensureGestureIsEditable()) {
-        duplicateClipToPosition(gesture.clipId, targetTrackId, copyStartTime);
-      }
-      await syncClipsWithBackend();
-      clearTimelineGestureUndo();
-      resetDragState();
-      return true;
     }
 
     const multi = gesture.multiClipInfo && gesture.multiClipInfo.length > 1;
@@ -3326,7 +3516,7 @@ export function Timeline({
     commitPreviewedResizeTimelineClip,
     commitTimelineGestureUndo,
     createTimelineGeneratedTrack,
-    duplicateClipToPosition,
+    duplicateClipsToPositions,
     findCurrentTimelineClip,
     isTimelineGestureEditLocked,
     moveClipToTrack,
@@ -3812,14 +4002,6 @@ export function Timeline({
         // Capture cursor X relative to container for zoom anchoring
         zoomCursorXRef.current = e.clientX - rect.left;
 
-        // Mark as zooming — suppresses waveform fetches until 200ms idle
-        isZoomingRef.current = true;
-        if (zoomDebounceRef.current) clearTimeout(zoomDebounceRef.current);
-        zoomDebounceRef.current = setTimeout(() => {
-          isZoomingRef.current = false;
-          forceRender((n) => n + 1); // re-render to fetch waveforms at final zoom
-        }, 200);
-
         if (gesture.amount !== 0) scheduleRAF();
       } else if (gesture.operation === "resize" && gesture.target === "track-height") {
         // Vertical Zoom (Track Height)
@@ -3830,9 +4012,10 @@ export function Timeline({
         }
       } else if (gesture.operation === "scroll" && gesture.axis === "horizontal") {
         // Horizontal scroll with Shift + Mouse Wheel
-        const curScrollX = pendingScrollRef.current?.x ?? scrollXRef.current;
-        const curZoom = pendingZoomRef.current ?? pixelsPerSecondRef.current;
+        flushPendingZoom();
         const state = useDAWStore.getState();
+        const curScrollX = pendingScrollRef.current?.x ?? state.scrollX;
+        const curZoom = pendingZoomRef.current ?? state.pixelsPerSecond;
         const maxTimelineScroll = getTimelineHorizontalScrollMax(
           tracksRef.current,
           state.recordingClips.length > 0 ? state.transport.currentTime : undefined,
@@ -3850,6 +4033,7 @@ export function Timeline({
         // Profiles such as Pro Tools and REAPER use modified, reduced-speed
         // vertical scrolling. Own the workspace scroll so the profile's
         // normalized multiplier is applied consistently for mouse and trackpad.
+        flushPendingZoom();
         const workspace = container.closest(".workspace") as HTMLElement | null;
         if (workspace) {
           const maxScrollY = Math.max(0, workspace.scrollHeight - workspace.clientHeight);
@@ -3858,7 +4042,7 @@ export function Timeline({
             Math.min(maxScrollY, workspace.scrollTop + gesture.amount),
           );
           workspace.scrollTop = newScrollY;
-          scheduleScroll(scrollXRef.current, newScrollY);
+          scheduleScroll(pendingScrollRef.current?.x ?? useDAWStore.getState().scrollX, newScrollY);
         }
       }
       // Normal vertical scroll: Let native scroll handle it (no preventDefault)
@@ -3867,7 +4051,7 @@ export function Timeline({
     // Use passive: false to allow preventDefault to work for zoom/horizontal scroll
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
-  }, [scheduleRAF, scheduleScroll, scheduleTrackHeight, showRuler]);
+  }, [flushPendingZoom, scheduleRAF, scheduleScroll, scheduleTrackHeight, showRuler]);
 
   // ── Ruler interaction: click = seek, drag = set range, drag handle = adjust range ──
   const RANGE_HANDLE_HIT_PX = 8;
@@ -3884,11 +4068,13 @@ export function Timeline({
       return;
     }
 
-    const rawClickedTime = Math.max(0, (pointerPos.x + scrollX) / pixelsPerSecond);
+    flushPendingZoom();
+    const view = useDAWStore.getState();
+    const rawClickedTime = Math.max(0, (pointerPos.x + view.scrollX) / view.pixelsPerSecond);
     const quantizePreset = getQuantizePresetById(quantizePresetsRef.current, quantizePresetIdRef.current);
     const clickedTime = getRulerClickSnapTime({
       time: rawClickedTime,
-      pixelsPerSecond: pixelsPerSecondRef.current,
+      pixelsPerSecond: view.pixelsPerSecond,
       tempo: tempoRef.current,
       timeSignature: timeSignatureRef.current,
       gridSize: gridSizeRef.current,
@@ -3902,8 +4088,8 @@ export function Timeline({
     });
 
     // Check if clicking near a range handle inside the visible marker zone.
-    const startX = projectRange.start * pixelsPerSecond - scrollX;
-    const endX = projectRange.end * pixelsPerSecond - scrollX;
+    const startX = projectRange.start * view.pixelsPerSecond - view.scrollX;
+    const endX = projectRange.end * view.pixelsPerSecond - view.scrollX;
     const inHandleZone = pointerPos.y <= RANGE_HANDLE_VISUAL_HEIGHT_PX;
 
     // Prefer end handle when both overlap (both at 0)
@@ -3944,9 +4130,17 @@ export function Timeline({
         type: "pending",
         action,
         startX: pointerPos.x,
+        startY: pointerPos.y,
+        initialZoom: view.pixelsPerSecond,
+        anchorTime: rawClickedTime,
+        axisLock: null,
         startTime: clickedTime,
         currentTime: clickedTime,
       };
+      if (action === "seek") {
+        ownsInlineRulerZoomRef.current = true;
+        useDAWStore.setState({ isTimelineRulerZooming: true });
+      }
     }
 
     // Not on a handle — plain click clears any existing time selection and seeks
@@ -4023,6 +4217,11 @@ export function Timeline({
   useEffect(() => {
     const getRulerCanvas = () =>
       containerRef.current?.querySelector(".sticky canvas") as HTMLCanvasElement | null;
+    const finishInlineRulerZoom = () => {
+      if (!ownsInlineRulerZoomRef.current) return;
+      ownsInlineRulerZoomRef.current = false;
+      useDAWStore.setState({ isTimelineRulerZooming: false });
+    };
 
     const handleGlobalMouseMove = (e: MouseEvent) => {
       const drag = rulerDragRef.current;
@@ -4032,6 +4231,25 @@ export function Timeline({
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
       const pointerX = e.clientX - rect.left;
+      const pointerY = e.clientY - rect.top;
+      if (drag.action === "seek" && (drag.type === "pending" || drag.type === "vertical-zoom")) {
+        drag.axisLock = resolveRulerDragAxis(drag.axisLock, pointerX - drag.startX, pointerY - (drag.startY ?? pointerY));
+        if (drag.axisLock === "y") {
+          drag.type = "vertical-zoom";
+          if (!ownsInlineRulerZoomRef.current) {
+            ownsInlineRulerZoomRef.current = true;
+            useDAWStore.setState({ isTimelineRulerZooming: true });
+          }
+          const view = getRulerDragZoom(drag.initialZoom ?? pixelsPerSecondRef.current, pointerY - (drag.startY ?? pointerY), drag.anchorTime ?? drag.startTime, drag.startX);
+          pendingZoomRef.current = view.pixelsPerSecond;
+          pendingScrollRef.current = { x: view.scrollX, y: scrollYRef.current };
+          scheduleRAF();
+          setRulerDragging(true);
+          return;
+        }
+        if (!drag.axisLock) return;
+        finishInlineRulerZoom();
+      }
       const curScrollX = scrollXRef.current;
       const curPPS = pixelsPerSecondRef.current;
       let time = Math.max(0, (pointerX + curScrollX) / curPPS);
@@ -4062,7 +4280,7 @@ export function Timeline({
         // Check if we've moved enough to start a range-create drag
         if (Math.abs(pointerX - drag.startX) > DRAG_THRESHOLD_PX) {
           if (drag.action === "loop_set") drag.type = "loop-create";
-          else if (drag.action === "time_select") drag.type = "time-select";
+          else if (drag.action === "time_select" || drag.action === "seek") drag.type = "time-select";
           else if (drag.action === "zoom_to") drag.type = "zoom-create";
           else return;
           // Snap the drag start time too
@@ -4098,6 +4316,7 @@ export function Timeline({
     const handleGlobalMouseUp = () => {
       const drag = rulerDragRef.current;
       if (!drag) return;
+      flushPendingZoom();
 
       if (drag.type === "pending" && drag.action === "seek") {
         // No significant movement — this was a click, so seek
@@ -4129,11 +4348,14 @@ export function Timeline({
       }
 
       rulerDragRef.current = null;
+      finishInlineRulerZoom();
       setRulerDragging(false);
     };
 
     const handleWindowBlur = () => {
+      flushPendingZoom();
       rulerDragRef.current = null;
+      finishInlineRulerZoom();
       setRulerDragging(false);
       setMarqueeZoomRect(null);
     };
@@ -4141,12 +4363,15 @@ export function Timeline({
     window.addEventListener("mousemove", handleGlobalMouseMove);
     window.addEventListener("mouseup", handleGlobalMouseUp);
     window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("pointercancel", handleWindowBlur);
     return () => {
       window.removeEventListener("mousemove", handleGlobalMouseMove);
       window.removeEventListener("mouseup", handleGlobalMouseUp);
       window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("pointercancel", handleWindowBlur);
+      finishInlineRulerZoom();
     };
-  }, [clearTimeSelection, seekTo, setProjectRange, setScroll, setTimeSelection, setZoom]);
+  }, [clearTimeSelection, flushPendingZoom, scheduleRAF, seekTo, setProjectRange, setScroll, setTimeSelection, setZoom]);
 
   // Handle mouse move for time selection / razor edit dragging (on main stage)
   const handleStageMouseMove = (e: KonvaEvent) => {
@@ -4568,10 +4793,8 @@ export function Timeline({
     };
   }, []);
 
-  // Auto-Scroll during playback - uses Zustand subscribe to avoid re-renders.
-  // IMPORTANT: scrollX is read from scrollXRef (not the dep array) to prevent a
-  // re-render → effect re-run → setScroll → re-render loop that caused the
-  // "white border flicker" during playback auto-scroll.
+  // Follow transport changes without reacting to unrelated store publications.
+  // Read the committed transform so manual scrolling/zooming keeps its anchor.
   useEffect(() => {
     if (!isPlaying) return;
 
@@ -4581,12 +4804,18 @@ export function Timeline({
     const FOLLOW_TARGET_RATIO = 0.72;
     const FOLLOW_BACK_JUMP_PADDING = 120;
 
-    const unsubscribe = useDAWStore.subscribe((state) => {
-      if (!state.transport.isPlaying) return;
+    const unsubscribe = useDAWStore.subscribe((state, previous) => {
+      if (state.scrollX !== previous.scrollX || state.pixelsPerSecond !== previous.pixelsPerSecond
+        || state.isTimelineRulerZooming !== previous.isTimelineRulerZooming) {
+        lastAutoScrollX = state.scrollX;
+      }
+      if (state.transport.currentTime === previous.transport.currentTime) return;
+      if (!state.transport.isPlaying || !state.autoScrollDuringPlayback) return;
+      if (isZoomingRef.current || state.isTimelineRulerZooming) return;
       if (performance.now() < manualScrollLockUntilRef.current) return;
 
       const currentTime = state.transport.currentTime;
-      const pps = pixelsPerSecondRef.current;
+      const pps = state.pixelsPerSecond;
       const playheadX = currentTime * pps;
       const viewWidth = dimensions.width;
 
@@ -4594,7 +4823,7 @@ export function Timeline({
       if (playheadX < lastAutoScrollX) {
         const targetScrollX = Math.max(0, playheadX - FOLLOW_BACK_JUMP_PADDING);
         lastAutoScrollX = targetScrollX;
-        scheduleFollowScroll(targetScrollX, scrollYRef.current);
+        scheduleFollowScroll(targetScrollX, state.scrollY);
         return;
       }
 
@@ -4608,7 +4837,7 @@ export function Timeline({
         );
         if (Math.abs(targetScrollX - lastAutoScrollX) < 1) return;
         lastAutoScrollX = targetScrollX;
-        scheduleFollowScroll(targetScrollX, scrollYRef.current);
+        scheduleFollowScroll(targetScrollX, state.scrollY);
       }
     });
 
@@ -4632,6 +4861,7 @@ export function Timeline({
     }
 
     const prefetch = () => {
+      if (isZoomingRef.current || isScrollingRef.current) return;
       const daw = useDAWStore.getState();
       const pps = daw.pixelsPerSecond;
       const curTime = daw.transport.currentTime;
@@ -4683,97 +4913,18 @@ export function Timeline({
     };
   }, [isPlaying, dimensions.width]);
 
-  // Fetch recording waveforms on a short throttle while recording so short takes
-  // also produce visible waveforms during record.
+  // The scheduler's in-flight guard survives zoom, scroll and effect restarts.
+  // Native peak storage maintenance is independent of preview visibility.
   useEffect(() => {
-    if (!isRecording || recordingClips.length === 0) {
-      // Clear recording waveform cache and reset bar tracking when not recording
-      if (recordingWaveformCache.size > 0) {
-        setRecordingWaveformCache(new Map());
-      }
-      return;
-    }
+    const preview = recordingPreviewRef.current!;
+    void preview.poll();
+    const intervalId = window.setInterval(() => void preview.poll(), RECORDING_PREVIEW_POLL_MS);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
-    let cancelled = false;
-    let inFlight = false;
-    const fetchRecordingPeaks = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      const currentTime = useDAWStore.getState().transport.currentTime;
-      const newCache = new Map(recordingWaveformCacheRef.current);
-
-      try {
-        for (const rc of recordingClips) {
-          const track = tracks.find((candidate) => candidate.id === rc.trackId);
-          if (track?.type === "midi" || track?.type === "instrument") {
-            newCache.delete(rc.trackId);
-            continue;
-          }
-
-          const recordingDuration = currentTime - rc.startTime;
-          if (recordingDuration <= 0) {
-            continue;
-          }
-
-          const deviceSR = useDAWStore.getState().audioDeviceSetup?.sampleRate || 44100;
-          const samplesPerPixel = Math.max(1, Math.floor(deviceSR / pixelsPerSecond));
-          const existing = newCache.get(rc.trackId);
-          const canAppend = Boolean(
-            existing
-            && existing.samplesPerPixel === samplesPerPixel
-            && existing.sampleRate === deviceSR
-            && existing.recordingStartTime === rc.startTime,
-          );
-          const previousPeaks = canAppend ? existing!.peaks : [];
-          const startSample = previousPeaks.length * samplesPerPixel;
-          const recordedSamples = Math.max(0, Math.floor(recordingDuration * deviceSR));
-          const missingPixels = Math.max(
-            1,
-            Math.ceil(Math.max(0, recordedSamples - startSample) / samplesPerPixel),
-          );
-          const newPeaks = await nativeBridge.getRecordingPeaks(
-            rc.trackId,
-            samplesPerPixel,
-            missingPixels,
-            startSample,
-          );
-
-          if (newPeaks.length > 0) {
-            const peaks = canAppend ? [...previousPeaks, ...newPeaks] : newPeaks;
-            const widthPixels = peaks.length * samplesPerPixel / deviceSR * pixelsPerSecond;
-            newCache.set(rc.trackId, {
-              peaks,
-              widthPixels,
-              samplesPerPixel,
-              sampleRate: deviceSR,
-              recordingStartTime: rc.startTime,
-            });
-          }
-        }
-      } catch (e) {
-        if (!cancelled) {
-          console.error(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:error`, {
-            error: e,
-          });
-        }
-      } finally {
-        inFlight = false;
-        if (!cancelled) {
-          startRecordingWaveformTransition(() => setRecordingWaveformCache(newCache));
-        }
-      }
-    };
-
-    void fetchRecordingPeaks();
-    const intervalId = window.setInterval(() => {
-      void fetchRecordingPeaks();
-    }, 250);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [isRecording, recordingClips, pixelsPerSecond, tempo, timeSignature, tracks]);
+  useEffect(() => {
+    void recordingPreviewRef.current!.poll();
+  }, [isRecording, recordingClips, pixelsPerSecond, scrollX, dimensions.width]);
 
   // Subscribe to peaksReady events from C++ — invalidate waveform cache and
   // in-flight guards for the finished file so renderClip re-fetches fresh peaks.
@@ -5128,8 +5279,10 @@ export function Timeline({
     trackY: number,
     trackColor: string,
     trackId: string,
+    isCopyPreview = false,
+    previewTrack?: Track,
   ) => {
-    const track = tracks[trackIndex];
+    const track = previewTrack ?? tracks[trackIndex];
     const rowMetrics = getTimelineRowMetrics(track, trackHeight);
     const clipHeight = rowMetrics.clipHeight;
     const waveformHeight = Math.max(8, clipHeight - 10);
@@ -5143,7 +5296,7 @@ export function Timeline({
 
     // During cross-track drag, visually offset clip to target track position
     // (actual move deferred to drag end to prevent Konva node unmount)
-    if (dragState.type === "move" && dragState.targetTrackIndex != null) {
+    if (!isCopyPreview && !dragState.copyOnDrag && dragState.type === "move" && dragState.targetTrackIndex != null) {
       if (dragState.clipId === clip.id) {
         // Anchor clip — offset to pointer's target track
         if (dragState.targetTrackIndex !== trackIndex) {
@@ -5476,6 +5629,7 @@ export function Timeline({
       // Don't re-select if already selected (preserves multi-selection during drag)
       if (!gesture.isFadeDrag) captureTimelineGestureUndo();
       gesture.dragActivated = true;
+      setTimelineDragState({ ...gesture });
       if (!selectedClipIds.includes(clip.id)) {
         selectClip(clip.id);
       }
@@ -5650,7 +5804,7 @@ export function Timeline({
         && isTimelineClipCopyAction(modifierAction)
         && shouldStartTimelineCopyDrag(true, dragType, clipEditLocked);
       // Preserve multi-selection: if the clip is already selected in a multi-selection
-      // and this is not a copy gesture, don't clear the selection.
+      // preserve the entire group for both move and copy gestures.
       const currentSelectedIds = useDAWStore.getState().selectedClipIds;
       const isAlreadyInMultiSelection = currentSelectedIds.length > 1 && currentSelectedIds.includes(clip.id);
       if (!copyOnDrag && !isAlreadyInMultiSelection) {
@@ -5691,18 +5845,18 @@ export function Timeline({
       let multiClipInfo: typeof dragState.multiClipInfo;
       const latestSelectedIds = useDAWStore.getState().selectedClipIds;
       const currentTracks = useDAWStore.getState().tracks;
-      if (!copyOnDrag && dragType === "move" && latestSelectedIds.length > 1 && latestSelectedIds.includes(clip.id)) {
+      if (dragType === "move" && latestSelectedIds.length > 1 && latestSelectedIds.includes(clip.id)) {
         multiClipInfo = [];
         for (let ti = 0; ti < currentTracks.length; ti++) {
           const t = currentTracks[ti];
           for (const c of t.clips) {
             if (latestSelectedIds.includes(c.id) && !isClipEditLocked(useDAWStore.getState(), c)) {
-              multiClipInfo.push({ clipId: c.id, trackIndex: ti, originalStartTime: c.startTime, duration: c.duration, isMidi: false });
+              multiClipInfo.push({ clipId: c.id, sourceTrackId: t.id, trackIndex: ti, originalStartTime: c.startTime, duration: c.duration, isMidi: false });
             }
           }
           for (const mc of t.midiClips) {
             if (latestSelectedIds.includes(mc.id) && !isClipEditLocked(useDAWStore.getState(), mc)) {
-              multiClipInfo.push({ clipId: mc.id, trackIndex: ti, originalStartTime: mc.startTime, duration: mc.duration, isMidi: true });
+              multiClipInfo.push({ clipId: mc.id, sourceTrackId: t.id, trackIndex: ti, originalStartTime: mc.startTime, duration: mc.duration, isMidi: true });
             }
           }
         }
@@ -5737,7 +5891,7 @@ export function Timeline({
           : modifierAction as MouseModifierActionFor<"clip_resize">,
         previewStartTime: clip.startTime,
         multiClipInfo,
-        snapClipGeometry: snapshotTimelineClipGeometry(currentTracks),
+        snapClipGeometry: snapshotTimelineClipGeometry(copyOnDrag ? tracksRef.current : currentTracks),
       });
     };
 
@@ -5795,7 +5949,9 @@ export function Timeline({
     return (
       <Group
         key={clip.id}
-        draggable={!clipEditLocked}
+        draggable={!isCopyPreview && !clipEditLocked}
+        listening={!isCopyPreview}
+        opacity={isCopyPreview ? 0.5 : 1}
         dragDistance={TIMELINE_CLIP_DRAG_THRESHOLD_PX}
         onDragStart={handleDragStart}
         onDragMove={handleDragMoveModified}
@@ -6343,7 +6499,7 @@ export function Timeline({
           })()}
         {/* Ripple editing indicator — shows arrow on clips that will shift */}
         {rippleMode !== "off" &&
-          dragState.type !== null &&
+          !isCopyPreview && !dragState.copyOnDrag && dragState.type !== null &&
           dragState.clipId !== clip.id &&
           (rippleMode === "all_tracks" || dragState.trackIndex === trackIndex) &&
           clip.startTime >= dragState.originalStartTime && (
@@ -6455,18 +6611,20 @@ export function Timeline({
     const renderRecordingWaveform = (): React.ReactNode[] => {
       if (!recordingData || recordingData.peaks.length === 0) return [];
 
-      const { peaks: recordingPeaks, widthPixels: peaksWidth } = recordingData;
+      if (recordingData.recordingStartTime !== clip.startTime) return [];
+      const { peaks: recordingPeaks } = recordingData;
       const numChannels = recordingPeaks[0]?.channels?.length || 1;
       const waveforms: React.ReactNode[] = [];
       const waveformHeight = Math.max(8, clipHeight - 10);
-      const pixelsPerPeak = peaksWidth / recordingPeaks.length;
+      const pixelsPerPeak = recordingData.samplesPerPixel / recordingData.sampleRate * pixelsPerSecond;
+      const waveformX = recordingPeakX(recordingData, 0, pixelsPerSecond, scrollX);
       const firstVisiblePeak = Math.max(
         0,
-        Math.floor((-x) / Math.max(pixelsPerPeak, 0.001)) - 1,
+        Math.floor((-waveformX) / Math.max(pixelsPerPeak, 0.001)) - 1,
       );
       const lastVisiblePeak = Math.min(
         recordingPeaks.length,
-        Math.ceil((dimensions.width - x) / Math.max(pixelsPerPeak, 0.001)) + 1,
+        Math.ceil((dimensions.width - waveformX) / Math.max(pixelsPerPeak, 0.001)) + 1,
       );
 
       for (let ch = 0; ch < numChannels; ch++) {
@@ -6476,12 +6634,13 @@ export function Timeline({
         const centerY = channelY + channelHeight / 2;
         const halfHeight = channelHeight / 2 - 2;
 
-        // Draw top half (max values) - use peaksWidth (width at fetch time), not current width
+        // Reproject source sample bins at the current zoom, even while a new
+        // resolution is pending. Cached peaks never retain obsolete pixel widths.
         for (let i = firstVisiblePeak; i < lastVisiblePeak; i++) {
           const channelData = recordingPeaks[i].channels[ch];
           if (!channelData) continue;
 
-          const px = x + (i * peaksWidth) / recordingPeaks.length;
+          const px = waveformX + i * pixelsPerPeak;
           const py = centerY - channelData.max * halfHeight;
           points.push(px, py);
         }
@@ -6491,7 +6650,7 @@ export function Timeline({
           const channelData = recordingPeaks[i].channels[ch];
           if (!channelData) continue;
 
-          const px = x + (i * peaksWidth) / recordingPeaks.length;
+          const px = waveformX + i * pixelsPerPeak;
           const py = centerY - channelData.min * halfHeight;
           points.push(px, py);
         }
@@ -6572,8 +6731,10 @@ export function Timeline({
     trackY: number,
     trackColor: string,
     trackId: string,
+    isCopyPreview = false,
+    previewTrack?: Track,
   ) => {
-    const track = tracks[_trackIndex];
+    const track = previewTrack ?? tracks[_trackIndex];
     const x = clip.startTime * pixelsPerSecond - scrollX;
     const width = clip.duration * pixelsPerSecond;
     const rowMetrics = getTimelineRowMetrics(track, trackHeight);
@@ -6588,7 +6749,7 @@ export function Timeline({
     let visualTrackY = trackY;
 
     // Visual offset for multi-clip drag
-    if (dragState.type === "move" && dragState.multiClipInfo && dragState.multiClipInfo.length > 1 && dragState.targetTrackIndex != null) {
+    if (!isCopyPreview && !dragState.copyOnDrag && dragState.type === "move" && dragState.multiClipInfo && dragState.multiClipInfo.length > 1 && dragState.targetTrackIndex != null) {
       const info = dragState.multiClipInfo.find(m => m.clipId === clip.id);
       if (info) {
         const trackDelta = dragState.targetTrackIndex - (dragState.trackIndex ?? 0);
@@ -6734,18 +6895,18 @@ export function Timeline({
       let multiClipInfo: typeof dragState.multiClipInfo;
       const latestSelectedIds = useDAWStore.getState().selectedClipIds;
       const currentTracks = useDAWStore.getState().tracks;
-      if (!copyOnDrag && dragType === "move" && latestSelectedIds.length > 1 && latestSelectedIds.includes(clip.id)) {
+      if (dragType === "move" && latestSelectedIds.length > 1 && latestSelectedIds.includes(clip.id)) {
         multiClipInfo = [];
         for (let ti = 0; ti < currentTracks.length; ti++) {
           const t = currentTracks[ti];
           for (const c of t.clips) {
             if (latestSelectedIds.includes(c.id) && !isClipEditLocked(useDAWStore.getState(), c)) {
-              multiClipInfo.push({ clipId: c.id, trackIndex: ti, originalStartTime: c.startTime, duration: c.duration, isMidi: false });
+              multiClipInfo.push({ clipId: c.id, sourceTrackId: t.id, trackIndex: ti, originalStartTime: c.startTime, duration: c.duration, isMidi: false });
             }
           }
           for (const mc of t.midiClips) {
             if (latestSelectedIds.includes(mc.id) && !isClipEditLocked(useDAWStore.getState(), mc)) {
-              multiClipInfo.push({ clipId: mc.id, trackIndex: ti, originalStartTime: mc.startTime, duration: mc.duration, isMidi: true });
+              multiClipInfo.push({ clipId: mc.id, sourceTrackId: t.id, trackIndex: ti, originalStartTime: mc.startTime, duration: mc.duration, isMidi: true });
             }
           }
         }
@@ -6779,7 +6940,7 @@ export function Timeline({
           : modifierAction as MouseModifierActionFor<"clip_resize">,
         previewStartTime: clip.startTime,
         multiClipInfo,
-        snapClipGeometry: snapshotTimelineClipGeometry(currentTracks),
+        snapClipGeometry: snapshotTimelineClipGeometry(copyOnDrag ? tracksRef.current : currentTracks),
       });
     };
 
@@ -6825,6 +6986,7 @@ export function Timeline({
       }
       captureTimelineGestureUndo();
       gesture.dragActivated = true;
+      setTimelineDragState({ ...gesture });
       if (!selectedClipIds.includes(clip.id)) {
         selectClip(clip.id);
       }
@@ -6855,7 +7017,9 @@ export function Timeline({
     return (
       <Group
         key={clip.id}
-        draggable={!clipEditLocked}
+        draggable={!isCopyPreview && !clipEditLocked}
+        listening={!isCopyPreview}
+        opacity={isCopyPreview ? 0.5 : 1}
         dragDistance={TIMELINE_CLIP_DRAG_THRESHOLD_PX}
         onDragStart={handleMIDIClipDragStart}
         onDragMove={handleMIDIClipDragMove}
@@ -6975,7 +7139,7 @@ export function Timeline({
         />
         {/* Ripple editing indicator — shows arrow on MIDI clips that will shift */}
         {rippleMode !== "off" &&
-          dragState.type !== null &&
+          !isCopyPreview && !dragState.copyOnDrag && dragState.type !== null &&
           dragState.clipId !== clip.id &&
           (rippleMode === "all_tracks" || dragState.trackIndex === _trackIndex) &&
           clip.startTime >= dragState.originalStartTime && (
@@ -7322,7 +7486,7 @@ export function Timeline({
   // Render master automation lanes at the bottom of all tracks
   const renderMasterAutomationLanes = () => {
     if (masterVisibleLanes.length === 0) return null;
-    const masterY = contentHeight;
+    const masterY = contentHeight + copyGhostHeight;
 
     return (
       <Group>
@@ -7710,7 +7874,7 @@ export function Timeline({
           x={0}
           y={ghostY}
           width={dimensions.width}
-          height={trackHeight}
+          height={Math.max(trackHeight, copyGhostHeight)}
           fill="#ffffff"
           opacity={0.05}
           listening={false}
@@ -7718,7 +7882,7 @@ export function Timeline({
         <Text
           x={10}
           y={ghostY + 10}
-          text="+ Create New Track"
+          text={copyPreviewPlan?.newTracks.length ? `+ Create ${copyPreviewPlan.newTracks.length} Track${copyPreviewPlan.newTracks.length === 1 ? "" : "s"}` : "+ Create New Track"}
           fill="#ffffff"
           opacity={0.5}
           listening={false}
@@ -8727,6 +8891,25 @@ export function Timeline({
           {/* Ghost Track */}
           {renderGhostTrack()}
 
+          {/* Copies use the real clip renderer, including waveform/note previews and labels. */}
+          {dragState.copyOnDrag && dragState.dragActivated && dragState.type === "move" && (() => {
+            const fullTracks = useDAWStore.getState().tracks;
+            const plan = copyPreviewPlan;
+            if (!plan) return null;
+            const timeDelta = (dragState.previewStartTime ?? dragState.originalStartTime) - dragState.originalStartTime;
+            return plan.placements.map((info) => {
+              const sourceTrack = fullTracks.find(track => track.id === info.sourceTrackId);
+              if (!sourceTrack) return null;
+              const targetIndex = info.targetRowIndex;
+              const targetY = trackYs[targetIndex] ?? contentHeight + Math.max(0, targetIndex - tracks.length) * trackHeight;
+              const previewTrack = fullTracks.find(track => track.id === info.targetTrackId) ?? sourceTrack;
+              const midi = sourceTrack.midiClips.find((clip) => clip.id === info.clipId);
+              if (midi) return renderMIDIClip({ ...midi, startTime: info.originalStartTime + timeDelta }, info.sourceRowIndex, targetY, sourceTrack.color, sourceTrack.id, true, previewTrack);
+              const audio = sourceTrack.clips.find((clip) => clip.id === info.clipId);
+              return audio ? renderClip({ ...audio, startTime: info.originalStartTime + timeDelta }, info.sourceRowIndex, targetY, sourceTrack.color, sourceTrack.id, true, previewTrack) : null;
+            });
+          })()}
+
           {/* Snap ghost preview — semi-transparent rect at snapped position during drag */}
           {snapGhostRender?.visible && snapGhostRender.guideX !== undefined && (
             <Line
@@ -8742,7 +8925,7 @@ export function Timeline({
               listening={false}
             />
           )}
-          {snapGhostRender && snapGhostRender.visible && (
+          {!dragState.copyOnDrag && snapGhostRender && snapGhostRender.visible && (
             <Rect
               x={snapGhostRender.x}
               y={snapGhostRender.y}

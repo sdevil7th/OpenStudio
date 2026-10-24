@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useEditorOverview } from "./useEditorOverview";
+import { usePluginFeatureReveal } from "../../utils/pluginFeatureNavigation";
 import { findBuiltInParameter } from "../../utils/builtInExpandedSelectors";
 import { EQToolbar } from "./EQToolbar";
 import { changedEffectSettings, detailDescription, EffectDetailIndicator } from "./EffectDetailIndicator";
@@ -30,6 +32,15 @@ export function DelayEditor(props: ApprovedEffectEditorProps) {
   const type = findBuiltInParameter(schema, "delayMode");
   const modeLabel = type?.enumOptions?.find(option => option.value === mode)?.label ?? "Delay";
   const [detail, setDetail] = useState<Detail | null>(null);
+  const editor = useRef<HTMLDivElement>(null);
+  const overview = useEditorOverview(editor);
+  usePluginFeatureReveal(editor, "delay", ({ parameterId: id }) => {
+    if (!id) return;
+    if (/^(customMotion|wow|flutter)/.test(id)) setDetail("motion");
+    else if (/^duck(Attack|Release|Max)/.test(id)) setDetail("duck");
+    else if (/^dual(?!Time)/.test(id)) setDetail("engine");
+    else if (["crossFeed", "stereoWidth", "topologyControl", "dualTimeRatio"].includes(id)) setDetail("routing");
+  });
   const visibleDetail = detail === "engine" && mode !== 4 ? "routing" : detail;
   const diffusion = value("diffusionAmount") > 0;
   const diffusionDescription = diffusion ? `Diffusion adds ${Number(value("diffusionSpanMs").toFixed(1))} ms of post-repeat span.` : "Diffusion off.";
@@ -52,7 +63,7 @@ export function DelayEditor(props: ApprovedEffectEditorProps) {
     </div>;
   };
 
-  return <EffectMeterProvider {...props}><div className="approved-effect-editor delay-editor flex min-h-0 min-w-0 flex-1 flex-col" data-suite-kind="delay">
+  return <EffectMeterProvider {...props}><div ref={editor} className="approved-effect-editor delay-editor flex min-h-0 min-w-0 flex-1 flex-col" data-suite-kind="delay">
     <EQToolbar {...props} />
     <div className="delay-face flex min-h-0 flex-1 flex-col overflow-y-auto p-[23px_26px_13px] gap-[16px]">
       <header className="delay-heading flex shrink-0 items-end justify-between gap-3">
@@ -77,13 +88,13 @@ export function DelayEditor(props: ApprovedEffectEditorProps) {
       <div className="delay-foot flex shrink-0 items-center justify-between gap-3"><p><b>{modeLabel.toUpperCase()}</b><span className="delay-description">{descriptions[mode]}</span><span className="delay-compact-contract">{diffusionDescription}</span></p>
         <button type="button" className="delay-detail-button text-[12px] whitespace-nowrap p-[7px_13px]" aria-label={detail ? "Close detail −" : "Detail +"} aria-description={detailSummary || undefined} title={detailDescription("Detail", detailSummary)} aria-expanded={detail !== null} aria-controls="delay-detail" onClick={() => setDetail(detail ? null : "motion")}>{detail ? "Close detail −" : "Detail +"}<EffectDetailIndicator summary={detailSummary} /></button>
       </div>
-      {detail && <section className="delay-detail shrink-0" id="delay-detail" aria-label="Delay detail">
+      {(detail || overview) && <section className="delay-detail shrink-0" id="delay-detail" aria-label="Delay detail">
         <div className="delay-tabs flex flex-wrap gap-[2px] p-[0_10px]" role="group" aria-label="Delay detail pages">{pages.map(([id, label]) => <button key={id} type="button" aria-label={label} aria-description={detailState[id] || undefined} title={detailDescription(label, detailState[id])} aria-pressed={visibleDetail === id} onClick={() => setDetail(id)}>{label}<EffectDetailIndicator summary={detailState[id]} /></button>)}</div>
-        <div className="delay-detail-body flex flex-col gap-3 p-[15px_20px]">
-          {visibleDetail === "motion" && <>{control("customMotion", false, "Custom wow")}<div className="delay-detail-controls flex flex-wrap items-center gap-6">{value("customMotion") >= .5 && <>{control("wowDepthMs", false, "Wow depth")}{control("wowRateHz", false, "Wow rate")}</>}{control("flutterDepthMs", false, "Flutter depth")}{control("flutterRateHz", false, "Flutter rate")}</div><p>{value("customMotion") >= .5 ? "Custom wow controls the main repeat engine’s slow motion. Flutter adds faster movement." : "The repeat engine sets its own wow. Enable Custom wow to use the stored depth and rate."}</p></>}
-          {visibleDetail === "duck" && <><div className="delay-detail-controls flex flex-wrap items-center gap-6">{control("duckAttackMs", false, "Attack")}{control("duckReleaseMs", false, "Release")}{control("duckMaxReduction", false, "Reduction limit")}</div><p>Ducking amount stays on the front panel. These controls set how the wet signal returns between phrases.</p></>}
-          {visibleDetail === "routing" && <><div className="delay-detail-controls flex flex-wrap items-center gap-6">{control("crossFeed", false, "Crossfeed")}{control("stereoWidth", false, "Stereo width")}{mode === 3 && control("topologyControl", false, "Head pattern")}{mode === 4 && <>{control("topologyControl", false, "Topology")}{control("dualTimeRatio", false, "B time ratio")}</>}</div><p>{mode === 4 ? "Engine B has independent feedback, tone and motion. Its time follows each channel’s main delay by B time ratio." : mode === 3 ? "Four weighted heads share a feedback path. Head pattern changes their timing and balance; the heads are not individually switchable." : "Left and right timing remain independent. Crossfeed routes feedback between channels; Ping-pong alternates the return."}</p></>}
-          {visibleDetail === "engine" && <><div className="delay-detail-controls flex flex-wrap items-center gap-6">{control("dualFeedback", false, "B feedback")}{control("dualHighPassHz", false, "B low cut")}{control("dualLowPassHz", false, "B high cut")}{control("dualSaturation", false, "B colour")}{control("dualModDepthMs", false, "B motion")}{control("dualModRateHz", false, "B rate")}</div><p>Engine A uses the front-panel feedback and tone. Engine B retains its own settings when another mode is selected.</p></>}
+        <div className="delay-detail-body flex flex-col gap-3 p-[15px_20px]" data-overview={overview}>
+          {(visibleDetail === "motion" || overview) && <section className="min-w-0">{overview && <h3 className="border-t border-daw-border-light pt-5 text-lg">Motion</h3>}{control("customMotion", false, "Custom wow")}<div className="delay-detail-controls flex flex-wrap items-center gap-6">{value("customMotion") >= .5 && <>{control("wowDepthMs", false, "Wow depth")}{control("wowRateHz", false, "Wow rate")}</>}{control("flutterDepthMs", false, "Flutter depth")}{control("flutterRateHz", false, "Flutter rate")}</div><p>{value("customMotion") >= .5 ? "Custom wow controls the main repeat engine’s slow motion. Flutter adds faster movement." : "The repeat engine sets its own wow. Enable Custom wow to use the stored depth and rate."}</p></section>}
+          {(visibleDetail === "duck" || overview) && <section className="min-w-0">{overview && <h3 className="border-t border-daw-border-light pt-5 text-lg">Ducking</h3>}<div className="delay-detail-controls flex flex-wrap items-center gap-6">{control("duckAttackMs", false, "Attack")}{control("duckReleaseMs", false, "Release")}{control("duckMaxReduction", false, "Reduction limit")}</div><p>Ducking amount stays on the front panel. These controls set how the wet signal returns between phrases.</p></section>}
+          {(visibleDetail === "routing" || overview) && <section className="min-w-0">{overview && <h3 className="border-t border-daw-border-light pt-5 text-lg">Routing</h3>}<div className="delay-detail-controls flex flex-wrap items-center gap-6">{control("crossFeed", false, "Crossfeed")}{control("stereoWidth", false, "Stereo width")}{mode === 3 && control("topologyControl", false, "Head pattern")}{mode === 4 && <>{control("topologyControl", false, "Topology")}{control("dualTimeRatio", false, "B time ratio")}</>}</div><p>{mode === 4 ? "Engine B has independent feedback, tone and motion. Its time follows each channel’s main delay by B time ratio." : mode === 3 ? "Four weighted heads share a feedback path. Head pattern changes their timing and balance; the heads are not individually switchable." : "Left and right timing remain independent. Crossfeed routes feedback between channels; Ping-pong alternates the return."}</p></section>}
+          {(visibleDetail === "engine" || overview) && mode === 4 && <section className="min-w-0">{overview && <h3 className="border-t border-daw-border-light pt-5 text-lg">Engine B</h3>}<div className="delay-detail-controls flex flex-wrap items-center gap-6">{control("dualFeedback", false, "B feedback")}{control("dualHighPassHz", false, "B low cut")}{control("dualLowPassHz", false, "B high cut")}{control("dualSaturation", false, "B colour")}{control("dualModDepthMs", false, "B motion")}{control("dualModRateHz", false, "B rate")}</div><p>Engine A uses the front-panel feedback and tone. Engine B retains its own settings when another mode is selected.</p></section>}
         </div>
       </section>}
       <footer className="delay-contract mt-auto flex shrink-0 flex-wrap justify-between gap-2 text-[11px] pt-[10px]"><span>{diffusionDescription}</span><span>Free times are retained during sync.</span></footer>

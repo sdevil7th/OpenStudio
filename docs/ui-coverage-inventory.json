@@ -1138,6 +1138,12 @@
       "coverage": []
     },
     {
+      "id": "frontend/src/components/builtin/PluginFeatureFinder.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/builtin/PluginFeatureFinder.tsx",
+      "coverage": []
+    },
+    {
       "id": "frontend/src/components/builtin/PreampEditor.tsx",
       "kind": "component",
       "source": "frontend/src/components/builtin/PreampEditor.tsx",

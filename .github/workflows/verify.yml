@@ -55,6 +55,10 @@ jobs:
           tests.test_install_ai_tools_runtime_repair
           tests.test_prepare_diffusers_audio
           tests.test_diffusers_memory_policy
+          tests.test_reverb_qa_tools
+          tests.test_nam_fuzz_refinement
+          tests.test_desktop_qualification
+          tests.test_free_suite_ui_regression
 
   verify-ai-policy:
     name: AI execution policy (${{ matrix.os }})
@@ -140,6 +144,9 @@ jobs:
       - name: Run frontend unit tests
         run: npm test
 
+      - name: Typecheck interaction browser regressions
+        run: npm run test:e2e:types
+
       - name: Install browsers on Linux
         if: runner.os == 'Linux'
         run: npx playwright install --with-deps chromium webkit
@@ -218,6 +225,10 @@ jobs:
       - name: Test unattended installer and uninstall behavior
         shell: pwsh
         run: python tests/test_windows_installer.py --require-tools
+
+      - name: Test Windows startup qualification and process cleanup fixtures
+        shell: pwsh
+        run: python -B -m unittest tests.test_desktop_qualification tests.test_free_suite_ui_regression -v
 
       - name: Test Windows signing safeguards
         shell: pwsh
@@ -305,6 +316,36 @@ jobs:
         shell: pwsh
         run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
 
+      - name: Install Chromium for native-schema editor qualification
+        shell: pwsh
+        working-directory: frontend
+        run: npx playwright install chromium
+
+      - name: Verify project and preset file safety (Windows Release)
+        shell: pwsh
+        timeout-minutes: 3
+        run: ./tools/run-runtime-safety-regression.ps1 -AppPath "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe" -Configuration Release -SkipBuild -SkipCrashTests
+
+      - name: Qualify free FX editors with the current native schemas
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          ./tools/run-free-suite-ui-regression.ps1 -AppPath $exe
+
+      - name: Retain free FX editor qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: free-suite-ui-windows-${{ github.run_attempt }}
+          path: |
+            output/review/free-suite-ui/editor-schemas.json
+            output/playwright/test-results
+            output/review/runtime-Release-*/contracts/result.json
+            output/review/runtime-Release-*/contracts/*.log
+            output/review/runtime-Release-*/qualification.json
+          if-no-files-found: warn
+
       - name: Validate Windows runtime bundle
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform windows -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
@@ -348,12 +389,64 @@ jobs:
           $report = Join-Path $env:RUNNER_TEMP "OpenStudio_FXStageAutomationRegression.json"
           ./tools/run-free-plugin-headless-regression.ps1 -AppPath $exe -ReportPath $report -CaseName stage-automation
 
+      - name: Verify offline realtime track safety contracts (Windows Release)
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          Import-Module ./tools/OwnedDesktopProcess.psm1 -Force
+          $exe = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_RealtimeTrackRegression.json"
+          $process = Start-OwnedDesktopProcess -FilePath $exe -ArgumentList @('--realtime-track-self-test', $report)
+          try {
+            if (!$process.WaitForExit(120000)) { throw 'Realtime track safety regression timed out.' }
+            if ($process.ExitCode -ne 0) { throw 'Realtime track safety regression failed.' }
+          } finally { $process.Dispose() }
+          $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if ($result.pass -ne $true) { throw 'Realtime track report did not pass.' }
+          foreach ($section in @('executor', 'eligibility', 'engine')) {
+            if ($result.$section.pass -ne $true) { throw "Missing or failed $section contracts." }
+          }
+          foreach ($section in @('executor', 'engine')) {
+            if ($null -eq $result.$section.checks -or $result.$section.checks.Count -eq 0) { throw "Empty $section contracts." }
+          }
+          if ($result.eligibility.parityBlocks -le 0) { throw 'No track eligibility parity blocks were checked.' }
+
+      - name: Retain realtime track safety evidence (Windows)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: realtime-tracks-windows-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_RealtimeTrackRegression.json
+          if-no-files-found: warn
+
       - name: Retain native FX order regression evidence (Windows)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fx-order-windows-${{ github.run_attempt }}
           path: ${{ runner.temp }}/OpenStudio_FXStageAutomationRegression.json
+          if-no-files-found: warn
+
+      - name: Verify signal repairs and Reverb scheduling (Windows Release)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          foreach ($case in @('signal-repairs', 'reverb-shimmer-scheduling', 'reverb-voice-options', 'dynamics-audit')) {
+            $report = Join-Path $env:RUNNER_TEMP "OpenStudio_$case.json"
+            ./tools/run-free-plugin-headless-regression.ps1 -AppPath $exe -ReportPath $report -CaseName $case
+          }
+
+      - name: Retain native signal and scheduling evidence (Windows)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signal-scheduling-windows-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/OpenStudio_signal-repairs.json
+            ${{ runner.temp }}/OpenStudio_reverb-shimmer-scheduling.json
+            ${{ runner.temp }}/OpenStudio_reverb-voice-options.json
+            ${{ runner.temp }}/OpenStudio_dynamics-audit.json
           if-no-files-found: warn
 
       - name: Run render and export regression matrix
@@ -422,18 +515,26 @@ jobs:
           if (-not $userDataMatch.Success) {
             throw "Protected-install self-test did not report its WebView2 user-data folder."
           }
-          $userDataPath = [System.IO.Path]::GetFullPath($userDataMatch.Groups[1].Value.Trim())
-          $protectedRoot = [System.IO.Path]::GetFullPath($protectedBundle).TrimEnd('\') + '\'
-          if ($userDataPath.StartsWith($protectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+          $userDataPath = [System.IO.Path]::GetFullPath($userDataMatch.Groups[1].Value.Trim()).TrimEnd('\')
+          $protectedRoot = [System.IO.Path]::GetFullPath($protectedBundle).TrimEnd('\')
+          if ($userDataPath.Equals($protectedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+              $userDataPath.StartsWith($protectedRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "WebView2 user data incorrectly resolves inside the protected install tree: $userDataPath"
           }
 
-      - name: Run Windows native-window lifecycle smoke test
+      - name: Qualify protected Windows WebView startup in normal and safe modes
         shell: pwsh
+        timeout-minutes: 15
         run: |
-          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
-          $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness.json"
-          ./tools/run-window-lifecycle-smoke.ps1 -AppPath $exePath -ReportPath $report -TimeoutSeconds 180
+          $exePath = Join-Path $env:RUNNER_TEMP "OpenStudio-Protected-Install/OpenStudio.exe"
+          foreach ($mode in @('normal', 'safe')) {
+            foreach ($stale in @($false, $true)) {
+              $variant = if ($stale) { 'stale-runtime' } else { 'clean' }
+              $report = Join-Path $env:RUNNER_TEMP "OpenStudio_WindowLifecycleHarness-$mode-$variant.json"
+              ./tools/run-window-lifecycle-smoke.ps1 -AppPath $exePath -ReportPath $report `
+                -StartupMode $mode -StaleRuntimeOverride:$stale -TimeoutSeconds 180
+            }
+          }
 
       - name: Upload Windows native-window lifecycle report
         if: always()
@@ -441,8 +542,8 @@ jobs:
         with:
           name: window-lifecycle-windows-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.json
-            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.startup.log
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness*.json
+            ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness*.startup.log
           if-no-files-found: warn
 
       - name: Run NAM Rack deterministic regression
@@ -468,6 +569,14 @@ jobs:
       BUILD_DIR: build-verify-macos
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Prepare system FFmpeg for audio conversion qualification
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            brew install ffmpeg
+          fi
+          ffmpeg -version
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -543,6 +652,35 @@ jobs:
           "$APP_BUNDLE/Contents/MacOS/OpenStudio" --free-plugin-regression-headless --report "$REPORT" --case stage-automation
           python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["overallPass"] is True and result["selectedCase"] == "stage-automation" and result["checks"], result' "$REPORT"
 
+      - name: Verify offline realtime track safety contracts (macOS Release)
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          REPORT="$RUNNER_TEMP/OpenStudio_RealtimeTrackRegression.json"
+          "$APP_BUNDLE/Contents/MacOS/OpenStudio" --realtime-track-self-test "$REPORT"
+          python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["pass"] is True and all(result[key]["pass"] is True for key in ("executor", "eligibility", "engine")) and all(result[key]["checks"] for key in ("executor", "engine")) and result["eligibility"]["parityBlocks"] > 0, result' "$REPORT"
+
+      - name: Verify project and preset file safety (macOS Release)
+        shell: pwsh
+        timeout-minutes: 3
+        run: ./tools/run-runtime-safety-regression.ps1 -AppPath "$env:APP_BUNDLE/Contents/MacOS/OpenStudio" -Configuration Release -SkipBuild -SkipCrashTests
+
+      - name: Retain realtime track safety evidence (macOS)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: realtime-tracks-${{ matrix.os }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/OpenStudio_RealtimeTrackRegression.json
+            output/review/runtime-Release-*/contracts/result.json
+            output/review/runtime-Release-*/contracts/*.log
+            output/review/runtime-Release-*/qualification.json
+          if-no-files-found: warn
+
+      - name: Test POSIX desktop process ownership
+        shell: bash
+        run: python3 -B -m unittest tests.test_desktop_qualification -v
+
       - name: Retain native FX order regression evidence (macOS)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -584,7 +722,14 @@ jobs:
 
       - name: Install system dependencies
         shell: bash
+        timeout-minutes: 15
         run: |
+          # The hosted image prefers Azure's mirror, which has stalled package
+          # downloads in this job. Use its existing official HTTPS fallbacks.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
+              | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
           bash ./tools/setup-linux-prereqs.sh
           sudo apt-get install -y xvfb xauth openbox
 
@@ -656,6 +801,22 @@ jobs:
           REPORT="$RUNNER_TEMP/OpenStudio_FXStageAutomationRegression.json"
           xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --free-plugin-regression-headless --report "$REPORT" --case stage-automation
           python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["overallPass"] is True and result["selectedCase"] == "stage-automation" and result["checks"], result' "$REPORT"
+
+      - name: Verify offline realtime track safety contracts (Linux Release)
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          REPORT="$RUNNER_TEMP/OpenStudio_RealtimeTrackRegression.json"
+          xvfb-run -a "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --realtime-track-self-test "$REPORT"
+          python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["pass"] is True and all(result[key]["pass"] is True for key in ("executor", "eligibility", "engine")) and all(result[key]["checks"] for key in ("executor", "engine")) and result["eligibility"]["parityBlocks"] > 0, result' "$REPORT"
+
+      - name: Retain realtime track safety evidence (Linux)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: realtime-tracks-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/OpenStudio_RealtimeTrackRegression.json
+          if-no-files-found: warn
 
       - name: Retain native FX order regression evidence (Linux)
         if: always()

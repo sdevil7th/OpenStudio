@@ -3,7 +3,7 @@
 inline juce::var checkClearReverb()
 {
     auto* result = new juce::DynamicObject(); result->setProperty("plugin", "Clear plate, room and randomized networks");
-    bool finite = true, distinct = true, partition = true, controls = true, spillover = true, hold = true;
+    bool finite = true, distinct = true, partition = true, controls = true, spillover = true, hold = true, configurationCache = true;
     juce::Array<juce::var> cases;
     const auto render = [](double rate, int mode, BuiltInClearReverb::Settings settings, int block, bool retire, bool retain, float impulse)
     {
@@ -55,6 +55,18 @@ inline juce::var checkClearReverb()
             engine->reset(); settings.holdInput = true; engine->configure(mode, settings, false);
             double infinite = 0; for (int i = 0; i < static_cast<int>(rate * .25); ++i) { const auto out = engine->process(i == 0 ? .2f : 0.0f, 0); infinite += std::abs(out[0]) + std::abs(out[1]); }
             hold = hold && frozen == 0 && infinite > .001;
+            // Repeated host callbacks must not rebuild unchanged coefficients.
+            // Parameter edits, retirement (including releasing Hold), re-entry
+            // and reset must still invalidate the prepared targets.
+            const auto before = engine->coefficientUpdateCount(static_cast<size_t>(mode));
+            for(int callback=0;callback<16;++callback)engine->configure(mode,settings,false);
+            configurationCache = configurationCache && engine->coefficientUpdateCount(static_cast<size_t>(mode))==before;
+            settings.speed=.71f;engine->configure(mode,settings,false);
+            engine->configure(-1,settings,true);engine->configure(-1,settings,true);
+            engine->configure(mode,settings,false);
+            configurationCache = configurationCache && engine->coefficientUpdateCount(static_cast<size_t>(mode))==before+3;
+            engine->reset();engine->configure(mode,settings,false);
+            configurationCache = configurationCache && engine->coefficientUpdateCount(static_cast<size_t>(mode))==before+4;
             auto* row = new juce::DynamicObject(); row->setProperty("rate", rate); row->setProperty("mode", mode); row->setProperty("impulseEnergyDiagnostic", total); row->setProperty("controlDifference", difference(baseline, driven)); cases.add(row);
         }
         distinct = distinct && difference(modes[0], modes[1]) > .001 && difference(modes[0], modes[2]) > .001 && difference(modes[1], modes[2]) > .001;
@@ -77,9 +89,10 @@ inline juce::var checkClearReverb()
     for (const auto& bank : copy->clearControls) for (size_t field = 0; field < bank.size(); ++field) recall = recall && bank[field].load() == OpenStudioReverb::clearDefaults[field];
     const auto schema = describeFreePluginForRegression(*source);
     const bool appended = schema["parameters"].size() >= 703 && schema["parameters"][633]["id"].toString() == "reverbTypeExtended" && static_cast<int>(schema["parameters"][538]["max"]) == 23 && static_cast<int>(schema["parameters"][515]["max"]) == 20;
-    result->setProperty("pass", finite && distinct && partition && controls && spillover && hold && setters && recall && appended);
+    result->setProperty("pass", finite && distinct && partition && controls && spillover && hold && configurationCache && setters && recall && appended);
     result->setProperty("finiteImpulse", finite); result->setProperty("distinctNetworks", distinct); result->setProperty("exactPartitioning", partition);
     result->setProperty("controlInfluence", controls); result->setProperty("spillover", spillover); result->setProperty("freezeInfinite", hold);
+    result->setProperty("unchangedCoefficientCacheAndInvalidation",configurationCache);
     result->setProperty("setters", setters); result->setProperty("stateAndDefaults", recall); result->setProperty("appendedAndOldRange", appended);
     result->setProperty("cases", cases); result->setProperty("schema", schema); result->setProperty("decayCalibration", "diagnostic_only"); result->setProperty("audioQuality", "not_asserted");
     return result;

@@ -11,17 +11,17 @@ static void runIntegrationFixtures(const juce::File& root, Check check)
     for (const auto* scenario : { "healthy", "exit", "cancel", "no-commit", "late", "tamper", "another-instance" })
     {
         const auto scenarioRoot = root.getChildFile(scenario);
-        scenarioRoot.createDirectory();
+        const bool scenarioReady = ensurePrivateDirectory(scenarioRoot);
         const auto target = scenarioRoot.getChildFile(macOS ? "OpenStudio.app" : "OpenStudio.AppImage");
         const auto transaction = scenarioRoot.getChildFile(juce::Uuid().toString());
-        transaction.createDirectory();
-        writeMarker(transaction, "fixture-behaviour", scenario);
+        const bool transactionReady = scenarioReady && ensurePrivateDirectory(transaction);
+        if (transactionReady) writeMarker(transaction, "fixture-behaviour", scenario);
         const auto package = scenarioRoot.getChildFile(macOS ? "fixture.dmg" : "fixture.AppImage");
         bool setup = false;
        #if JUCE_MAC
         auto makeApp = [&](const juce::File& app, const char* version) {
             const auto exe = app.getChildFile("Contents/MacOS/OpenStudio");
-            exe.getParentDirectory().createDirectory();
+            if (!ensurePrivateDirectory(exe.getParentDirectory())) return false;
             const auto plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict>"
                 "<key>CFBundleIdentifier</key><string>org.openstudio.updaterfixture</string>"
                 "<key>CFBundleExecutable</key><string>OpenStudio</string>"
@@ -31,11 +31,11 @@ static void runIntegrationFixtures(const juce::File& root, Check check)
                 && app.getChildFile("Contents/Info.plist").replaceWithText(plist);
         };
         const auto contents = scenarioRoot.getChildFile("image-content");
-        setup = makeApp(target, "0.0.1") && makeApp(contents.getChildFile("OpenStudio.app"), "999.1.1");
+        setup = transactionReady && makeApp(target, "0.0.1") && makeApp(contents.getChildFile("OpenStudio.app"), "999.1.1");
         juce::String output;
         setup = setup && command({ "/usr/bin/hdiutil", "create", "-srcfolder", contents.getFullPathName(), "-format", "UDZO", package.getFullPathName() }, output);
        #else
-        setup = fixture.copyFileTo(package) && fixture.copyFileTo(target) && target.setExecutePermission(true);
+        setup = transactionReady && fixture.copyFileTo(package) && fixture.copyFileTo(target) && target.setExecutePermission(true);
         // A native ELF with the AppImage type-2 marker exercises the real helper
         // without requiring a FUSE mount. Desktop/FUSE qualification is separate.
         Descriptor fd { ::open(package.getFullPathName().toRawUTF8(), O_WRONLY | O_CLOEXEC) };

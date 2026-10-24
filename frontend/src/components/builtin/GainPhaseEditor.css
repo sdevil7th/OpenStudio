@@ -12,14 +12,14 @@
 }
 .gain-phase-heading h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: clamp(18px, 2cqw, 36px);
   letter-spacing: 3px;
   font-weight: 650;
 }
 .gain-phase-heading p {
   margin: 7px 0 0;
   color: #91a3b0;
-  font-size: 12px;
+  font-size: clamp(12px, 1cqw, 18px);
 }
 .gain-phase-mark {
   font-size: 32px;
@@ -60,6 +60,30 @@
 }
 .gain-phase-workspace {
   background: #1b242b;
+}
+.gain-phase-stage-heading span {
+  font-size: clamp(10px, .8cqw, 14px);
+  letter-spacing: .15em;
+  color: #91a3b0;
+}
+.gain-phase-stage-heading h3 {
+  margin-top: 5px;
+  font-size: clamp(16px, 1.5cqw, 26px);
+  font-weight: 500;
+}
+.gain-phase-setup,.gain-phase-results {
+  padding: clamp(14px, 1.5cqw, 28px);
+  border: 1px solid #35424d;
+  border-radius: 5px;
+  background: #1e2932;
+}
+.gain-phase-empty-results {
+  background: #172129;
+  line-height: 1.7;
+  max-width: 85ch;
+}
+.gain-phase-results>details {
+  max-width: 100ch;
 }
 .gain-phase-correlation {
   padding: 12px 15px;
@@ -105,4 +129,33 @@
     font-size: 16px;
     width: 58px;
   }
+}
+@container gain-phase (min-width:900px) {
+  .gain-phase-alignment {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+  .gain-phase-setup {
+    flex: 0 0 clamp(360px, 37cqw, 720px);
+  }
+  .gain-phase-results {
+    min-height: 280px;
+  }
+}
+@container gain-phase (min-width:1600px) and (min-height:900px) {
+  .gain-phase-heading { padding: 28px 40px; }
+  .gain-phase-manual { padding: 36px 40px; justify-content: center; }
+  .gain-phase-channel { max-width: 800px; }
+  .gain-phase-alignment { padding: 32px 40px; gap: 32px; font-size: 16px; }
+  .gain-phase-setup { gap: 20px; }
+  .gain-phase-results { gap: 24px; }
+  .gain-phase-tabs button { padding: 14px 24px; font-size: 16px; }
+  .gain-phase-tabs { display: none; }
+  .gain-phase-workspace { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-content: start; align-items: start; }
+  .gain-phase-alignment { flex-direction: column; padding-right: 16px; }
+  .gain-phase-setup { flex: auto; width: 100%; }
+  .gain-phase-results { width: 100%; }
+  .gain-phase-shaping { padding: 32px 40px 32px 16px; gap: 28px; }
+  .gain-phase-rotation,.gain-phase-spectral { border: 1px solid #35424d; border-radius: 5px; padding: 28px; background: #1e2932; }
+  .gain-phase-spectral svg { max-height: 280px; }
 }

@@ -1,5 +1,6 @@
 import { editorButton, editorSelect } from "./PluginEditorControls";
 import { useEffect, useRef, useState } from "react";
+import { usePluginFeatureReveal } from "../../utils/pluginFeatureNavigation";
 import { createPortal } from "react-dom";
 import { modalPointerBoundaryProps } from "../../utils/modalEventGuards";
 import { nativeBridge, type IRPreparationStatus, type BuiltInPluginSchema } from "../../services/NativeBridge";
@@ -41,6 +42,11 @@ export function ImpulseResponseEditor({ schema, address, onApplyState }: Pick<EQ
   const current: Shape = { ...neutral, end: ir?.trimSeconds ?? neutral.end, ...ir?.shape };
   const [draft, setDraft] = useState<Shape>(current);
   const [section, setSection] = useState<typeof sections[number]>("Shape");
+  const editor = useRef<HTMLDivElement>(null);
+  usePluginFeatureReveal(editor, "reverb", ({ workflowId }) => {
+    const next = sections.find(name => `ir-${name.toLowerCase()}` === workflowId);
+    if (next && (!["Sources", "Position"].includes(next) || ir?.channels === 4)) setSection(next);
+  });
   useEffect(() => { if (ir?.channels !== 4 && (section === "Sources" || section === "Position")) setSection("Shape"); }, [ir?.channels, section]);
   const [band, setBand] = useState<0 | 1 | 2 | 3>(0);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
@@ -141,7 +147,7 @@ export function ImpulseResponseEditor({ schema, address, onApplyState }: Pick<EQ
     : section === "EQ" ? `Applied EQ curve at ${((ir?.eqSampleRate ?? 48000) / 1000).toFixed(1)} kHz. Wet only; EQ frequency clamps below playback Nyquist.`
       : ir?.channels === 4 ? "First letter = input, second = output. Four paths switch together." : "Original samples retained. IR changes crossfade. -60 dB mutes a section.";
   const stages = ["Queued", "Reading source", "Validating source", "Shaping response", "Analysing decay", "Preparing playback", "Publishing response"];
-  return <div className="flex min-h-0 flex-1 flex-col justify-start gap-2 overflow-y-auto px-4 py-3 [&>*]:shrink-0" aria-label="Impulse response">
+  return <div ref={editor} data-feature={`ir-${section.toLowerCase()}`} className="flex min-h-0 flex-1 flex-col justify-start gap-2 overflow-y-auto px-4 py-3 [&>*]:shrink-0" aria-label="Impulse response">
     {preparation && createPortal(<div role="dialog" aria-label="Preparing impulse response" aria-modal="true" tabIndex={-1}
       {...modalPointerBoundaryProps}
       onKeyDown={event => {

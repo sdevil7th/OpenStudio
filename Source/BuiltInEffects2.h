@@ -1,4 +1,5 @@
 #pragma once
+#include "BuiltInRatePole.h"
 #include "BuiltInDrumArticulations.h"
 #include "BuiltInSpringReverb.h"
 #include "BuiltInSaturationColour.h"
@@ -22,6 +23,7 @@
 #include "BuiltInEffects.h"
 #include "NAMCabPresentation.h"
 #include "NAMPolyOctaver.h"
+#include "NAMFuzz.h"
 #if defined(_MSC_VER)
  #pragma warning(push)
  #pragma warning(disable: 4244 4267 4305 4456)
@@ -376,6 +378,12 @@ public:
     std::atomic<float> damping    { 0.5f };    // 0-1
     std::atomic<float> wetLevel   { 0.33f };   // 0-1
     std::atomic<float> dryLevel   { 0.7f };    // 0-1
+    std::atomic<float> outputTrimDb { 0.0f }; // Standalone final output, -60 to +12 dB.
+    std::atomic<float> reverbCharacterMode { 0.0f }; // Original=0, opt-in Refined=1; standalone only.
+    std::atomic<float> reverbReturnMode { 0.0f }; // Constructor selects Calibrated for new standalone; old missing state is Original.
+    std::atomic<float> shimmerScheduling { 0.0f }; // Original=0, opt-in Spread=1; adds one pitch hop, never dry latency.
+    std::atomic<float> reverbControlMode { 0.0f }; // Standalone Corrected=1; missing old state retains Legacy=0.
+    std::atomic<float> ambBody { 0.0f }; // Vowel-only broadband wet readout; zero preserves the formant-only response.
     std::atomic<float> width      { 1.0f };    // 0-1
     std::atomic<float> freezeMode { 0.0f };    // 0 = off, 1 = on
     std::atomic<float> preDelay   { 0.0f };    // 0-500 ms
@@ -503,7 +511,15 @@ public:
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void releaseResources() override;
-    void reset() override { resetTailState(); }
+    void reset() override
+    {
+        resetTailState();
+        // The app's explicit prepare/reset routes run outside processBlock.
+        // Restore Spread's deterministic primed phase for export/replay parity;
+        // callback runaway recovery still uses resetTailState's lazy history.
+        if (standaloneBanking && shimmerScheduling.load(std::memory_order_relaxed) >= .5f)
+            additionalSpaces.resetShimmerSchedulingHistory();
+    }
 
     const juce::String getName() const override { return "OpenStudio Reverb"; }
     bool hasEditor() const override { return true; }
@@ -634,6 +650,29 @@ public:
     void resetTailState() noexcept;
 
 private:
+    friend struct OpenStudioReverbCompatibilityRegressionAccess;
+    struct CompatibilityRouting
+    {
+        std::array<float,17> values {};
+        std::uint64_t irRevision = 0;
+        bool operator==(const CompatibilityRouting& other) const noexcept
+        {
+            return values == other.values && irRevision == other.irRevision;
+        }
+    };
+    CompatibilityRouting compatibilityRouting() const noexcept;
+    bool canMaskCompatibility(const CompatibilityRouting&) const noexcept;
+    void invalidateCompatibilityHistory() noexcept;
+    void advanceCompatibilitySmoothers(int samples) noexcept;
+    void resetCompatibilitySleepProof() noexcept;
+    CompatibilityRouting provenCompatibilityRouting {};
+    int compatibilityCoveredSamples = 0;
+    bool compatibilityRoutingKnown = false;
+    bool compatibilitySleeping = false;
+    // Runtime diagnostics only; neither switch is a plugin/state parameter.
+    bool compatibilitySleepEnabled = true;
+    bool v2DiffusionHistoryGuardsEnabled = true;
+    std::uint64_t compatibilityProcessingCalls = 0;
     BuiltInAdditionalReverbs additionalSpaces;
     BuiltInPlateReverb plateSpace;
     BuiltInModalPlate modalPlate;
@@ -689,6 +728,10 @@ private:
     int validPreDelayHistorySamples = 0;
     int validLateHistorySamples = 0;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedWetLevel;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedStandaloneOutputGain;
+    juce::SmoothedValue<float> standaloneWetRamp, standaloneDryRamp;
+    juce::SmoothedValue<double> smoothedReturnCalibration;
+    std::vector<float> returnCalibrationBlock; // Prepared once; shared main/cross/voice sample ramp.
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDryLevel;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedEarlyLevel;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedInputSend;
@@ -728,6 +771,7 @@ private:
     std::array<int, v2DiffusionLineCount> v2DiffusionOffsets {};
     std::array<int, v2DiffusionLineCount> v2DiffusionCapacities {};
     std::array<int, v2DiffusionLineCount> v2DiffusionWriteIndices {};
+    std::array<int, v2DiffusionLineCount> v2ValidDiffusionHistorySamples {};
     std::array<float, 2> v2ShimmerPreLowPassState {};
     float v2InputLowPassStateL = 0.0f;
     float v2InputLowPassStateR = 0.0f;
@@ -950,6 +994,8 @@ private:
 class OpenStudioChorus : public juce::AudioProcessor
 {
 public:
+    std::atomic<float> signalPath {1}; // 0 archived sound, 1 corrected signal processing
+
     OpenStudioChorus();
     ~OpenStudioChorus() override = default;
 
@@ -1017,6 +1063,7 @@ public:
     void resetTailState() noexcept;
 
 private:
+    std::atomic<float> retainedFeedback {0};
     static constexpr int maxVoices = 6;
     static constexpr int maxChorusDelaySamples = 8192;
     static constexpr int chorusDelayBufferSize =
@@ -1025,6 +1072,7 @@ private:
     std::array<std::vector<float>, 2> delayBuffers;
     int delayWritePosition = 0;
     float lfoPhase[maxVoices] = {};
+    std::array<float, maxVoices> ensemblePhaseL {}, ensemblePhaseR {};
     std::array<float, maxVoices> sampleHoldValue {};
     std::array<float, maxVoices> sampleHoldTarget {};
     std::uint32_t sampleHoldRandomState = 0x8f6a2c1du;
@@ -1100,6 +1148,8 @@ private:
 class OpenStudioSaturator : public juce::AudioProcessor
 {
 public:
+    std::atomic<float> signalPath {1}; // 0 archived sound, 1 corrected signal processing
+
     explicit OpenStudioSaturator(bool useLowLatencyOversampling = false);
     ~OpenStudioSaturator() override = default;
 
@@ -1197,6 +1247,7 @@ public:
     // completed its outer fade to exact dry. It deliberately does not clear
     // oversampling/delay buffers or rebuild coefficients.
     void resetRealtimeStateForEmbeddedBypass() noexcept;
+    static juce::var runLowCutPrecisionRegression();
 
 private:
     BuiltInSaturationColour colour;
@@ -1204,15 +1255,18 @@ private:
     void publishColourMeters(const juce::AudioBuffer<float>&);
     static constexpr int maximumOversamplingLatencySamples = 512;
     juce::dsp::IIR::Filter<float> toneFilterL, toneFilterR;
-    juce::dsp::IIR::Filter<float> lowCutFilterL, lowCutFilterR;
+    // A 20Hz biquad at the NAM island's 384kHz rate loses its DC pole
+    // separation in float. Keep both coefficients and delay state in double;
+    // only the circuit input/output boundary is narrowed to float.
+    juce::dsp::IIR::Filter<double> lowCutFilterL, lowCutFilterR;
     double cachedSampleRate = 44100.0;
     int cachedBlockSize = 0;
     float lastToneFreq = 20000.0f;
     float lastLowCutFreq = 20.0f;
     std::vector<OpenStudioIIRCoefficientSet> toneCoefficientLut;
-    std::vector<OpenStudioIIRCoefficientSet> lowCutCoefficientLut;
+    std::vector<std::array<double, 5>> lowCutCoefficientLut;
     OpenStudioIIRCoefficientSet targetToneCoefficients {};
-    OpenStudioIIRCoefficientSet targetLowCutCoefficients {};
+    std::array<double, 5> targetLowCutCoefficients {};
     bool toneCoefficientsSmoothing = false;
     bool lowCutCoefficientsSmoothing = false;
     bool lowCutBeforeSaturation = false;
@@ -1463,6 +1517,13 @@ public:
     std::atomic<float> octaverDownMix { 0.32f };
     std::atomic<float> octaverUpMix { 0.18f };
     std::atomic<float> octaverDirectMix { 1.0f };
+    // Independent post-octave fuzz: old states and presets default to exact bypass.
+    std::atomic<float> fuzzEnabled { 0.0f };
+    std::atomic<float> fuzzDrive { 0.5f };
+    std::atomic<float> fuzzTone { 0.5f };
+    std::atomic<float> fuzzLevelDb { 0.0f };
+    std::atomic<float> fuzzVoice { 0.0f };
+    std::atomic<float> fuzzCleanMix { 0.0f };
     // PRE EQ: a clean, independently bypassable stereo equalizer placed after
     // the Octaver and before the native Drive/Distortion island. V19 replaces
     // the original seven octave bands with this guitar-focused eight-band set.
@@ -1766,6 +1827,7 @@ public:
     }
     void setEmbeddedDriveOversamplingFactor(int factor) noexcept;
     int getEmbeddedDriveOversamplingFactor() const noexcept;
+    static juce::var runDistortionADAARegression();
     int getNAMEffectsDspVersion() const noexcept
     {
         return currentNAMEffectsDspVersion;
@@ -1952,7 +2014,6 @@ private:
                     const NAMResamplerKernel& kernel) noexcept;
 
     private:
-        float sampleAt(std::int64_t absoluteIndex) const noexcept;
         float interpolate(double sourcePosition, const NAMResamplerKernel& kernel) const noexcept;
     };
 
@@ -2254,6 +2315,10 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedCompressorToneHighGain;
     NAMPolyOctaver rackPolyOctaver;
+    NAMFuzz rackFuzz;
+    // Shared per-frame nonlinear-drive compensation; the octave audio/clean
+    // branch keeps its original level. Sized on the prepare thread only.
+    juce::AudioBuffer<float> octaverExcitationGainBuffer;
     OpenStudioSaturator rackChaos { true };
     static constexpr int maximumEmbeddedDriveLatencySamples = 512;
     // Drain the shared IIR oversampler incrementally after the complete
@@ -2291,6 +2356,42 @@ private:
         precisionDriveBypassDelay { maximumEmbeddedDriveLatencySamples };
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None>
         chaosBypassDelay { maximumEmbeddedDriveLatencySamples };
+    // Callback-owned target caches. Only coefficient design is skipped: the
+    // sample-time smoothers and both historical voice states still advance
+    // exactly as before. Effective sample rate includes the shared island's
+    // oversampling factor, and prepare/reset invalidate every cache.
+    struct PrecisionDriveCoefficientCache
+    {
+        bool valid = false;
+        float sampleRate = 0.0f;
+        float drive = 0.0f, attack = 0.0f, bright = 0.0f;
+        bool bass = false;
+        float dcCoefficient = 0.0f;
+        float screamerInputHighPass1 = 0.0f;
+        float screamerInputHighPass2 = 0.0f;
+        float screamerOutputHighPass = 0.0f;
+    } precisionDriveCoefficientCache;
+    struct ChaosCoefficientCache
+    {
+        bool valid = false;
+        float sampleRate = 0.0f;
+        float mode = 0.0f, drive = 0.0f, tone = 0.0f, weight = 0.0f;
+        int profile = guitarInstrumentProfile;
+        float dcCoefficient = 0.0f;
+        float lowPreservationCoefficient = 0.0f;
+        float diodeDriveDb = 0.0f;
+        float clippingSymmetry = 0.0f;
+    } chaosCoefficientCache;
+    struct DriveGainCache
+    {
+        bool valid = false;
+        float control = 0.0f;
+        bool bass = false;
+        float gain = 1.0f;
+    } precisionDriveVolumeCache, chaosLevelCache, embeddedDriveOperatingGainCache;
+    void invalidateEmbeddedDriveCoefficientCaches() noexcept;
+    std::atomic<std::uint64_t> diagnosticPrecisionDriveCoefficientDesignCount { 0 };
+    std::atomic<std::uint64_t> diagnosticChaosCoefficientDesignCount { 0 };
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         smoothedPrecisionDrivePower;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
@@ -2847,6 +2948,7 @@ private:
         bool active) noexcept;
     void processCompressorStage(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi);
     void processDualOctaverStage(juce::AudioBuffer<float>& buffer);
+    NAMFuzz::Parameters getFuzzParameters() const noexcept;
     void processPreEQ(juce::AudioBuffer<float>& buffer);
     void processEmbeddedDriveIsland(
         juce::AudioBuffer<float>& buffer,
@@ -2921,6 +3023,18 @@ private:
 class OpenStudioBasicSynthInstrument : public juce::AudioProcessor
 {
 public:
+    // Call only on the processing thread or while suspended. Reports sounding
+    // and releasing voices without adding a scan to the realtime callback.
+    int getRenderingVoiceCountForRegression() const noexcept
+    {
+        int count = 0;
+        for (size_t ch = 0; ch < active.size(); ++ch)
+            for (size_t slot = 0; slot < active[ch].size(); ++slot)
+                if (active[ch][slot] || envelope[ch][slot] > 0) ++count;
+        return count;
+    }
+    std::atomic<float> signalPath {1}; // 0 archived sound, 1 corrected signal processing
+
     BuiltInInstrumentPerformance performanceTelemetry;
     OpenStudioBasicSynthInstrument();
     ~OpenStudioBasicSynthInstrument() override = default;
@@ -3057,12 +3171,33 @@ public:
     bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
+    BuiltInRatePole ratePole;
     std::atomic<double> tailSampleRate {192000.0};
     float releaseModulationBound() const noexcept;
     BuiltInSynthModulation modulation;
     BuiltInSynthMatrix matrix;
     std::array<std::array<BuiltInSynthMatrix::Destinations,16>,16> previousRoutes {};
     std::array<std::array<float,16>,16> sharedLfoOffset {};
+    struct CachedPower
+    {
+        float exponent = 0, value = 1;
+        float powerOfTwo(float next) noexcept
+        {
+            if (next != exponent) { exponent = next; value = std::pow(2.0f, next); }
+            return value;
+        }
+        float exponentialOfTwo(float next) noexcept
+        {
+            if (next != exponent) { exponent = next; value = std::exp2(next); }
+            return value;
+        }
+    };
+    struct VoiceWorkCache { CachedPower bend, attack, decay, release; };
+    // Pure value caches have no envelope/voice ownership semantics. Changing a
+    // MIDI/MPE target or a modulated value refreshes the exact former formula.
+    std::array<std::array<VoiceWorkCache,16>,16> voiceWorkCache {};
+    std::array<float,128> noteFrequencies {};
+    std::array<float,16> cachedPan {}, cachedPanLeft {}, cachedPanRight {};
     BuiltInSynthOscillators oscillators;
     BuiltInSynthMPE mpe;
     BuiltInSynthModulation::Voice globalModulationVoice;
@@ -3098,6 +3233,17 @@ private:
 class OpenStudioPianoInstrument : public juce::AudioProcessor
 {
 public:
+    // Processing-thread / suspended-only observation; not UI-thread telemetry.
+    int getRenderingVoiceCountForRegression() const noexcept
+    {
+        int count = 0;
+        for (size_t ch = 0; ch < active.size(); ++ch)
+            for (size_t slot = 0; slot < active[ch].size(); ++slot)
+                if (active[ch][slot] || envelope[ch][slot] > 0) ++count;
+        return count;
+    }
+    std::atomic<float> signalPath {1}; // 0 archived sound, 1 corrected signal processing
+
     BuiltInInstrumentPerformance performanceTelemetry;
     OpenStudioPianoInstrument();
     ~OpenStudioPianoInstrument() override = default;
@@ -3172,6 +3318,7 @@ private:
     std::array<std::array<bool, 128>, 16> releasing {};
     std::array<std::array<bool, 128>, 16> sustained {};
     std::array<std::array<float, 128>, 16> phase {};
+    std::array<std::array<std::array<float, 4>, 128>, 16> fractionalPhase {};
     std::array<std::array<float, 128>, 16> velocity {};
     std::array<std::array<float, 128>, 16> envelope {};
     std::array<std::array<int, 128>, 16> ageSamples {};
@@ -3190,6 +3337,17 @@ private:
 class OpenStudioCleanGuitarInstrument : public juce::AudioProcessor
 {
 public:
+    // Processing-thread / suspended-only observation; not UI-thread telemetry.
+    int getRenderingVoiceCountForRegression() const noexcept
+    {
+        int count = 0;
+        for (size_t ch = 0; ch < active.size(); ++ch)
+            for (size_t slot = 0; slot < active[ch].size(); ++slot)
+                if (active[ch][slot] || envelope[ch][slot] > 0) ++count;
+        return count;
+    }
+    std::atomic<float> signalPath {1}; // 0 archived sound, 1 corrected signal processing
+
     BuiltInInstrumentPerformance performanceTelemetry;
     BuiltInGuitarPerformance guitarPerformance;
     OpenStudioCleanGuitarInstrument();
@@ -3264,6 +3422,7 @@ public:
     bool isOpenStudioBuiltInInstrument() const { return true; }
 
 private:
+    BuiltInRatePole ratePole;
     std::atomic<double> tailSampleRate {192000.0};
     BuiltInCoupledBody coupledNetwork;
     juce::SmoothedValue<float> coupledAmount;
@@ -3282,6 +3441,7 @@ private:
     std::array<std::array<bool, 128>, 16> active {};
     std::array<std::array<bool, 128>, 16> releasing {};
     std::array<std::array<float, 128>, 16> phase {};
+    std::array<std::array<std::array<float, 4>, 128>, 16> fractionalPhase {};
     std::array<std::array<float, 128>, 16> velocity {};
     std::array<std::array<float, 128>, 16> envelope {};
     std::array<std::array<float, 128>, 16> pluckFilter {};
@@ -3308,6 +3468,15 @@ private:
 class OpenStudioDrumInstrument : public juce::AudioProcessor
 {
 public:
+    // Processing-thread / suspended-only observation; not UI-thread telemetry.
+    int getRenderingVoiceCountForRegression() const noexcept
+    {
+        int count = 0;
+        for (const auto& channel : active) for (bool voice : channel) if (voice) ++count;
+        return count;
+    }
+    std::atomic<float> signalPath {1}; // 0 archived sound, 1 corrected signal processing
+
     BuiltInInstrumentPerformance performanceTelemetry;
     OpenStudioDrumInstrument();
     ~OpenStudioDrumInstrument() override = default;
@@ -3344,7 +3513,16 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { float maximum=1;for(const auto& value:pieceDecay)maximum=juce::jmax(maximum,value.load());return articulationEngine.load()>=.5f||maximum>1?14.0*maximum:2.0; }
+    double getTailLengthSeconds() const override
+    {
+        // Longest Legacy crash: tau=1.55s, velocity multiplier<=1.24,
+        // shutdown at exp(-t/tau)<0.0002: 16.38s before piece decay scaling.
+        double maximum = 1;
+        for (const auto& value : pieceDecay)
+            maximum = juce::jmax(maximum, static_cast<double>(juce::jlimit(.1f, 4.0f, value.load())));
+        return 17.0 * maximum;
+    }
+    double getMaximumTailLengthSeconds() const noexcept { return 68.0; }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -3372,6 +3550,7 @@ private:
     std::array<std::array<bool, 128>, 16> choking {};
     std::array<std::array<bool, 128>, 16> active {};
     std::array<std::array<float, 128>, 16> phase {};
+    std::array<std::array<std::array<float, 4>, 128>, 16> fractionalPhase {};
     std::array<std::array<float, 128>, 16> velocity {};
     std::array<std::array<int, 128>, 16> ageSamples {};
     std::array<float, 16> hihatPedal {};

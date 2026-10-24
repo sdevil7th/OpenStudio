@@ -15,6 +15,16 @@ export const audioDeviceDraft = (current: AudioDeviceDraft): AudioDeviceDraft =>
   bufferSize: current.bufferSize,
 });
 
+/** A successful driver restart can still choose a different rate or buffer. */
+export function audioDeviceAcceptanceNotice(requested: AudioDeviceDraft, accepted: AudioDeviceDraft): string | null {
+  const changes: string[] = [];
+  if (requested.bufferSize > 0 && requested.bufferSize !== accepted.bufferSize)
+    changes.push(`Requested ${requested.bufferSize} samples; the driver accepted ${accepted.bufferSize} samples.`);
+  if (requested.sampleRate > 0 && requested.sampleRate !== accepted.sampleRate)
+    changes.push(`Requested ${requested.sampleRate} Hz; the driver accepted ${accepted.sampleRate} Hz.`);
+  return changes.length ? changes.join(" ") : null;
+}
+
 interface SettingsState {
   setup: AudioDeviceSetupResponse | null;
   applied: AudioDeviceSetupResponse | null;
@@ -75,7 +85,13 @@ export class AudioSettingsSession {
     try {
       const setup = await this.query(audioDeviceDraft(current));
       if (revision !== this.revision) return;
-      this.publish({ setup, resolving: false, error: setup.error || null });
+      // Failed discovery can return the still-running device's snapshot. Keep
+      // the requested choices for Retry/correction, while retaining the failed
+      // result's unavailable capabilities and error so it cannot be applied.
+      const pendingSetup = setup.error
+        ? { ...setup, current: { ...setup.current, ...audioDeviceDraft(current) } }
+        : setup;
+      this.publish({ setup: pendingSetup, resolving: false, error: setup.error || null });
     } catch (error) {
       if (revision === this.revision)
         this.publish({ resolving: false, error: error instanceof Error ? error.message : String(error) });

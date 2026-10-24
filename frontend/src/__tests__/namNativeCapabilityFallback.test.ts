@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeBridge } from "../services/NativeBridge";
 
 const bridgeInternals = nativeBridge as unknown as { isNative: boolean };
@@ -29,6 +29,23 @@ describe("native capability fallbacks", () => {
     await expect(nativeBridge.getNAMRackOversamplingFactor()).resolves.toBe(8);
     await expect(nativeBridge.setNAMTunerActive("track-a", true, "subscriber-a")).resolves.toBe(true);
     await expect(nativeBridge.setTrackInputMonitoring("track-a", true)).resolves.toBe(true);
+  });
+
+  it("does not claim a preset was saved when the native JSON writer is unavailable", async () => {
+    await expect(nativeBridge.saveJsonDocumentToFile("C:/preset.ospreset", '{"name":"Pitch"}')).resolves.toBe(false);
+  });
+
+  it("forwards preset JSON to its dedicated endpoint and preserves failures", async () => {
+    const saveJsonDocumentToFile = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+      .mockRejectedValueOnce(new Error("disk unavailable"));
+    const saveProjectToFile = vi.fn();
+    (globalThis as { window?: unknown }).window = { __JUCE__: { backend: { saveJsonDocumentToFile, saveProjectToFile } } };
+    const path = "C:/preset.ospreset", json = '{"name":"Pitch","scaleMask":2741,"signalPath":1}';
+    await expect(nativeBridge.saveJsonDocumentToFile(path, json)).resolves.toBe(true);
+    expect(saveJsonDocumentToFile).toHaveBeenLastCalledWith(path, json);
+    await expect(nativeBridge.saveJsonDocumentToFile(path, json)).resolves.toBe(false);
+    await expect(nativeBridge.saveJsonDocumentToFile(path, json)).rejects.toThrow("disk unavailable");
+    expect(saveProjectToFile).not.toHaveBeenCalled();
   });
 
   it("does not report a mock script success when the native Lua engine is unavailable", async () => {

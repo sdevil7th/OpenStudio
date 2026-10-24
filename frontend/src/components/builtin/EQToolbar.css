@@ -1,0 +1,14 @@
+/* Header fit is based on the editor client area, including detached windows. */
+@container (max-width:800px) {
+  .plugin-toolbar { gap: 4px; padding-inline: 8px; }
+  .plugin-toolbar .eq-button { padding-inline: 7px; }
+  .plugin-toolbar .plugin-preset { width: 110px; }
+  .plugin-bypass>span { display: none; }
+}
+
+@container (min-width:1600px) {
+  .plugin-toolbar { min-height: clamp(48px, 2.8cqi, 82px); gap: 8px; padding-inline: 18px; }
+  .plugin-toolbar :is(button, select) { font-size: clamp(12px, .65cqi, 20px); min-height: clamp(32px, 1.6cqi, 54px); }
+  .plugin-toolbar svg { width: clamp(14px, .65cqi, 22px); height: clamp(14px, .65cqi, 22px); }
+  .plugin-toolbar .plugin-preset { width: clamp(192px, 12cqi, 360px); }
+}

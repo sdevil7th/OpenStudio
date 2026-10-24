@@ -66,6 +66,16 @@ if (-not (Test-Path -LiteralPath $reportPath)) {
 }
 
 $result = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+if (-not $result.offlineRequired) {
+    throw "Render/export report lacks the required offline launch contract. Rebuild the current application: $reportPath"
+}
+foreach ($evidence in @($result.hardwareBefore, $result.hardwareAfter)) {
+    if ($null -eq $evidence -or $evidence.startupMode -ne 'offline' -or $evidence.audioDeviceOpened -ne $false `
+        -or $evidence.audioDeviceStartCount -ne 0 -or $evidence.audioCallbackCount -ne 0 `
+        -or $evidence.callbackRegistrationCount -ne 0) {
+        throw "Render/export fixture did not retain zero hardware devices and callbacks: $reportPath"
+    }
+}
 Write-Host "Render/export regression result: $reportPath"
 Write-Host "Objective gate status: $($result.objectiveGateStatus)"
 foreach ($check in $result.checks) {

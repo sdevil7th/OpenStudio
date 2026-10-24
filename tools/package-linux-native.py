@@ -94,7 +94,12 @@ def stage_bundle(bundle, stage, package_format):
     ):
         target = stage / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
+        if source.suffix == '.desktop':
+            # Windows source snapshots may contain CRLF. Desktop entries require
+            # LF even when other package assets are copied byte for byte.
+            target.write_text(source.read_text(encoding='utf-8'), encoding='utf-8', newline='\n')
+        else:
+            shutil.copyfile(source, target)
         target.chmod(0o644)
     stage.chmod(0o755)
     for path in stage.rglob('*'):

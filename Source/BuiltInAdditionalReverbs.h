@@ -1,5 +1,8 @@
 #pragma once
+#include "BuiltInReverbDamping.h"
+#include "BuiltInReverbReturnLevels.h"
 #include "BuiltInReverbPitchVoice.h"
+#include "BuiltInShimmerScheduling.h"
 #include "BuiltInNonlinearTail.h"
 #include "BuiltInReverbSpillover.h"
 
@@ -17,10 +20,13 @@ public:
         bool hold = false, infiniteInput = false;
         float nonlinearModulation = 0, nonlinearRate = .7f;
         bool nonlinearHold=false;
+        bool spreadShimmer=false; // Saved opt-in scheduling; Original remains false.
+        bool correctedControls=false;
     };
     void prepare(double sampleRate, int selected)
     {
         rate = static_cast<float>(sampleRate);
+        for(auto& tone:dampingRamp)tone.reset(sampleRate,.05);
         pre.assign(static_cast<size_t>(std::ceil(rate * 0.51f)) + 2, {});
         for(auto& history:kindPre)history.assign(pre.size(),{});
         for(auto& delay:kindPredelay)delay.reset(sampleRate,.05);
@@ -60,6 +66,15 @@ public:
         predelay.reset(sampleRate, .05);
         predelay.setCurrentAndTargetValue(0);
         reset();
+        // Configure and prime once off the callback, after reset. Original-only
+        // resets below never clear or prime this otherwise inactive FFT bank.
+        spreadSpectralVoices[0].prepare(sampleRate, 0);
+        spreadSpectralVoices[1].prepare(sampleRate, 2);
+        spreadInputSpectralVoices[0].prepare(sampleRate, 1);
+        spreadInputSpectralVoices[1].prepare(sampleRate, 3);
+        spreadNeedsReset = false;
+        pitchScheduling.prepare(sampleRate, spreadSpectralVoices[0].latencySamples(),
+                                spreadInputSpectralVoices[1].primingSamples(),spreadSpectralVoices[0].resetSamples());
     }
     void reset()
     {
@@ -72,8 +87,13 @@ public:
         for (auto& shift : shifter) shift.reset();
         for (auto& voice : spectralVoices) voice.reset();
         for (auto& voice : inputSpectralVoices) voice.reset();
+        // Defer any Spread clear/prime to the staged transition before reuse.
+        spreadNeedsReset = true;
+        pitchScheduling.reset();
         for (auto& voice : inputShifter) voice.reset();
-        inputDrainRemaining = 0; nonlinearTail.reset(); nonlinearReturned.fill(0); lateWasActive = false;
+        inputDrainRemaining = 0; nonlinearTail.reset(); nonlinearReturned.fill(0); lateWasActive = false;nonlinearHoldBudget.reset();nonlinearReadoutBudget.reset();
+        tankPitchSuspended = false; tankPitchWarmup = 0; tankPitchFrames = 0;
+        requestedTankRoute = true; requestedInputRoute = false;
         nonlinearPhase = 0;
         positions.fill(0); springPositions.fill(0); dampingState.fill(0);
         for (auto& state : dispersion) state.fill(0);
@@ -81,6 +101,18 @@ public:
         for (auto& state : lowState) state.fill(0);
         shifted.fill(0); prePosition = 0; nonlinearPosition = 0; settingsInitialized = false; spectralDrainRemaining = 0;
         drainRemaining.fill(0); processedFrames.fill(0); validLines.fill(0); validSpring.fill(0); validNonlinear=0; validPre=0;
+    }
+    // Explicit host resets in the current app run while callback processing is
+    // stopped. Restore the deterministic prepared Spread phase there, rather
+    // than routing a freshly reset Spread state through an Original warmup.
+    // Callback-side resetTailState keeps the lazy reset above; Original-only
+    // explicit resets do not call this additional clear/prime operation.
+    void resetShimmerSchedulingHistory()
+    {
+        for (auto& voice : spreadSpectralVoices) voice.reset();
+        for (auto& voice : spreadInputSpectralVoices) voice.reset();
+        spreadNeedsReset = false;
+        pitchScheduling.reset();
     }
     void configure(int selected, const Settings& settings, bool spillover=false)
     {
@@ -118,6 +150,7 @@ public:
             retirement.configure(kind,selected==static_cast<int>(kind)+4,retainTails,drainRemaining[kind]>0);
         }
         const auto& shimmerSettings=settingsFor(1);const auto& nonlinearSettings=settingsFor(2);
+        pitchScheduling.configure(shimmerSettings.spreadShimmer, !spreadNeedsReset);
         for (size_t i = 0; i < weights.size(); ++i) weights[i].setTargetValue(selected == static_cast<int>(i) + 4 ? 1.0f : 0.0f);
         const float targetPreDelay = juce::jlimit(0.0f, .5f * rate, values.preDelay * .001f * rate);
         if (!settingsInitialized) predelay.setCurrentAndTargetValue(targetPreDelay);
@@ -135,8 +168,13 @@ public:
         setSmooth(shimmerBlend, juce::jlimit(0.0f, .45f, shimmerSettings.shimmer * .45f));
         setSmooth(spectralWeight, shimmerSettings.voiceEngine >= .5f ? 1.0f : 0.0f);
         const int route = juce::jlimit(0, 2, juce::roundToInt(finite(shimmerSettings.shimmerRoute, 0)));
-        setSmooth(inputRoute, route > 0 ? 1.0f : 0.0f);
-        setSmooth(tankRoute, route == 1 ? 0.0f : 1.0f);
+        requestedInputRoute = route > 0; requestedTankRoute = route != 1;
+        // Original-only processing never suspends and retains the historical
+        // 50 ms route ramps. A sleeping Spread tank must refill first: keep the
+        // audible Input path until the pitch return has fresh history.
+        const bool deferTankRoute = requestedTankRoute && (tankPitchSuspended || tankPitchWarmup > 0);
+        if (!deferTankRoute) setSmooth(inputRoute, requestedInputRoute ? 1.0f : 0.0f);
+        setSmooth(tankRoute, requestedTankRoute && !deferTankRoute ? 1.0f : 0.0f);
         setSmooth(nonlinearReturn, nonlinearSettings.nonlinearFeedback);
         setSmooth(nonlinearLateLevel, nonlinearSettings.lateLevel);
         setSmooth(nonlinearSmear, nonlinearSettings.nonlinearDiffusion);
@@ -145,7 +183,7 @@ public:
         setSmooth(nonlinearHoldSend,holdNonlinear&&!nonlinearSettings.infiniteInput?0.0f:1.0f);
         setSmooth(nonlinearDepth, holdNonlinear?0.0f:nonlinearSettings.nonlinearModulation * rate * .002f);
         setSmooth(nonlinearRate, nonlinearSettings.nonlinearRate);
-        if (selected == 6 || drainRemaining[2] > 0) nonlinearTail.configure(nonlinearSettings.lateDecay, nonlinearSettings.damping,holdNonlinear);
+        if (selected == 6 || drainRemaining[2] > 0) nonlinearTail.configure(nonlinearSettings.lateDecay, nonlinearSettings.damping,holdNonlinear,nonlinearSettings.correctedControls);
         const int shape = juce::roundToInt(nonlinearSettings.shape);
         // Normalize every envelope to the same tap energy as the legacy Ramp.
         // This prevents a shape switch from being merely an output-gain change.
@@ -181,7 +219,6 @@ public:
             reflectionGainBound = std::sqrt(48.0f * legacyEnergy) * .035f;
             previousShape = shape;
         }
-        settingsInitialized = true;
         const float decay = juce::jlimit(.1f, 20.0f, values.decay);
         if(selected>=4&&selected<=6)
         {
@@ -200,10 +237,13 @@ public:
             lowCoefficient[kind] = 1.0f - std::exp(-juce::MathConstants<float>::twoPi * juce::jlimit(1000.0f, rate * .45f, settingsForKind.highCut) / rate);
             highCoefficient[kind] = 1.0f - std::exp(-juce::MathConstants<float>::twoPi * juce::jlimit(20.0f, 500.0f, settingsForKind.lowCut) / rate);
             dampingCoefficient[kind] = juce::jlimit(.03f, .95f, .95f - settingsForKind.damping * .9f);
+            setSmooth(dampingRamp[kind], BuiltInReverbDamping::alpha(dampingCoefficient[kind],rate));
         }
+        settingsInitialized = true;
     }
-    std::array<float, 3> process(float left, float right)
+    std::array<float, 3> process(float left, float right, float returnBlend = 0)
     {
+        for(size_t kind=0;kind<3;++kind) { const float next=dampingRamp[kind].getNextValue(); if(settingsFor(kind).correctedControls) dampingCoefficient[kind]=next; }
         if (pre.empty()) return {};
         if(isDormant()) return {};
         left = std::isfinite(left) ? juce::jlimit(-16.0f, 16.0f, left) : 0.0f;
@@ -256,6 +296,61 @@ public:
         if(drainRemaining[1]>0)
         {
         ++processedFrames[1];
+        const int resetPitchVoice = pitchScheduling.advance();
+        if (resetPitchVoice >= 0)
+        {
+            const auto slot = static_cast<size_t>(resetPitchVoice % 2);
+            if (pitchScheduling.resetSpreadBank())
+            {
+                if (resetPitchVoice < 2) spreadSpectralVoices[slot].beginReset();
+                else spreadInputSpectralVoices[slot].beginReset();
+                if (resetPitchVoice == 3) spreadNeedsReset = false;
+            }
+            else
+            {
+                if (resetPitchVoice < 2) spectralVoices[slot].beginReset();
+                else inputSpectralVoices[slot].beginReset();
+            }
+        }
+        if(pitchScheduling.clearingTargetBank())
+        {
+            if(pitchScheduling.resetSpreadBank())
+            {
+                for(auto& voice:spreadSpectralVoices)voice.resetStep();
+                for(auto& voice:spreadInputSpectralVoices)voice.resetStep();
+            }
+            else
+            {
+                for(auto& voice:spectralVoices)voice.resetStep();
+                for(auto& voice:inputSpectralVoices)voice.resetStep();
+            }
+        }
+        if (pitchScheduling.primeSpreadBank())
+        {
+            for (auto& voice : spreadSpectralVoices) voice.primeStep();
+            for (auto& voice : spreadInputSpectralVoices) voice.primeStep();
+        }
+        const bool runOriginalPitch = pitchScheduling.processOriginal();
+        const bool runSpreadPitch = pitchScheduling.processSpread();
+        const bool canSuspendTank = !requestedTankRoute && tankRoute.getCurrentValue() == 0
+            && !tankRoute.isSmoothing() && pitchScheduling.isSettled() && pitchScheduling.isSpread();
+        if (canSuspendTank)
+        {
+            tankPitchSuspended = true; tankPitchWarmup = 0;
+        }
+        else if (tankPitchSuspended)
+        {
+            tankPitchSuspended = false;
+            // More than a complete analysis/overlap history. Refill by processing
+            // real samples over real time, without reset, replay loops or stale
+            // output reaching the feedback path. Also covers a scheduling change.
+            tankPitchWarmup = static_cast<int>(rate * .3f) + 64;
+        }
+        else if (tankPitchWarmup > 0 && --tankPitchWarmup == 0)
+        {
+            inputRoute.setTargetValue(requestedInputRoute ? 1.0f : 0.0f);
+            tankRoute.setTargetValue(requestedTankRoute ? 1.0f : 0.0f);
+        }
         std::array<float, 8> taps {};
         float sum = 0;
         for (size_t i = 0; i < lines.size(); ++i) { taps[i] = validLines[i]>=lines[i].size()?lines[i][positions[i]]:0.0f; sum += taps[i]; }
@@ -274,8 +369,17 @@ public:
         {
             --inputDrainRemaining;
             const float leftInput = feedInput ? (retainTails?kindInput[1][0]:input[0]) : 0, rightInput = feedInput ? (retainTails?kindInput[1][1]:input[1]) : 0;
-            const auto firstVoice = inputSpectralVoices[0].process(leftInput, rightInput, ratioA);
-            const auto secondVoice = inputSpectralVoices[1].process(leftInput, rightInput, ratioB);
+            std::array<float, 2> firstVoice{}, secondVoice{};
+            if (runOriginalPitch)
+            {
+                firstVoice = inputSpectralVoices[0].process(leftInput, rightInput, ratioA);
+                secondVoice = inputSpectralVoices[1].process(leftInput, rightInput, ratioB);
+            }
+            if (runSpreadPitch)
+            {
+                firstVoice = pitchScheduling.mix(firstVoice, spreadInputSpectralVoices[0].process(leftInput, rightInput, ratioA));
+                secondVoice = pitchScheduling.mix(secondVoice, spreadInputSpectralVoices[1].process(leftInput, rightInput, ratioB));
+            }
             for (size_t ch = 0; ch < 2; ++ch)
                 inputShift[ch] = inputShifter[ch].processSample(ch == 0 ? leftInput : rightInput) * (1 - spectralMix)
                     + (firstVoice[ch] * (1 - blend) + secondVoice[ch] * blend) * spectralMix;
@@ -302,12 +406,21 @@ public:
         // voices, so returning to Shimmer cannot replay frozen old input.
         const bool feedSpectral = spectralMix > 0 && (weights[1].getCurrentValue() > 0 || weights[1].getTargetValue() > 0 || (retainTails&&retirement.audibleRetiring(1)));
         if (feedSpectral) spectralDrainRemaining = static_cast<int>(rate * .3f);
-        if (spectralDrainRemaining > 0)
+        if (spectralDrainRemaining > 0 && !tankPitchSuspended)
         {
+            ++tankPitchFrames;
             --spectralDrainRemaining;
             const float inputL = feedSpectral ? wet[1][0] : 0, inputR = feedSpectral ? wet[1][1] : 0;
-            voiceA = spectralVoices[0].process(inputL, inputR, ratioA);
-            voiceB = spectralVoices[1].process(inputL, inputR, ratioB);
+            if (runOriginalPitch)
+            {
+                voiceA = spectralVoices[0].process(inputL, inputR, ratioA);
+                voiceB = spectralVoices[1].process(inputL, inputR, ratioB);
+            }
+            if (runSpreadPitch)
+            {
+                voiceA = pitchScheduling.mix(voiceA, spreadSpectralVoices[0].process(inputL, inputR, ratioA));
+                voiceB = pitchScheduling.mix(voiceB, spreadSpectralVoices[1].process(inputL, inputR, ratioB));
+            }
         }
         for (size_t ch = 0; ch < 2; ++ch)
         {
@@ -323,6 +436,14 @@ public:
         ++processedFrames[2];
         const float returnGain = nonlinearReturn.getNextValue() / juce::jmax(1.0f, reflectionGainBound);
         const float held=nonlinearHoldWeight.getNextValue(),send=nonlinearHoldSend.getNextValue();
+        // The 48-tap generator and late FDN share a readout budget. Each tap
+        // sum is bounded by reflectionGainBound and each late output by
+        // 4*.35 times the maximum stored sample. Reserve a further factor of
+        // two for the output high-pass transient. The final output guard is
+        // therefore not the normal control law for accumulating Infinite.
+        const bool infinite=held>0&&settingsFor(2).infiniteInput;
+        const float infiniteLimit=infinite?1.0f/(BuiltInReverbReturnLevels::gain(6,returnBlend)
+            *(reflectionGainBound+1.4f*juce::jmax(nonlinearLateLevel.getCurrentValue(),nonlinearLateLevel.getTargetValue()))):0.0f;
         auto nonlinearInput = nonlinearTail.diffuse({
             kindInput[2][0]*send + nonlinearReturned[0] * returnGain*(1-held),
             kindInput[2][1]*send + nonlinearReturned[1] * returnGain*(1-held) }, nonlinearSmear.getNextValue());
@@ -332,7 +453,9 @@ public:
         {
             const auto loopLength=static_cast<size_t>(juce::roundToInt(duration));
             const auto loop=validNonlinear>=loopLength?nonlinear[(nonlinearPosition+nonlinear.size()-loopLength)%nonlinear.size()]:std::array<float,2>{};
-            for(size_t ch=0;ch<2;++ch){nonlinearInput[ch]*=send;next[ch]=juce::jlimit(-4.0f,4.0f,nonlinearInput[ch]+held*loop[ch]);}
+            for(size_t ch=0;ch<2;++ch){nonlinearInput[ch]*=send;next[ch]=nonlinearInput[ch]+held*loop[ch];}
+            if(infinite)nonlinearHoldBudget.process(next,infiniteLimit);
+            for(auto& sample:next)sample=juce::jlimit(-4.0f,4.0f,sample);
         }
         nonlinear[nonlinearPosition] = next;
         validNonlinear=juce::jmin(nonlinear.size(),validNonlinear+1);
@@ -372,7 +495,7 @@ public:
         {
             auto excitation=wet[2];
             if(held>0)for(size_t ch=0;ch<2;++ch)excitation[ch]=held>=1?nonlinearInput[ch]:excitation[ch]+held*(nonlinearInput[ch]-excitation[ch]);
-            const auto tail = nonlinearTail.process(excitation, depthSamples, phaseSine, phaseCosine);
+            const auto tail = nonlinearTail.process(excitation, depthSamples, phaseSine, phaseCosine,infiniteLimit);
             for (size_t ch = 0; ch < 2; ++ch) wet[2][ch] += tail[ch] * lateGain;
             lateWasActive = true;
         }
@@ -386,16 +509,22 @@ public:
             const float wetWeight=retirement.next(kind);
             output[2] += weight;
             if(drainRemaining[kind]==0) continue;
+            const float returnWeight=BuiltInReverbReturnLevels::weighted(retainTails?wetWeight:weight,4+static_cast<int>(kind),returnBlend);
             for (size_t ch = 0; ch < 2; ++ch)
             {
                 highState[kind][ch] += highCoefficient[kind] * (wet[kind][ch] - highState[kind][ch]);
                 lowState[kind][ch] += lowCoefficient[kind] * (wet[kind][ch] - highState[kind][ch] - lowState[kind][ch]);
-                if(!retainTails)output[ch] += lowState[kind][ch] * weight;
             }
+            auto readout=lowState[kind];
+            // A live return-gain change can expose older, louder history
+            // before the bounded writes have traversed the complete loop.
+            if(kind==2&&nonlinearHoldWeight.getCurrentValue()>0&&settingsFor(2).infiniteInput)
+                nonlinearReadoutBudget.process(readout,1.0f/BuiltInReverbReturnLevels::gain(6,returnBlend));
+            if(!retainTails)for(size_t ch=0;ch<2;++ch)output[ch]+=readout[ch]*returnWeight;
             if(retainTails)
             {
-                const float mid=(lowState[kind][0]+lowState[kind][1])*.5f,side=(lowState[kind][0]-lowState[kind][1])*.5f*settingsFor(kind).width;
-                output[0]+=(mid+side)*wetWeight;output[1]+=(mid-side)*wetWeight;
+                const float mid=(readout[0]+readout[1])*.5f,side=(readout[0]-readout[1])*.5f*settingsFor(kind).width;
+                output[0]+=(mid+side)*returnWeight;output[1]+=(mid-side)*returnWeight;
             }
             if(--drainRemaining[kind]==0)
             {
@@ -437,8 +566,19 @@ public:
     // Audio-thread-owned diagnostics; inspect only while processing is stopped.
     bool isDormant() const noexcept { return drainRemaining[0]==0&&drainRemaining[1]==0&&drainRemaining[2]==0; }
     std::array<juce::uint64,3> processingFrames() const noexcept { return processedFrames; }
+    bool shimmerSchedulingSettled() const noexcept { return pitchScheduling.isSettled(); }
+    bool shimmerSchedulingSpread() const noexcept { return pitchScheduling.isSpread(); }
+    bool shimmerTankPitchSuspended() const noexcept { return tankPitchSuspended; }
+    int shimmerTankPitchWarmupRemaining() const noexcept { return tankPitchWarmup; }
+    float shimmerTankRouteGain() const noexcept { return tankRoute.getCurrentValue(); }
+    std::uint64_t shimmerTankPitchProcessedFrames() const noexcept { return tankPitchFrames; }
+    int shimmerSchedulingExtraLatencySamples() const noexcept { return spreadSpectralVoices[0].extraLatencySamples(); }
+    int shimmerSchedulingWarmupSamples() const noexcept { return spreadSpectralVoices[0].latencySamples(); }
+    const BuiltInInfiniteHoldBudget& nonlinearInfiniteBudget()const noexcept{return nonlinearHoldBudget;}
+    const BuiltInInfiniteHoldBudget& nonlinearLateInfiniteBudget()const noexcept{return nonlinearTail.infiniteBudget();}
 private:
     BuiltInNonlinearTail nonlinearTail;
+    BuiltInInfiniteHoldBudget nonlinearHoldBudget,nonlinearReadoutBudget;
     std::array<float, 2> nonlinearReturned {};
     float reflectionGainBound = 1;
     bool lateWasActive = false;
@@ -447,6 +587,7 @@ private:
     double nonlinearPhase = 0;
     std::array<std::array<float, 2>, 48> reflectionPhase {};
     float rate = 44100;
+    std::array<juce::SmoothedValue<float>,3> dampingRamp;
     std::array<float,3> lowCoefficient {1,1,1},highCoefficient {},dampingCoefficient {.5f,.5f,.5f};
     Settings values {};
     std::array<Settings,3> kindSettings {};
@@ -477,6 +618,12 @@ private:
     std::array<std::array<float, 2>, 3> highState {}, lowState {};
     std::array<OpenStudioOctaveShimmerShifter, 2> shifter, inputShifter;
     std::array<BuiltInReverbPitchVoice, 2> spectralVoices, inputSpectralVoices;
+    std::array<BuiltInSpreadReverbPitchVoice, 2> spreadSpectralVoices, spreadInputSpectralVoices;
+    BuiltInShimmerScheduling pitchScheduling;
+    bool tankPitchSuspended = false, requestedTankRoute = true, requestedInputRoute = false;
+    int tankPitchWarmup = 0;
+    std::uint64_t tankPitchFrames = 0;
+    bool spreadNeedsReset = true;
     std::array<juce::SmoothedValue<float>, 2> pitchRatio;
     juce::SmoothedValue<float> voiceMix, shimmerBlend, spectralWeight, inputRoute, tankRoute, holdWeight, holdSend;
     std::array<juce::SmoothedValue<float>, 48> reflectionGain;

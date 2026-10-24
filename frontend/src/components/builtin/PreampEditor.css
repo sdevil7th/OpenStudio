@@ -4,8 +4,8 @@
   background: linear-gradient(120deg,#2b2c2844,transparent 60%),#1c2327;
 }
 .preamp-approved .core-effect-face {
-  padding: 25px 29px;
-  gap: 26px;
+  padding: clamp(16px, 1.8cqi, 40px);
+  gap: clamp(14px, 1.5cqi, 30px);
 }
 .preamp-heading>.core-panel-label {
   color: #bba882;
@@ -20,8 +20,8 @@
   padding: 7px 9px;
 }
 .preamp-main {
-  flex-basis: 310px;
-  flex-grow: 1;
+  flex-basis: clamp(230px, 24cqi, 440px);
+  flex-grow: 0;
 }
 .preamp-gain {
   width: 126px;
@@ -31,17 +31,17 @@
 }
 .preamp-tone {
   gap: 23px;
-  padding: 30px 20px;
+  padding: clamp(16px, 2cqi, 36px);
   background: #232b2e;
   border-top: 1px solid #4d524e;
   border-bottom: 1px solid #131b20;
   border-radius: 8px;
-  min-height: 248px;
+  min-height: 210px;
 }
 .preamp-tone-strip {
   gap: 21px;
 }
-.preamp-tone-strip h3,.preamp-tone-off h3 {
+.preamp-tone-strip h3 {
   font-size: 10px;
   letter-spacing: 1.5px;
   color: #b5b6a6;
@@ -78,31 +78,14 @@
   text-align: center;
 }
 .preamp-analysis {
-  flex-basis: 185px;
-  flex-grow: 1;
+  flex-basis: clamp(160px, 17cqi, 340px);
+  flex-grow: 0;
 }
 .preamp-character {
   width: 275px;
 }
 .preamp-character>label {
   min-width: 120px;
-}
-.preamp-tone-off {
-  min-height: 186px;
-  text-align: center;
-}
-.preamp-tone-off p {
-  font-size: 12px;
-  line-height: 1.7;
-  color: #8d9fa8;
-}
-.preamp-band-off {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 106px;
-  font-size: 12px;
-  color: #8fa0a5;
 }
 @container core-effect (max-width:800px) {
   .preamp-approved .core-effect-face {

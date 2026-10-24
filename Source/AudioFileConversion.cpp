@@ -64,13 +64,14 @@ juce::Result AudioFileConversion::convert(const juce::File& source, const juce::
     if (options.format == "wav") arguments.addArray({ "-rf64", "auto" });
     arguments.addArray({ "-f", options.format, staged.getFile().getFullPathName() });
     OwnedChildProcess process;
-    if (cancelled() || !process.start(arguments)) return juce::Result::fail("Could not start audio conversion");
     const auto started = juce::Time::getMillisecondCounterHiRes();
+    const auto timedOut = [&] { return juce::Time::getMillisecondCounterHiRes() - started >= options.timeoutMs; };
+    if (cancelled() || !process.start(arguments)) return juce::Result::fail("Could not start audio conversion");
     juce::MemoryOutputStream diagnostic;
     bool interrupted = false;
     while (process.isRunning())
     {
-        if (cancelled() || juce::Time::getMillisecondCounterHiRes() - started >= options.timeoutMs)
+        if (cancelled() || timedOut())
         {
             interrupted = true;
             process.kill();
@@ -87,7 +88,9 @@ juce::Result AudioFileConversion::convert(const juce::File& source, const juce::
     }
     // A terminated process must relinquish the staged file before cleanup.
     const std::atomic<bool> waitForExit { true };
-    if (!process.waitForProcessToFinish(2000, waitForExit) || interrupted || cancelled())
+    // The child can finish between polls after its deadline. A successful exit
+    // must not bypass the budget merely because isRunning() became false.
+    if (!process.waitForProcessToFinish(2000, waitForExit) || interrupted || cancelled() || timedOut())
         return juce::Result::fail("Conversion cancelled or timed out; original files were preserved");
     if (process.getExitCode() != 0)
         return juce::Result::fail("Audio conversion failed: " + diagnostic.toString().substring(0, 2048));
@@ -103,7 +106,7 @@ juce::Result AudioFileConversion::convert(const juce::File& source, const juce::
     publicationStream->flush();
     const bool flushed = publicationStream->getStatus().wasOk();
     publicationStream.reset();
-    if (!flushed || cancelled() || !staged.overwriteTargetFileWithTemporary())
+    if (!flushed || cancelled() || timedOut() || !staged.overwriteTargetFileWithTemporary())
         return juce::Result::fail("Could not publish converted audio; the original destination was preserved");
     return juce::Result::ok();
 }

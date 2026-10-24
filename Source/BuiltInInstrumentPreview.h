@@ -49,10 +49,23 @@ public:
         }
         return false;
     }
+    // Existing publication states are the source of truth: preparing leases
+    // become visible only after state 1 is published, and stop/release tails
+    // remain renderable until the callback retires the lease. A publication
+    // after this snapshot is picked up by the next callback.
+    bool mayRender() const noexcept
+    {
+        for (const auto& slot : slots)
+            if (slot.state.load(std::memory_order_acquire) > 0)
+                return true;
+        return false;
+    }
     void render(float* const* output, int channels, int count, double rate)
     {
         for (auto& slot : slots)
         {
+            if (slot.state.load(std::memory_order_acquire) != 1)
+                continue;
             int ready = 1;
             if (!slot.state.compare_exchange_strong(ready, 2)) continue;
             bool stop = slot.stop.load() || slot.source.expired() || slot.rate != rate
@@ -62,7 +75,7 @@ public:
             for (int start = 0; start < count; start += 256)
             {
                 const int length = juce::jmin(256, count - start);
-                slot.audio.clear(); slot.midi.clear();
+                slot.audio.clear(0, length); slot.midi.clear();
                 int previewChannel = 1;
                 if (const auto* synth = dynamic_cast<const OpenStudioBasicSynthInstrument*>(slot.processor.get()))
                     if (synth->mpeEnabled.load() >= .5f)

@@ -4,6 +4,9 @@ import { ChevronLeft, ChevronRight, Power, Redo2, Save, Settings2, Undo2 } from 
 import { nativeBridge, type BuiltInPluginAddress, type BuiltInPluginSchema } from "../../services/NativeBridge";
 import { Modal } from "../ui";
 import { EQPresetBrowser, eqSettingsClipboardKey } from "./EQPresetBrowser";
+import { findBuiltInParameter } from "../../utils/builtInExpandedSelectors";
+import { PluginFeatureFinder } from "./PluginFeatureFinder";
+import "./EQToolbar.css";
 
 export type { PluginEditorToolbarProps as EQToolbarProps } from "./PluginEditorContracts";
 import type { PluginEditorToolbarProps as EQToolbarProps } from "./PluginEditorContracts";
@@ -95,24 +98,35 @@ export function EQToolbar({ schema, address, canUndo, canRedo, onUndo, onRedo, o
   });
   const index = presets.indexOf(preset);
   const dirty = savedProgramMap !== (schema.midiPrograms?.fingerprint ?? "") || (savedValues !== null && !equalValues(savedValues, current)) || (savedIR !== null ? savedIR !== irFingerprint : Boolean(schema.impulseResponse && (schema.impulseResponse.name !== "Studio room (generated)" || Math.abs(schema.impulseResponse.trimSeconds - 1.2) > .0001)));
+  const signalPath = schema.parameters.find(p => p.id === "signalPath");
   const bypass = schema.parameters.find(p => p.id === "bypass");
-  return <div className="relative flex min-h-12 shrink-0 items-center gap-2 border-b border-daw-border-light bg-daw-panel px-3 py-2 text-xs" aria-label="Plugin toolbar">
+  const reverbType = schema.pluginId === "reverb" ? findBuiltInParameter(schema, "algorithm") : undefined;
+  const reverbVoice = reverbType?.enumOptions?.find(option => option.value === Math.round(reverbType.value))?.label;
+  const voicedPreset = `Factory - Voiced ${reverbVoice}`;
+  return <><div className="plugin-toolbar relative flex min-h-12 shrink-0 items-center gap-1.5 border-b border-daw-border-light bg-daw-panel px-3 py-2 text-xs" aria-label="Plugin toolbar">
     <button className={editorButton} title="Previous preset" aria-label="Previous preset" disabled={busy || presets.length === 0} onClick={() => recall(presets[index < 0 ? presets.length - 1 : (index - 1 + presets.length) % presets.length])}><ChevronLeft size={14} /></button>
-    <select className={`${editorSelect} min-w-0 w-48`} aria-label="Preset" disabled={busy} value={preset} onChange={e => recall(e.target.value)}><option value="">Default{preset === "" && dirty ? " *" : ""}</option>{presets.map(p => <option key={p} value={p}>{p}{p === preset && dirty ? " *" : ""}</option>)}</select>
+    <select className={`${editorSelect} plugin-preset min-w-0 w-48`} aria-label="Preset" disabled={busy} value={preset} onChange={e => recall(e.target.value)}><option value="">Default{preset === "" && dirty ? " *" : ""}</option>{presets.map(p => <option key={p} value={p}>{p}{p === preset && dirty ? " *" : ""}</option>)}</select>
     <button className={editorButton} title="Next preset" aria-label="Next preset" disabled={busy || presets.length === 0} onClick={() => recall(presets[(index + 1) % presets.length])}><ChevronRight size={14} /></button>
     <button className={editorButton} aria-label="Save preset" title="Save preset" disabled={busy} onClick={() => { setName(""); setSaveOpen(!saveOpen); }}><Save size={14} /></button>
-    {schema.pluginId === "eq" && <button className={editorButton} aria-label="Browse EQ presets" title="Browse EQ presets" disabled={busy} onClick={() => setLibraryOpen(true)}>…</button>}
+    {schema.pluginId === "eq" && <button data-feature="midi-programs" className={editorButton} aria-label="Browse EQ presets" title="Presets and MIDI programs" disabled={busy} onClick={() => setLibraryOpen(true)}>…</button>}
     <button className={editorButton} aria-label="Plugin options" title="Preset files and saved processor bypass" disabled={busy} onClick={() => { setFileMessage(""); setOptionsOpen(true); }}><Settings2 size={14} /></button>
+    <PluginFeatureFinder schema={schema} />
     <span className="min-w-0 flex-1 truncate text-[10px] text-daw-text-muted" role="status" title={error}>{error || (busy ? "Applying…" : dirty ? "Modified" : "")}</span>
     <button className={editorButton} disabled={busy || !canUndo} onClick={onUndo} aria-label="Undo" title="Undo"><Undo2 size={14} /></button><button className={editorButton} disabled={busy || !canRedo} onClick={onRedo} aria-label="Redo" title="Redo"><Redo2 size={14} /></button>
-    <div className="flex shrink-0 gap-1 whitespace-nowrap" aria-label="Compare"><button className={editorButton} disabled={busy} aria-pressed={compare === "A"} onClick={() => switchCompare("A")}>A</button><button className={editorButton} disabled={busy} aria-pressed={compare === "B"} onClick={() => switchCompare("B")}>B</button><button className={editorButton} disabled={busy} title={`Copy ${compare} to ${compare === "A" ? "B" : "A"}`} onClick={() => void run(async () => { if (!await onFlush()) return false; slots.current[compare === "A" ? "B" : "A"] = await capturePluginState(address); return true; })}>{compare === "A" ? "A → B" : "B → A"}</button></div>
-    {onHostBypass && typeof schema.hostBypassed === "boolean" ? <button className={`${editorButton} ml-1`} disabled={busy}
+    <div className="flex shrink-0 gap-1 whitespace-nowrap" aria-label="Compare"><button className={editorButton} disabled={busy} aria-pressed={compare === "A"} onClick={() => switchCompare("A")}>A</button><button className={editorButton} disabled={busy} aria-pressed={compare === "B"} onClick={() => switchCompare("B")}>B</button><button className={editorButton} disabled={busy} aria-label={`Copy ${compare} to ${compare === "A" ? "B" : "A"}`} title={`Copy ${compare} to ${compare === "A" ? "B" : "A"}`} onClick={() => void run(async () => { if (!await onFlush()) return false; slots.current[compare === "A" ? "B" : "A"] = await capturePluginState(address); return true; })}>{compare === "A" ? "A → B" : "B → A"}</button></div>
+    {onHostBypass && typeof schema.hostBypassed === "boolean" ? <button className={`${editorButton} plugin-bypass ml-1`} disabled={busy}
       aria-label="Host bypass" aria-pressed={schema.hostBypassed} title="Bypass this FX slot"
-      onClick={() => void run(() => onHostBypass(!schema.hostBypassed))}><Power size={14} /><span>{schema.hostBypassed ? "Bypassed" : bypass && bypass.value >= .5 ? "DSP bypass" : "Active"}</span></button> : bypass && <button className={`${editorButton} ml-1`} disabled={busy} aria-label={schema.pluginId === "eq" ? "Bypass equalizer" : "Bypass processor"} aria-pressed={bypass.value >= .5} title="Bypass" onClick={() => void run(() => onApplyValues({ bypass: bypass.value >= .5 ? 0 : 1 }))}><Power size={14} /><span>{bypass.value >= .5 ? "Bypassed" : "Active"}</span></button>}
+      onClick={() => void run(() => onHostBypass(!schema.hostBypassed))}><Power size={14} /><span>{schema.hostBypassed ? "Bypassed" : bypass && bypass.value >= .5 ? "DSP bypass" : "Active"}</span></button> : bypass && <button className={`${editorButton} plugin-bypass ml-1`} disabled={busy} aria-label={schema.pluginId === "eq" ? "Bypass equalizer" : "Bypass processor"} aria-pressed={bypass.value >= .5} title="Bypass" onClick={() => void run(() => onApplyValues({ bypass: bypass.value >= .5 ? 0 : 1 }))}><Power size={14} /><span>{bypass.value >= .5 ? "Bypassed" : "Active"}</span></button>}
     {optionsOpen && <Modal isOpen title="Plugin options" size="sm" onClose={() => setOptionsOpen(false)}>
       <div className="flex flex-col gap-4 text-sm">
         <div className="flex flex-wrap gap-2"><button className={editorButton} disabled={busy} onClick={() => fileAction("import")}>Import preset</button><button className={editorButton} disabled={busy} onClick={() => fileAction("export")}>Export current</button><button className={editorButton} disabled={busy} onClick={() => fileAction("folder")}>Preset folder</button></div>
         <p className="text-xs text-daw-text-muted">Complete settings include hidden controls and embedded assets. Import is one undoable change; Host bypass stays separate.</p>
+    {reverbType && <div className="flex flex-wrap items-center gap-2 text-xs" aria-label="Reverb starting voices">
+      <button type="button" className={editorButton} disabled={busy || !presets.includes(voicedPreset)} onClick={() => recall(voicedPreset)} title="Recall the complete factory preset for this voice. Undo restores previous settings.">Load voice preset</button>
+      <button type="button" className={editorButton} disabled={busy || !presets.includes("Factory - Voiced collection")} onClick={() => recall("Factory - Voiced collection")} title="Replace all type banks with authored starting voices. Width, Wet and Output remain shared across types. Undo restores previous settings.">Load voiced collection</button>
+      <span className="min-w-0 flex-1 basis-48 text-daw-text-muted">Preset recall replaces settings. Type browsing keeps your edits.</span>
+    </div>}
+        {signalPath && <label className="flex flex-col gap-2">Signal path<select className={editorSelect} aria-label="Signal path" value={signalPath.value} disabled={busy} onChange={event => void run(() => onApplyValues({ signalPath: Number(event.target.value) }))}><option value={0}>Legacy</option><option value={1}>Corrected</option></select><small className="text-daw-text-muted">Corrected applies the signal-processing repairs. Older saved settings retain Legacy. Changing this setting resets processing history; stop playback first. Undo and Compare include this choice.</small></label>}
         {bypass && <label className="flex items-start gap-3"><input type="checkbox" aria-label="Saved processor bypass" checked={bypass.value >= .5} disabled={busy} onChange={event => void run(() => onApplyValues({ bypass: event.target.checked ? 1 : 0 }))} /><span>Saved processor bypass<small className="mt-1 block text-daw-text-muted">Stored in this plugin's presets and Compare. Turn it off to reactivate processing when the toolbar shows DSP bypass.</small></span></label>}
         {(error || fileMessage) && <p role={error ? "alert" : "status"} className="text-xs">{error || fileMessage}</p>}
       </div>
@@ -169,5 +183,7 @@ export function EQToolbar({ schema, address, canUndo, canRedo, onUndo, onRedo, o
         if (!state || typeof state !== "object" || state.name !== schema.name || (typeof state.fullState !== "string" && (!state.values || typeof state.values !== "object"))) throw new Error("Invalid EQ settings");
         return onApplyState(clipboard.state);
       }} />}
-  </div>;
+  </div>
+
+  </>;
 }
