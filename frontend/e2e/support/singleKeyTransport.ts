@@ -1,6 +1,15 @@
 import type { Page } from "@playwright/test";
 import type { BrowserRegressionReport, TransportKeyQa } from "./interactionFixtureTypes";
 
+declare global {
+  interface Window {
+    __transportKeyModules: {
+      store: typeof import("../../src/store/useDAWStore").useDAWStore;
+      createDefaultTrack: typeof import("../../src/store/useDAWStore").createDefaultTrack;
+    };
+  }
+}
+
 export async function runSingleKeyTransport(page: Page): Promise<BrowserRegressionReport> {
   function assert(ok: unknown, message: string): asserts ok { if (!ok) throw new Error(message); }
   await page.addInitScript(() => {
@@ -9,11 +18,21 @@ export async function runSingleKeyTransport(page: Page): Promise<BrowserRegressi
   });
   await page.goto('/?platform=windows&windowChrome=native');
   await page.getByText('Starting OpenStudio...', { exact: true }).waitFor({ state: 'hidden' });
-  await page.evaluate(async () => {
-    const source = await (await fetch('/src/App.tsx')).text();
-    const storeUrl = source.match(/from "([^"]*useDAWStore\.ts[^"]*)"/)?.[1];
-    if (!storeUrl) throw new Error("App store import was not found");
-    const { useDAWStore: store, createDefaultTrack } = await import(/* @vite-ignore */ storeUrl) as typeof import("../../src/store/useDAWStore");
+  await page.getByRole('contentinfo', { name: 'Transport controls' }).waitFor();
+  // As in the ruler/track-copy fixtures, let the document own module loading:
+  // Chromium can collect a CDP evaluation's pending dynamic-import Promise.
+  const response = await page.request.get('/src/App.tsx');
+  if (!response.ok()) throw new Error("App source was not available");
+  const source = await response.text();
+  const storeUrl = source.match(/from "([^"]*useDAWStore\.ts[^"]*)"/)?.[1];
+  if (!storeUrl) throw new Error("App store import was not found");
+  await page.addScriptTag({ type: 'module', content: `
+    import { useDAWStore as store, createDefaultTrack } from ${JSON.stringify(storeUrl)};
+    window.__transportKeyModules = { store, createDefaultTrack };
+  ` });
+  await page.waitForFunction(() => Boolean(window.__transportKeyModules));
+  await page.evaluate(() => {
+    const { store, createDefaultTrack } = window.__transportKeyModules;
     const qa: TransportKeyQa = window.__transportKeyQA = { store, calls: [], keys: window.__trustedTransportKeys };
     const track = createDefaultTrack('record-key', 'Record key QA', '#4379ee', 'audio', []);
     track.armed = true;

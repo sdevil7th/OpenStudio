@@ -1,7 +1,7 @@
 # OpenStudio 0.1.09 candidate qualification
 
 Unpublished candidate selected on 4 November 2026. No release tag, Store
-submission, publication or website/update-feed change has been created for it.
+submission, publication or public website/update-feed change has been created for it.
 The user requested certification checks and a release PR, with publication held.
 
 ## Current evidence
@@ -20,18 +20,33 @@ The user requested certification checks and a release PR, with publication held.
   setup executable, passed installed window-lifecycle and frozen Support checks,
   and uninstalled it. These packages predate the Support display-scaling fix
   below; a rebuilt package and another WACK run are required.
-- **Pass — full Linux candidate:** the [Linux job](https://github.com/sdevil7th/OpenStudio/actions/runs/41861058092/job/126682629756)
+- **Pass — full Linux candidate:** the [final Linux job](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801/job/126710168141)
   built the production app and Support, installed the actual DEB, checked normal
   and safe desktop launches, render/features, and the AppImage payload and
-  launchers. The candidate packages are retained as unpublished CI artifacts.
-- **In progress — final Windows browser checks:** Linux's full browser suite
-  passed. Windows exposed two test-fixture problems: driver round trips made a
+  launchers. The [candidate packages](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801/artifacts/13343059637)
+  include the final Support display changes at `d8202953`. AppImage launcher
+  tests used extract-and-run mode; physical desktop/FUSE and Fedora RPM
+  installation remain in the manual matrix.
+- **Pass — final Windows browser checks:** all four groups at `d8202953` passed,
+  with 295 passing cases and 33 native-schema/explicit-input skips, zero failures and zero
+  retries. The [run](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801)
+  retains the evidence. Earlier Windows runs exposed two test-fixture problems:
+  driver round trips made a
   purported sustained gesture exceed its 200 ms idle boundary, and a second
   full-screen 4K screenshot consumed the interaction deadline. Corrected focused
-  cases pass locally without relaxing the behavior assertions. A separate run
+  cases pass without relaxing the behavior assertions. A separate run
   failed to load Vite's React refresh module with `ERR_NO_BUFFER_SPACE`; the
   Windows suite is now split across four hosts, retaining all tests and zero
-  retries. Full rerun results are still required.
+  retries. Linux's earlier full browser suite passed. The final rerun found a
+  test-loader failure before the transport-key assertions: Chromium discarded
+  the evaluation's pending module-import promise. That fixture now uses the
+  existing document-owned loading pattern from the ruler/track-copy tests,
+  without changing keyboard assertions. Its focused local check passes; the
+  Linux rerun remains required. Linux now also uses four test groups for faster
+  feedback, with the system WebKitGTK check retained once per run.
+  Native-schema editor tests run separately after the native app build. Tests
+  requiring a private project or explicit native tempo-preview input do not run
+  automatically in this general browser suite.
 - **Blocked — full macOS candidate execution:** GitHub repeatedly failed to
   allocate either Mac architecture before any steps ran. The workflow now uses
   supported macOS 15 images and includes installed universal-DMG checks on both

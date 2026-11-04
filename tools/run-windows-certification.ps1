@@ -37,7 +37,9 @@ try {
     $summary.requiredTestsStatus = if ($required.Count -gt 0 -and $summary.requiredIssues.Count -eq 0 -and $test.ExitCode -eq 0 -and $xml.DocumentElement.GetAttribute('PARTIAL_RUN') -ieq 'FALSE') { 'pass' } else { 'not_passed' }
     # Keep the aggregate gate strict. Informational findings are preserved for
     # review, not silently converted into a Store certification pass.
-    if ($test.ExitCode -ne 0 -or $overall -ine 'PASS') { throw "WACK did not pass: result '$overall', exit $($test.ExitCode). Review the retained XML." }
+    if ($test.ExitCode -ne 0 -or $overall -ine 'PASS' -or $summary.requiredTestsStatus -ne 'pass') {
+        throw "WACK did not pass: result '$overall', required tests '$($summary.requiredTestsStatus)', exit $($test.ExitCode). Review the retained XML."
+    }
     $summary.status = 'pass'
 } catch {
     $summary.reason = $_.Exception.Message

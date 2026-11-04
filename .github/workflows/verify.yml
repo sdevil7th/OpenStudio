@@ -146,7 +146,10 @@ jobs:
           - { os: windows-latest, shard: '3/4', artifact: windows-3 }
           - { os: windows-latest, shard: '4/4', artifact: windows-4 }
           - { os: macos-15, shard: '1/1', artifact: macos }
-          - { os: ubuntu-24.04, shard: '1/1', artifact: linux }
+          - { os: ubuntu-24.04, shard: '1/4', artifact: linux-1 }
+          - { os: ubuntu-24.04, shard: '2/4', artifact: linux-2 }
+          - { os: ubuntu-24.04, shard: '3/4', artifact: linux-3 }
+          - { os: ubuntu-24.04, shard: '4/4', artifact: linux-4 }
     defaults:
       run:
         working-directory: frontend
@@ -211,7 +214,7 @@ jobs:
         run: defaults delete org.webkit.Playwright AppleKeyboardUIMode 2>/dev/null || true
 
       - name: Check controls in the system WebKitGTK
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.shard == '1/4'
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-webkit2-4.1 libxtst6 xvfb xauth
