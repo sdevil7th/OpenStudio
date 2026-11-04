@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { primaryModifier } from "./support/platformInput";
 import type { useDAWStore } from "../src/store/useDAWStore";
 import type { nativeBridge } from "../src/services/NativeBridge";
 
@@ -46,16 +47,17 @@ async function ready(page: Page) {
 }
 
 async function selectTwo(page: Page, point: { x: number; y: number }, edge = false) {
-  await page.keyboard.down("Control");
+  const modifier = await primaryModifier(page);
+  await page.keyboard.down(modifier);
   await page.mouse.click(point.x + (edge ? 102 : 200), point.y);
   await page.mouse.click(point.x + (edge ? 402 : 500), point.y);
-  await page.keyboard.up("Control");
+  await page.keyboard.up(modifier);
   await expect.poll(() => page.evaluate(() => window.__midiWorkflowQA.store.getState().selectedClipIds)).toEqual(["a", "b"]);
   await page.mouse.click(point.x + 500, point.y, { button: "right" });
   await expect.poll(() => page.evaluate(() => window.__midiWorkflowQA.store.getState().selectedClipIds)).toEqual(["a", "b"]);
 }
 
-test("Ctrl+click followed by right-click exposes Join and preserves the selected clips", async ({ page }) => {
+test("Primary-modifier click followed by right-click exposes Join and preserves the selected clips", async ({ page }) => {
   const point = await ready(page);
   await selectTwo(page, point);
   await expect(page.getByText(/^Join Selected MIDI Clips/)).toBeVisible();
@@ -65,7 +67,7 @@ test("Ctrl+click followed by right-click exposes Join and preserves the selected
   await expect.poll(() => page.evaluate(() => window.__midiWorkflowQA.store.getState().tracks[0].midiClips.length)).toBe(3);
 });
 
-test("Ctrl+click at clip edges also toggles selection without an accidental resize", async ({ page }) => {
+test("Primary-modifier click at clip edges also toggles selection without an accidental resize", async ({ page }) => {
   const point = await ready(page);
   await selectTwo(page, point, true);
   await expect(page.getByText(/^Join Selected MIDI Clips/)).toBeVisible();
@@ -84,12 +86,13 @@ test("the selected export menu writes every selected clip to one file without jo
 
 test("empty-space range feedback explains the blue region and exposes Clear and Set loop", async ({ page }) => {
   const point = await ready(page);
-  await page.keyboard.down("Control");
+  const modifier = await primaryModifier(page);
+  await page.keyboard.down(modifier);
   await page.mouse.move(point.x + 150, point.y + 130);
   await page.mouse.down();
   await page.mouse.move(point.x + 600, point.y + 130, { steps: 5 });
   await page.mouse.up();
-  await page.keyboard.up("Control");
+  await page.keyboard.up(modifier);
   await expect(page.getByLabel("Timeline gesture feedback")).toContainText("Time selection:");
   expect(await page.evaluate(() => window.__midiWorkflowQA.store.getState().selectedClipIds)).toEqual([]);
   await page.getByRole("button", { name: "Set loop", exact: true }).click();
@@ -109,7 +112,8 @@ test("slip feedback ends on release while the retained source offset remains vis
     const store = window.__midiWorkflowQA.store;
     store.setState({ tracks: store.getState().tracks.map(t => ({ ...t, midiClips: t.midiClips.map(c => ({ ...c, offset: 1, sourceLength: 5 })) })) });
   });
-  await page.keyboard.down("Control");
+  const modifier = await primaryModifier(page);
+  await page.keyboard.down(modifier);
   await page.keyboard.down("Shift");
   await page.mouse.move(point.x + 200, point.y);
   await page.mouse.down();
@@ -117,7 +121,7 @@ test("slip feedback ends on release while the retained source offset remains vis
   await expect(page.getByLabel("Timeline gesture feedback")).toHaveText("Slip contents");
   await page.mouse.up();
   await page.keyboard.up("Shift");
-  await page.keyboard.up("Control");
+  await page.keyboard.up(modifier);
   await expect(page.getByLabel("Timeline gesture feedback")).toBeHidden();
   expect(await page.evaluate(() => window.__midiWorkflowQA.store.getState().tracks[0].midiClips[0].offset)).toBeCloseTo(0.7, 3);
 });

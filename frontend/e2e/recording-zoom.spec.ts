@@ -233,7 +233,7 @@ test("live waveforms keep updating during sustained scrolling and modifier zoom"
         createDefaultTrack(`live-scroll-${i}`, `Scroll ${i}`, "#4361ee", "audio", []))] });
   });
   await paint(page);
-  for (const modifier of [null, "Control", "Shift", "Alt"]) {
+  for (const modifier of [null, await primaryModifier(page), "Shift", "Alt"]) {
     await page.evaluate(() => {
       const store = window.__recordingZoomIntegration.store;
       store.setState({ pixelsPerSecond: 80, scrollX: (store.getState().transport.currentTime - 2) * 80 });
@@ -280,7 +280,8 @@ test("native vertical scrolling shares the queued zoom publication and preserves
   await paint(page);
   const before = await geometry(page);
   const anchorX = 300;
-  const immediate = await page.locator(".timeline-container canvas").first().evaluate((element, anchor) => {
+  const modifier = await primaryModifier(page);
+  const immediate = await page.locator(".timeline-container canvas").first().evaluate((element, { anchor, modifier }) => {
     const store = window.__recordingZoomIntegration.store;
     const workspace = element.closest(".workspace") as HTMLElement;
     const bounds = element.getBoundingClientRect();
@@ -289,14 +290,14 @@ test("native vertical scrolling shares the queued zoom publication and preserves
     const latestX = store.getState().scrollX + 137;
     store.setState({ scrollX: latestX });
     element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true,
-      ctrlKey: true, deltaY: -80, clientX: bounds.left + anchor, clientY: bounds.top + 20 }));
+      ctrlKey: modifier === "Control", metaKey: modifier === "Meta", deltaY: -80, clientX: bounds.left + anchor, clientY: bounds.top + 20 }));
     workspace.scrollTop = 120;
     workspace.dispatchEvent(new Event("scroll"));
     workspace.scrollTop = 180;
     workspace.dispatchEvent(new Event("scroll"));
     return { latestX, scrollX: store.getState().scrollX, scrollY: store.getState().scrollY,
       nativeY: workspace.scrollTop };
-  }, anchorX);
+  }, { anchor: anchorX, modifier });
   expect(immediate.nativeY).toBe(180);
   expect(immediate.scrollX).toBe(immediate.latestX);
   expect(immediate.scrollY).toBe(0);
@@ -314,9 +315,10 @@ test("View menu fits the full project after track controls and modifier zoom dur
   const trackControls = page.getByRole("region", { name: "Track control panel", exact: true });
   await trackControls.getByRole("combobox").first().focus();
   await page.mouse.move(850, 240);
-  await page.keyboard.down("Control");
+  const modifier = await primaryModifier(page);
+  await page.keyboard.down(modifier);
   await page.mouse.wheel(0, -60);
-  await page.keyboard.up("Control");
+  await page.keyboard.up(modifier);
   await paint(page);
   await page.getByRole("menuitem", { name: "View menu", exact: true }).click();
   await page.getByRole("menuitem", { name: "Zoom to Full Project", exact: true }).click();

@@ -103,3 +103,28 @@ Physical Explorer drops, sustained physical MIDI performance, electrical alignme
 subjective audio acceptance and lossless receiving-DAW normalization retain their
 individual limits in the coverage matrix. This branch should remain a draft PR
 while the strict timing acceptance gate is unresolved.
+
+## November 4 CI follow-up
+
+The first completed Verify run on `06417cc4` passed Windows native qualification,
+Python tooling and all three AI policy jobs, but failed six jobs. The three input
+profile jobs encountered obsolete `.sticky canvas` selectors; macOS also sent
+Windows Control modifiers in the new MIDI and recording-zoom tests. Linux and
+both macOS native jobs failed the exact tiny-block parity gate because newly
+allocated pre-fader storage was uninitialized before its first capture.
+
+Preparation now clears the pre-fader buffer outside the audio callback. The
+existing parity gate retains exact comparisons and adds first-mismatch details
+and a poisoned-storage reprepare check. Browser tests address the ruler through
+its existing semantic attribute and use the shared platform modifier helper.
+The time-selection label also uses a readable `to` separator.
+
+Local verification in `output/ci-nov04/`: **pass** for all 25 targeted editor,
+MIDI and recording-zoom browser cases, e2e TypeScript, frontend build, Debug and
+Release CMake builds (no native compiler warnings), the complete realtime safety
+report including 1,920 tiny-block comparisons and preparation/reprepare clearing,
+and all 421 native render/export checks. An initial browser attempt lost its
+evaluation context during development-server startup; the complete subsequent
+25-case run passed. Remote Windows/Linux/macOS qualification is tracked in the
+PR checks and must not be inferred from these local results. These fixes do not
+change the strict eight-sample hardware timing and listening limits above.

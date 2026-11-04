@@ -2385,6 +2385,9 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     // Pre-allocate pre-fader buffer for send routing (2-channel stereo)
     preFaderBuffer.setSize(maxProcessingChannels, samplesPerBlock);
+    // The tap is populated only when a send needs it. Keep fresh/reprepared
+    // tracks deterministic before that first capture, including unused channels.
+    preFaderBuffer.clear();
     automationGainBuffer.setSize(8, samplesPerBlock);
     realtimeFallbackBuffer.setSize(2, samplesPerBlock);
     publishRealtimeStateSnapshots();
@@ -2799,7 +2802,8 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
     serial->setForceAutomationReadForProcessing(false);
     const auto tinyRegression = []
     {
-        bool exact = true, dispatch = true;
+        bool exact = true, dispatch = true, preFaderPrepared = true;
+        juce::var firstMismatch;
         int blocks = 0;
         juce::uint64 fastBlocks = 0;
         const auto equalBuffer = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
@@ -2813,7 +2817,7 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
         for (int scenario = 0; scenario < 10; ++scenario)
         {
             auto reference = std::make_unique<TrackProcessor>(), candidate = std::make_unique<TrackProcessor>();
-            const auto configure = [scenario] (TrackProcessor& track)
+            const auto configure = [scenario, &preFaderPrepared] (TrackProcessor& track)
             {
                 track.setRecordArmed(true); track.setInputMonitoring(true);
                 track.setVolume(-4.0f); track.setPan(0.37f); track.setTrimVolume(-2.0f);
@@ -2846,6 +2850,19 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
                 if (scenario == 7) track.setTrackType(TrackType::Instrument);
                 if (scenario == 8) track.araFXIndexForRealtime.store(0, std::memory_order_release);
                 track.prepareToPlay(48000.0, 16);
+                // Exercise both new allocation and reused storage. Otherwise a
+                // zero-filled allocator page could hide a missing initialization.
+                for (int pass = 0; pass < 2; ++pass)
+                {
+                    for (int channel = 0; channel < track.preFaderBuffer.getNumChannels(); ++channel)
+                        for (int sample = 0; sample < track.preFaderBuffer.getNumSamples(); ++sample)
+                            preFaderPrepared = track.preFaderBuffer.getSample(channel, sample) == 0.0f && preFaderPrepared;
+                    if (pass == 0)
+                    {
+                        track.preFaderBuffer.setSample(0, 0, 0.25f);
+                        track.prepareToPlay(48000.0, 16);
+                    }
+                }
             };
             configure(*reference); configure(*candidate);
             for (int block = 0; block < 192; ++block)
@@ -2869,20 +2886,35 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
                     if (scenario == 3 && (block == 16 || block == 64)) track->setChannelStripEQEnabled(block == 16);
                 }
                 reference->processBlockInternal(expected, expectedMIDI);
-                exact = candidate->tryProcessBlock(actual, actualMIDI) && equalBuffer(expected, actual)
-                    && reference->currentRMS.load() == candidate->currentRMS.load()
-                    && reference->meterPeakAccum == candidate->meterPeakAccum
-                    && reference->meterSampleCount == candidate->meterSampleCount
-                    && reference->clipLatched.load() == candidate->clipLatched.load()
-                    && equalBuffer(reference->preFaderBuffer, candidate->preFaderBuffer) && exact;
+                const bool processed = candidate->tryProcessBlock(actual, actualMIDI);
+                const auto check = [&] (const char* field, bool matches)
+                {
+                    if (!matches && firstMismatch.isVoid())
+                    {
+                        auto* detail = new juce::DynamicObject();
+                        detail->setProperty("scenario", scenario);
+                        detail->setProperty("block", block);
+                        detail->setProperty("samples", samples);
+                        detail->setProperty("field", field);
+                        firstMismatch = juce::var(detail);
+                    }
+                    exact = matches && exact;
+                };
+                check("processed", processed);
+                check("audio", equalBuffer(expected, actual));
+                check("currentRMS", reference->currentRMS.load() == candidate->currentRMS.load());
+                check("meterPeakAccum", reference->meterPeakAccum == candidate->meterPeakAccum);
+                check("meterSampleCount", reference->meterSampleCount == candidate->meterSampleCount);
+                check("clipLatched", reference->clipLatched.load() == candidate->clipLatched.load());
+                check("preFaderBuffer", equalBuffer(reference->preFaderBuffer, candidate->preFaderBuffer));
                 auto actualEvent = actualMIDI.begin();
-                exact = expectedMIDI.getNumEvents() == actualMIDI.getNumEvents() && exact;
+                check("midiEventCount", expectedMIDI.getNumEvents() == actualMIDI.getNumEvents());
                 for (const auto expectedEvent : expectedMIDI)
                 {
-                    if (actualEvent == actualMIDI.end()) { exact = false; break; }
+                    if (actualEvent == actualMIDI.end()) { check("midiEvents", false); break; }
                     const auto value = *actualEvent++;
-                    exact = expectedEvent.samplePosition == value.samplePosition && expectedEvent.numBytes == value.numBytes
-                        && std::memcmp(expectedEvent.data, value.data, static_cast<size_t>(expectedEvent.numBytes)) == 0 && exact;
+                    check("midiEvents", expectedEvent.samplePosition == value.samplePosition && expectedEvent.numBytes == value.numBytes
+                        && std::memcmp(expectedEvent.data, value.data, static_cast<size_t>(expectedEvent.numBytes)) == 0);
                 }
                 ++blocks;
             }
@@ -2892,8 +2924,10 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
             reference->releaseResources(); candidate->releaseResources();
         }
         auto* evidence = new juce::DynamicObject();
-        evidence->setProperty("pass", exact && dispatch);
+        evidence->setProperty("pass", exact && dispatch && preFaderPrepared);
+        evidence->setProperty("preFaderClearedOnPrepareAndReprepare", preFaderPrepared);
         evidence->setProperty("exactAudioMidiMeterAndPreFaderParity", exact);
+        evidence->setProperty("firstMismatch", firstMismatch);
         evidence->setProperty("eligibilityAndFallbackDispatch", dispatch);
         evidence->setProperty("blocks", blocks);
         evidence->setProperty("fastBlocks", static_cast<juce::int64>(fastBlocks));

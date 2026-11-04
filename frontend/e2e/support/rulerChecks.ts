@@ -73,7 +73,7 @@ export async function runRulerChecks(page: Page): Promise<BrowserRegressionRepor
     assert(await canvas.count() === 1, 'App must mount exactly one visible workspace ruler');
     assert(await page.locator('.workspace-main-row .timeline-container').count() === 1,
       'Real App timeline must remain mounted beside its track controls');
-    assert(await page.locator('.timeline-container .sticky canvas').count() === 0,
+    assert(await page.locator('.timeline-container [data-wheel-subtarget="ruler"] canvas').count() === 0,
       'Regression must exercise the extracted App ruler rather than the hidden Timeline ruler');
 
     const seed = async (options: RulerSeedOverrides = {}) => {

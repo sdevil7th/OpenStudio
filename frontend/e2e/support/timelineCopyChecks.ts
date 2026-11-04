@@ -354,7 +354,7 @@ export async function runTimelineCopyChecks(page: Page): Promise<BrowserRegressi
       });
     });
     await paint();
-    const ruler = page.locator('#clip-pointer-fixture .sticky canvas');
+    const ruler = page.locator('#clip-pointer-fixture [data-wheel-subtarget="ruler"] canvas');
     const bounds = await ruler.boundingBox();
     assert(bounds && bounds.width > 400, 'inline ruler must have usable geometry');
     const anchorX = 300;

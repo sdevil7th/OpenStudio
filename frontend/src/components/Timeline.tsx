@@ -8544,7 +8544,7 @@ export function Timeline({
         <div className="absolute bottom-3 left-3 z-20 flex max-w-[calc(100%-24px)] flex-wrap items-center gap-2 rounded border border-daw-border bg-daw-panel/95 px-2 py-1 text-xs text-daw-text shadow" aria-label="Timeline gesture feedback">
           <span>{slipFeedbackActive ? "Slip contents"
             : dragState.dragActivated ? (dragState.copyOnDrag ? "Copy clips" : dragState.type === "move" ? "Move clips" : "Resize clip")
-            : timeSelection ? `Time selection: ${timeSelection.start.toFixed(2)}?${timeSelection.end.toFixed(2)} s (${Math.abs(timeSelection.end - timeSelection.start).toFixed(2)} s)` : ""}</span>
+            : timeSelection ? `Time selection: ${timeSelection.start.toFixed(2)} to ${timeSelection.end.toFixed(2)} s (${Math.abs(timeSelection.end - timeSelection.start).toFixed(2)} s)` : ""}</span>
           {timeSelection && !timeSelectionDrag?.active && !dragState.dragActivated && !slipFeedbackActive && <>
             <button type="button" className="rounded px-1.5 py-1 hover:bg-daw-dark focus-visible:outline-2 focus-visible:outline-daw-accent" onClick={() => executeAvailableRegisteredAction("edit.selectClipsInTimeSelection")}>Select clips inside</button>
             <button type="button" className="rounded px-1.5 py-1 hover:bg-daw-dark focus-visible:outline-2 focus-visible:outline-daw-accent" onClick={() => useDAWStore.getState().setLoopToSelection()}>Set loop</button>
