@@ -262,3 +262,22 @@ and activate the Finder launcher. These are support-distribution tests; they do 
 claim Store certification, notarization, clean-machine full-DAW readiness, hardware
 recording performance or subjective audio quality. Source/audio execution paths in
 the DAW are unchanged. Existing release-note and signing gates remain mandatory.
+
+### Recorded development qualification — 2026-11-04
+
+[CI run 41841385666](https://github.com/sdevil7th/OpenStudio/actions/runs/41841385666)
+passed all six jobs at commit `cf25a5e3665f1bd444214d871b2903a563863ba8` using
+QA version `0.0.0`. Its artifacts contain the Windows payload, Linux payload and
+companion AppImage, and the universal macOS helper plus Finder launcher.
+
+| Platform | Verified scope |
+| --- | --- |
+| Windows | Seven installer fixture scenarios, real support installation/shortcut/uninstall, MSIX pack/unpack, registration, Start menu activation, package identity and cleanup. |
+| macOS | Native Apple Silicon and Intel builds; universal architecture selection, strict code-signature verification, read-only DMG and Finder activation on both processor types. QA signatures are ad hoc. |
+| Linux | Ubuntu 22.04 runtime, DEB/RPM payload round trips, desktop entry, companion AppImage and GLIBC 2.35 ceiling. RPM installation on Fedora is not asserted. |
+
+Each native build passed 39 source checks and frozen executable tests covering GUI
+construction, collection, privacy filtering, reviewed ZIP creation, audio decoding,
+MIDI comparison and existing-output protection. No external Python/Node is available
+on the frozen test's PATH. This qualification creates no published application
+release and does not establish the separate release/hardware claims listed above.
