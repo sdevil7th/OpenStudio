@@ -1,4 +1,5 @@
 #include "PeakCache.h"
+#include <algorithm>
 #include <cmath>
 #include <array>
 
@@ -172,7 +173,7 @@ juce::var PeakCache::getPeaks(const juce::File& audioFile,
     const MipmapLevel* level = &entry->levels.front();
     for (const auto& candidate : entry->levels)
         if (candidate.stride <= samplesPerPixel) level = &candidate;
-    const auto pixelCount = juce::jmin<juce::int64>(numPixels,
+    const auto pixelCount = std::min<juce::int64>(numPixels,
         (rangeEnd - startSample + samplesPerPixel - 1) / samplesPerPixel);
     const int channels = entry->numChannels;
     peaks.ensureStorageAllocated(1 + static_cast<int>(pixelCount) * channels * 2);

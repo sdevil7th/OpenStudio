@@ -58,7 +58,7 @@ inline bool analyzeSegment(juce::AudioFormatReader& reader, double offset, Segme
         if (loadedStart < 0 || sourceIndex + 1 >= loadedStart + loadedCount)
         {
             loadedStart = sourceIndex;
-            loadedCount = static_cast<int>(juce::jmin<juce::int64>(blockSize + 1, reader.lengthInSamples - sourceStart - loadedStart));
+            loadedCount = static_cast<int>(std::min<juce::int64>(blockSize + 1, reader.lengthInSamples - sourceStart - loadedStart));
             if (loadedCount <= 0 || !reader.read(&input, 0, loadedCount, sourceStart + loadedStart, true, true)) return false;
         }
         const int position = static_cast<int>(sourceIndex - loadedStart);

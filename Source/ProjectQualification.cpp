@@ -31,7 +31,7 @@ juce::var qualificationAudioStats(const juce::File& file)
     juce::int64 visited = 0;
     while (visited < reader->lengthInSamples)
     {
-        const int count = static_cast<int>(juce::jmin<juce::int64>(16384, reader->lengthInSamples - visited));
+        const int count = static_cast<int>(std::min<juce::int64>(16384, reader->lengthInSamples - visited));
         if (!reader->read(&block, 0, count, visited, true, true)) { valid = false; break; }
         for (int channel = 0; channel < channels; ++channel)
             for (int sample = 0; sample < count; ++sample)
@@ -66,7 +66,7 @@ juce::var qualificationComparePCM(const juce::File& firstFile, const juce::File&
     double difference = 0.0; juce::int64 visited = 0;
     while (valid && visited < first->lengthInSamples)
     {
-        const int count = static_cast<int>(juce::jmin<juce::int64>(16384, first->lengthInSamples - visited));
+        const int count = static_cast<int>(std::min<juce::int64>(16384, first->lengthInSamples - visited));
         valid = first->read(&a, 0, count, visited, true, true) && second->read(&b, 0, count, visited, true, true);
         for (int channel = 0; valid && channel < 2; ++channel)
             for (int sample = 0; sample < count; ++sample)
@@ -112,7 +112,7 @@ QualificationStemWindow qualificationStemWindow(const juce::var& track)
         juce::AudioBuffer<float> probe(channels, 65536);
         for (auto position = first; position < last; position += 65536)
         {
-            const int count = static_cast<int>(juce::jmin<juce::int64>(65536, last - position));
+            const int count = static_cast<int>(std::min<juce::int64>(65536, last - position));
             if (!reader->read(&probe, 0, count, position, true, true))
             { result.readable = false; result.reason = "A source read failed during the full retained-range scan."; return result; }
             double energy = 0.0;
