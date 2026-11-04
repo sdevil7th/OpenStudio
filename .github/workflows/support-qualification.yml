@@ -18,7 +18,7 @@ jobs:
         include:
           - {os: windows-latest, platform: windows, arch: x64}
           - {os: ubuntu-22.04, platform: linux, arch: x64}
-          - {os: macos-14, platform: macos, arch: arm64}
+          - {os: macos-15, platform: macos, arch: arm64}
           - {os: macos-15-intel, platform: macos, arch: x86_64}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -81,7 +81,7 @@ jobs:
   universal-macos:
     needs: native
     if: ${{ !cancelled() }}
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09

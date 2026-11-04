@@ -502,7 +502,7 @@ jobs:
 
   build-macos:
     needs: [validate-release-notes, support-packages]
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       RELEASE_NOTES_FILE: ${{ needs.validate-release-notes.outputs.notes_file }}

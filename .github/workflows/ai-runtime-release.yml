@@ -87,7 +87,7 @@ jobs:
 
   build-macos-runtime-arm64:
     needs: validate-ai-runtime-release
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       VERSION: ${{ needs.validate-ai-runtime-release.outputs.version }}
       AI_RUNTIME_STANDALONE_RELEASE_TAG: ${{ vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG != '' && vars.OPENSTUDIO_AI_RUNTIME_STANDALONE_RELEASE_TAG || '20260325' }}
