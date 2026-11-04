@@ -7,10 +7,13 @@ The user requested certification checks and a release PR, with publication held.
 ## Current evidence
 
 The 5 November local investigation below changes native NAM preparation and the
-explicit diagnostic probe. Earlier package/WACK results remain valid for their
-listed artifacts, but do **not** certify this newer application binary. The
-remaining Linux browser check passed; the strict 8-sample hardware gate still
-fails. PR #36 remains a draft.
+explicit diagnostic probe. Final Windows/Linux package checks and WACK passed
+at `b6aba8ae`, including the warning-only follow-up to the functional NAM fix.
+Each result applies to its listed artifact. The remaining Linux browser check
+passed; the strict 8-sample hardware gate still fails. An automatic Mac run also
+exposed three geometry-check failures after successful frontend startup.
+PR #36 remains a draft, with no submitted formal review approval. Subsequent
+qualification/release-note edits do not change the tested application source.
 
 - **Pass — Linux qualification after the NAM preparation/insertion fix:**
   [job 126802823878](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/job/126802823878)
@@ -27,10 +30,75 @@ fails. PR #36 remains a draft.
   frontend unit tests also passed. No behavior gate or retry policy changed.
 - **Compiler-warning follow-up:** inspection of the successful Linux log found
   one `-Wmissing-field-initializers` warning in preview-segment publication.
-  The follow-up explicitly value-initializes the existing source binding, whose
+  `b6aba8ae` explicitly value-initializes the existing source binding, whose
   defaults remain generation zero and null pointers. It changes no playback
-  behavior. This correction is not represented as a retroactive warning-free
-  Linux build; its compiler verification is separate from the package above.
+  behavior. Its [completed Linux job](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/job/126818406535)
+  has no C++ compiler warnings and repeats the native safety, DEB installation,
+  AppImage and packaged-window checks successfully. Its
+  [qualification report](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/artifacts/13358612965)
+  and [packages](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/artifacts/13359177604)
+  retain the exact follow-up evidence. Packaging-tool and Node deprecation
+  notices remain in the log; this is specifically a C++ compiler-warning result.
+  Local Release and Debug rebuilt without C++ warnings, and all 422 render/export
+  checks passed again. The local follow-up Release SHA-256 is
+  `d8ea6942a99ddff57ea2ab1c056cc6b57511482d05e096a6cd45b671c3cd7f99`;
+  it was not used for the physical timing runs below.
+- **Pass — final Windows packages at `b6aba8ae`:**
+  [job 126818406515](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/job/126818406515)
+  repeated the native, protected-startup, installer/MSIX, installed-app/Support
+  and uninstall checks successfully, with no C++ compiler warnings. All 422
+  render/export checks passed. CI's NAM run passed 205 objective checks, retaining
+  18 diagnostic-only and nine not-asserted items; the additional local-library
+  model check is not asserted on the hosted runner, whereas it passed locally.
+  The [final Windows packages](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/artifacts/13360003582)
+  belong to this exact revision.
+- **Pass — final WACK at `b6aba8ae`:**
+  [job 126843251747](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/job/126843251747)
+  and [report 13361266415](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/artifacts/13361266415)
+  record aggregate `PASS`, exit 0, all 13 required tests passing, no required
+  issues and `published: false`. The tested MSIX SHA-256 is
+  `5a31875dd078ce0f22672bb39ddbb1328a82c67ec38718b9009301282b4d2f01`.
+  Both optional findings remain: application count and blocked-executable
+  references. This is a certification-kit pass, not Microsoft Store approval
+  or S-mode qualification. No test gate was weakened.
+- **Pass — Windows packages after the NAM preparation/insertion fix:**
+  [job 126802824305](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/job/126802824305)
+  at `bba16515` completed the warning-free native build, safety/NAM/render
+  regressions, native-schema FX editor tests, protected normal/safe WebView
+  startup, actual installer/MSIX construction, installed window/Support checks
+  and uninstall. The [packages](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/artifacts/13357514971)
+  are unpublished qualification artifacts.
+- **Pass — WACK for that functional fix:**
+  [job 126824894671](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/job/126824894671)
+  and its [retained report](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/artifacts/13359366796)
+  returned aggregate `PASS`, exit 0, with all 13 required tests passing and
+  `published: false`. The MSIX SHA-256 is
+  `bb91233deaf1c2ccae87b3ee822a789ae0d572e65b21d07ca27757c000ebc258`.
+  Application-count and blocked-executable optional findings remain. This is
+  not Store approval and does not certify a later rebuilt MSIX.
+- **Fail — newly available Apple Silicon window check:** the automatic
+  `b6aba8ae` [Mac job](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/job/126826803610)
+  got a runner and built the universal app. Its
+  [lifecycle report](https://github.com/sdevil7th/OpenStudio/actions/runs/41899667263/artifacts/13360536593)
+  fails `main_move_resize`, `main_bounds_stable` and
+  `plugin_restore_preferred_geometry`. Main, mixer, pitch, MIDI and plugin
+  documents all reached frontend readiness, and teardown/no-hardware checks
+  passed. This narrows the failure to geometry assertions; it does not establish
+  whether the cause is application behavior or the hosted display constraints.
+  Full DMG construction/installed qualification was skipped after the failure.
+  The compiler also reports five distinct unnecessary lambda captures in
+  `NAMFuzzRegression.h`, `AudioEngine.cpp`, `FreePluginReverbBalance.h` and
+  `FreePluginRegression.cpp` (repeated for both universal slices). The Windows/
+  Linux warning-free results do not imply a warning-free Mac build. Universal
+  Support component launch tests passed on both Mac architectures. No manual
+  rerun or new Mac workaround was attempted; notarization remains blocked on
+  credentials. The earlier runner-allocation blocker below is historical, not
+  the explanation for this executed failure.
+
+## Earlier package evidence and remaining platform limits
+
+The following records retain previous artifacts and their limitations; use the
+commit-specific results above for the subsequent NAM correction.
 
 - **Pass — complete Windows candidate, locally:** Release and Debug were rebuilt
   with callback profiling compiled out and no C++ warnings. The current frontend
@@ -268,6 +336,18 @@ time. All trace findings are **diagnostic_only**, not a normal-use capacity pass
 or proof of a past unobserved glitch. Microsoft's [CPU analysis guidance](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis)
 and [threaded-DPC distinction](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/introduction-to-threaded-dpcs)
 describe the scheduling interpretation.
+
+The same saved capture also contains 2,322 disk-backed hard-fault events across
+the machine (one event's process owner was unresolved). Of the 21 attributed to
+OpenStudio within the retained callback span, two occurred on the audio thread
+during the same 416.5 µs late callback. Their elapsed intervals are 159.1 and
+111.8 µs; they overlap time already accounted for by scheduling and must not be
+added to off-CPU duration. The backing file was not resolved. This is evidence
+of paging during that reproduction, **not** proof of insufficient RAM or an
+explanation for every miss. Faults can include first access to mapped code/data;
+Microsoft's [hard-fault counter guidance](https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/how-to-determine-the-appropriate-page-file-size-for-64-bit-versions-of-windows#memorypagesec-and-other-hard-page-fault-counters)
+explicitly distinguishes them from a low-memory condition.
+This analysis reads the existing capture only; no new collector was started.
 
 Matching stack samples repeatedly identified NAM cabinet FFT work. Each track
 Rack was prepared for 512 samples while receiving eight. TrackProcessor now
