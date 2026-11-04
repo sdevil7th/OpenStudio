@@ -243,20 +243,34 @@ test("live waveforms keep updating during sustained scrolling and modifier zoom"
     const before = await page.evaluate(() => ({ count: window.__recordingZoomIntegration.requests.length, time: performance.now() }));
     if (modifier) await page.keyboard.down(modifier);
     try {
-      for (let n = 0; n < 32; n++) {
-        await page.mouse.wheel(0, n % 2 ? 20 : -20);
-        await page.evaluate(() => {
-          const store = window.__recordingZoomIntegration.store;
-          store.getState().setCurrentTime(store.getState().transport.currentTime + 0.05);
-        });
-        await page.waitForTimeout(45);
-      }
-      // Inspect before releasing the gesture or its 200 ms idle debounce.
-      const during = await page.evaluate(start => {
+      // Drive this sustained-input case inside the document: individual Windows
+      // driver round trips can exceed the 200 ms idle debounce, turning the
+      // old loop into separate gestures. Trusted wheel mapping is covered by
+      // the other integration cases; plain scrolling still uses native scrollTop.
+      const during = await page.evaluate(async ({ start, modifier }) => {
+        const target = document.elementFromPoint(850, 240);
+        const workspace = target?.closest<HTMLElement>(".workspace");
+        if (!target || !workspace) throw new Error("Recording viewport is missing");
         const f = window.__recordingZoomIntegration;
+        let previous = performance.now();
+        let maxWheelGap = 0;
+        for (let n = 0; n < 32; n++) {
+          const now = performance.now();
+          if (n > 0) maxWheelGap = Math.max(maxWheelGap, now - previous);
+          previous = now;
+          const deltaY = n % 2 ? 20 : -20;
+          target.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true,
+            clientX: 850, clientY: 240, deltaY, ctrlKey: modifier === "Control",
+            metaKey: modifier === "Meta", shiftKey: modifier === "Shift", altKey: modifier === "Alt" }));
+          if (modifier === null) workspace.scrollTop += deltaY;
+          f.store.getState().setCurrentTime(f.store.getState().transport.currentTime + 0.05);
+          await new Promise(resolve => window.setTimeout(resolve, 45));
+        }
+        // Inspect before releasing the gesture or its idle debounce.
         return { requests: f.requests.slice(start.count), elapsed: performance.now()-start.time,
-          maxPending: f.maxPending, recording: f.store.getState().transport.isRecording };
-      }, before);
+          maxPending: f.maxPending, recording: f.store.getState().transport.isRecording, maxWheelGap };
+      }, { start: before, modifier });
+      expect(during.maxWheelGap, "fixture must actually deliver a sustained gesture").toBeLessThan(200);
       for (const trackId of ["record-zoom-a", "record-zoom-b"])
         expect(during.requests.filter(request => request.trackId === trackId && request.completed).length,
           `${modifier ?? "plain"} live data for ${trackId}`).toBeGreaterThan(1);

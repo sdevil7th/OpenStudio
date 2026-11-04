@@ -15,10 +15,28 @@ The user requested certification checks and a release PR, with publication held.
   Its Store version is `0.1.9.0` (MSIX requires canonical numeric components);
   the application and notes retain `0.1.09`. This unsigned package was not
   registered over the user's installed Store app or submitted to Microsoft.
-- **In progress — full candidate CI:** PR #36 now builds the actual Windows
-  installer/MSIX, macOS universal DMG and Linux packages, checks installed-app
-  behavior and runs WACK separately. See the latest PR checks for their final
-  state; fixture success below is not a substitute for those results.
+- **Pass — full Windows installer and MSIX:** the [candidate package job](https://github.com/sdevil7th/OpenStudio/actions/runs/41858351056/job/126673030017)
+  built the production app, created and validated its MSIX, installed the actual
+  setup executable, passed installed window-lifecycle and frozen Support checks,
+  and uninstalled it. The separate WACK job is still awaiting a runner; package
+  validation does not establish Microsoft certification.
+- **Pass — full Linux candidate:** the [Linux job](https://github.com/sdevil7th/OpenStudio/actions/runs/41861058092/job/126682629756)
+  built the production app and Support, installed the actual DEB, checked normal
+  and safe desktop launches, render/features, and the AppImage payload and
+  launchers. The candidate packages are retained as unpublished CI artifacts.
+- **In progress — final Windows browser checks:** Linux's full browser suite
+  passed. Windows exposed two test-fixture problems: driver round trips made a
+  purported sustained gesture exceed its 200 ms idle boundary, and a second
+  full-screen 4K screenshot consumed the interaction deadline. Corrected focused
+  cases pass locally without relaxing the behavior assertions. A separate run
+  failed to load Vite's React refresh module with `ERR_NO_BUFFER_SPACE`; the
+  Windows suite is now split across four hosts, retaining all tests and zero
+  retries. Full rerun results are still required.
+- **Blocked — full macOS candidate execution:** GitHub repeatedly failed to
+  allocate either Mac architecture before any steps ran. The workflow now uses
+  supported macOS 15 images and includes installed universal-DMG checks on both
+  architectures, but these have not completed for this candidate. No alternative
+  runner is configured. Earlier fixture passes do not clear this gate.
 - **Pass — support packaging:** the [six-job qualification](https://github.com/sdevil7th/OpenStudio/actions/runs/41841385666)
   covers Windows installer/MSIX fixtures, native macOS and universal Finder/DMG
   launches on both architectures, and Linux DEB/RPM/AppImage payload checks.
