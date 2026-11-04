@@ -25,6 +25,18 @@ try {
     [xml]$xml = Get-Content -LiteralPath $report -Raw
     $overall = $xml.DocumentElement.GetAttribute('OVERALL_RESULT')
     $summary.overallResult = $overall
+    $tests = @($xml.SelectNodes('/REPORT/REQUIREMENTS/REQUIREMENT/TEST'))
+    $required = @($tests | Where-Object { $_.GetAttribute('OPTIONAL') -ine 'TRUE' })
+    $summary.requiredTestCount = $required.Count
+    $summary.requiredIssues = @($required | Where-Object { $_.SelectSingleNode('RESULT').InnerText -ine 'PASS' } | ForEach-Object {
+        @{ name=$_.GetAttribute('NAME'); result=$_.SelectSingleNode('RESULT').InnerText; messages=@($_.SelectNodes('MESSAGES/MESSAGE') | ForEach-Object { $_.GetAttribute('TEXT') }) }
+    })
+    $summary.optionalIssues = @($tests | Where-Object { $_.GetAttribute('OPTIONAL') -ieq 'TRUE' -and $_.SelectSingleNode('RESULT').InnerText -ine 'PASS' } | ForEach-Object {
+        @{ name=$_.GetAttribute('NAME'); result=$_.SelectSingleNode('RESULT').InnerText; messageCount=@($_.SelectNodes('MESSAGES/MESSAGE')).Count }
+    })
+    $summary.requiredTestsStatus = if ($required.Count -gt 0 -and $summary.requiredIssues.Count -eq 0 -and $test.ExitCode -eq 0 -and $xml.DocumentElement.GetAttribute('PARTIAL_RUN') -ieq 'FALSE') { 'pass' } else { 'not_passed' }
+    # Keep the aggregate gate strict. Informational findings are preserved for
+    # review, not silently converted into a Store certification pass.
     if ($test.ExitCode -ne 0 -or $overall -ine 'PASS') { throw "WACK did not pass: result '$overall', exit $($test.ExitCode). Review the retained XML." }
     $summary.status = 'pass'
 } catch {

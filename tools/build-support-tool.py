@@ -131,7 +131,7 @@ def main():
             icon = work / 'support.ico'
             png = (ROOT / 'assets/icon-256x256.png').read_bytes()
             icon.write_bytes(struct.pack('<HHHBBBBHHII', 0, 1, 1, 0, 0, 0, 0, 1, 32, len(png), 22) + png)
-            options += ['--icon', icon]
+            options += ['--icon', icon, '--manifest', ROOT / 'packaging/support/windows.manifest']
             numbers = tuple(map(int, args.version.split('.'))) + (0,)
             version_file = work / 'version.txt'
             version_file.write_text(f'''VSVersionInfo(ffi=FixedFileInfo(filevers={numbers!r}, prodvers={numbers!r},

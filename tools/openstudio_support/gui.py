@@ -8,16 +8,18 @@ from pathlib import Path
 
 def create_window(root):
     import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
+    from tkinter import filedialog, font, messagebox, ttk
     from .cli import parser, run
+    from .display import install_dpi_scaling, scrollable_content
 
     root.title("OpenStudio — Offline support")
-    root.minsize(720, 620)
+    root.minsize(480, 360)
     root.geometry("820x720")
-    frame = ttk.Frame(root, padding=18)
-    frame.pack(fill="both", expand=True)
+    frame = scrollable_content(root)
     frame.columnconfigure(1, weight=1)
-    ttk.Label(frame, text="Offline support", font=("Segoe UI", 17, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+    heading_font = font.Font(root, name='SupportHeading', family='Segoe UI', size=17, weight='bold')
+    root._support_heading_font = heading_font
+    ttk.Label(frame, text="Offline support", font=heading_font).grid(row=0, column=0, columnspan=3, sticky="w")
     ttk.Label(frame, text="Close OpenStudio first. Close this support window before reopening the DAW.\nNo uploads, live telemetry, or changes to your media and projects.", wraplength=680).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 14))
     choices = {"Collect existing evidence": "collect", "Inspect audio export": "audio",
                "Inspect MIDI export": "midi", "Create reviewed ZIP": "bundle"}
@@ -183,6 +185,7 @@ def create_window(root):
         executor.shutdown(wait=True)
         root.destroy()
     root.protocol("WM_DELETE_WINDOW", close)
+    root._support_apply_dpi = install_dpi_scaling(root)
     return close
 
 

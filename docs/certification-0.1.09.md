@@ -18,8 +18,8 @@ The user requested certification checks and a release PR, with publication held.
 - **Pass — full Windows installer and MSIX:** the [candidate package job](https://github.com/sdevil7th/OpenStudio/actions/runs/41858351056/job/126673030017)
   built the production app, created and validated its MSIX, installed the actual
   setup executable, passed installed window-lifecycle and frozen Support checks,
-  and uninstalled it. The separate WACK job is still awaiting a runner; package
-  validation does not establish Microsoft certification.
+  and uninstalled it. These packages predate the Support display-scaling fix
+  below; a rebuilt package and another WACK run are required.
 - **Pass — full Linux candidate:** the [Linux job](https://github.com/sdevil7th/OpenStudio/actions/runs/41861058092/job/126682629756)
   built the production app and Support, installed the actual DEB, checked normal
   and safe desktop launches, render/features, and the AppImage payload and
@@ -58,11 +58,24 @@ The user requested certification checks and a release PR, with publication held.
   permits only `v*` tags. It rejected the certification branch before any Store
   request. The policy has not been changed. The local installed Store app is
   0.1.8.0; it is not the proposed candidate and must not be replaced for a test.
-- **Not asserted — WACK and Microsoft certification:** the Windows App
-  Certification Kit is installed locally, but this session is not elevated and
-  WACK has not run locally. Actual MSIX payload validation passed; it does not
-  establish certification. The separate CI job retains WACK's XML and package
-  hash and fails closed if its prerequisites or checks fail.
+- **Not passed — WACK:** the [actual report](https://github.com/sdevil7th/OpenStudio/actions/runs/41858351056/artifacts/13341803458)
+  returned `WARNING`, exit 0, on Windows Server 2025 (kit 10.0.26100.9457), with
+  a complete rather than partial run. The required DPI-awareness test warned
+  about `OpenStudioSupport.exe`. Support now has a PerMonitorV2 manifest,
+  event-driven font scaling and scrollable content; the rebuilt frozen helper
+  passes its PMv2-context and 100/150/200% font-scaling checks. Physical mixed-DPI
+  monitor transitions and the rebuilt MSIX's WACK result remain unasserted.
+  The tested package SHA-256 was
+  `039cae8db65124a9212e1ab6b1b786e1f71d4ea78789d0f77f75072ce3566c80`.
+- **Informational findings retained:** that WACK XML marks application count
+  (the independent Support entry) and blocked-executable references as optional
+  failures. Microsoft's [Desktop Bridge test guidance](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/windows-desktop-bridge-app-tests)
+  distinguishes these from required tests. Process-launch references span the
+  app, Support, Python/Tcl and Microsoft WebView2; this static scan does not prove
+  any process was started during recording. The independent launcher remains;
+  the strict aggregate WACK gate has not been weakened. S-mode compatibility and
+  Microsoft's final certification remain **not_asserted**. The report retains
+  every finding for review rather than relabelling `WARNING` as `PASS`.
 
 Merging a PR does not currently run Store submission. The release workflow uses
 release tags and contains public-release steps. Do not create a `v0.1.09` tag or

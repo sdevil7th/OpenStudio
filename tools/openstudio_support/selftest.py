@@ -17,6 +17,23 @@ def run_selftest(output):
         root.withdraw()
         close = create_window(root)
         root.update_idletasks()
+        display_check = 'not_applicable'
+        import sys
+        if sys.platform == 'win32':
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+            user32.AreDpiAwarenessContextsEqual.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            if getattr(sys, 'frozen', False):
+                assert user32.AreDpiAwarenessContextsEqual(user32.GetThreadDpiAwarenessContext(), -4), 'PMv2 manifest not active'
+            from tkinter import font
+            sizes = []
+            for dpi in (96, 144, 192, 96):
+                root._support_apply_dpi(dpi)
+                root.update_idletasks()
+                sizes.append(font.nametofont('TkDefaultFont', root=root).metrics('linespace'))
+            assert sizes[0] < sizes[1] < sizes[2] and sizes[0] == sizes[3], sizes
+            display_check = 'PMv2_context_and_font_scaling' if getattr(sys, 'frozen', False) else 'font_scaling'
         close()
         with tempfile.TemporaryDirectory(prefix='support-self-test-') as directory:
             path = Path(directory)
@@ -26,8 +43,7 @@ def run_selftest(output):
             project.write_text(json.dumps({'version': '1.2.0', 'tempo': 120, 'tracks': []}))
             assert prepare_project(project)['tracks'] == []
         result = {'status': 'pass', 'gui': 'constructed_hidden', 'audioDecoder': 'pass',
-                  'embeddedMIDISerializer': 'pass', 'closedAppGuard': 'pass'}
-        import sys
+                  'embeddedMIDISerializer': 'pass', 'closedAppGuard': 'pass', 'displayScaling': display_check}
         if sys.platform == 'win32':
             import ctypes
             length = ctypes.c_uint32(0)
