@@ -24,7 +24,7 @@ Expect-Rejection 'incomplete input' @{ Version = '0.1.1.0'; SourceDir = $testRoo
 if (!$SourceDir) {
     $SourceDir = Join-Path $testRoot 'source'
     New-Item -ItemType Directory -Path (Join-Path $SourceDir 'webui') -Force | Out-Null
-    foreach ($name in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'ffmpeg.exe', 'onnxruntime.dll',
+    foreach ($name in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'OpenStudioSupport.exe', 'ffmpeg.exe', 'onnxruntime.dll',
                         'webui/index.html', 'LICENSE', 'THIRD_PARTY_LICENSES.md')) {
         Set-Content -LiteralPath (Join-Path $SourceDir $name) -Value 'Test fixture; not an executable.'
     }
@@ -34,7 +34,7 @@ Expect-Rejection 'stale binary version' @{ Version = '65535.65535.65535.0'; Sour
 Write-Output "$count Store package rejection tests passed."
 
 . (Join-Path $PSScriptRoot 'windows-store-runtime.ps1')
-$required = @('webui', 'effects', 'licenses', 'models', 'scripts')
+$required = @('webui', 'effects', 'licenses', 'models', 'scripts', 'support-runtime')
 function New-RuntimeFixture([string]$Name, [string]$Missing = '') {
     $root = Join-Path $testRoot $Name
     $inputDir = Join-Path $root 'source'
@@ -82,4 +82,4 @@ foreach ($directory in $required) {
     if (@(Get-ChildItem -LiteralPath $fixture.StageDir).Count -ne 0) { throw 'Invalid runtime fixture was partially staged.' }
     Write-Output "PASS missing required $directory is rejected before copying"
 }
-Write-Output '7 Store runtime directory tests passed.'
+Write-Output '8 Store runtime directory tests passed.'

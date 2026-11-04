@@ -222,7 +222,7 @@ If you want one command for the full guarded Windows path, use:
    `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsBaseAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip -WindowsCudaInstallPlanPath tools/ai-runtime-install-plan-windows-cuda.json -WindowsDirectmlInstallPlanPath tools/ai-runtime-install-plan-windows-directml.json`
 11. Stage the uniquely named GitHub Release metadata assets:
    `./tools/prepare-release-publish-assets.ps1 -MetadataDir dist/release-metadata -OutputDir dist/release-publish-assets`
-12. If certificate signing is enabled, the packaging helper signs and verifies `OpenStudio.exe`, `OpenStudioCrashReporter.exe` and `OpenStudio-Setup-x64.exe`. The SignPath workflow verifies product metadata, trusted signatures and timestamps before packaging/publishing.
+12. If certificate signing is enabled, the packaging helper signs and verifies `OpenStudio.exe`, `OpenStudioCrashReporter.exe`, `OpenStudioSupport.exe` and `OpenStudio-Setup-x64.exe`. The SignPath workflow verifies product metadata, trusted signatures and timestamps before packaging/publishing.
 
 ## Local macOS release flow
 
@@ -773,7 +773,7 @@ repository owner activates SignPath.
 
 The GitHub-hosted Windows release job builds and tests OpenStudio, then:
 
-1. Stages only `OpenStudio.exe` and `OpenStudioCrashReporter.exe` as a GitHub
+1. Stages only `OpenStudio.exe`, `OpenStudioCrashReporter.exe` and `OpenStudioSupport.exe` as a GitHub
    artifact. Third-party DLLs and prerequisite installers are not re-signed.
 2. Submits that artifact to SignPath using the `windows-payload` configuration.
    It waits up to one hour for approval/completion and downloads the signed files.
@@ -887,3 +887,17 @@ still encounter operating-system trust warnings during installation.
 These changes take effect once a release containing them is distributed. Users
 on older builds need to install that release first; if their old update feed is
 unavailable, they need to download it manually once.
+
+### Offline support companion (unreleased Windows integration)
+
+Windows Release CI and `build.py prod` build the separate support executable before
+packaging/signing. Direct CMake release builds must additionally follow
+[the support packaging instructions](offline-support.md#windows-packaging-and-qualification).
+The entire `support-runtime` directory is required. Both the installer and Store
+package expose **OpenStudio Support** as a separate Start menu application, with
+no autostart registration. Update the hosted SignPath `windows-payload` definition
+from the repository XML to include `OpenStudioSupport.exe` before the next release;
+missing/untrusted helper signatures must fail closed. Qualify both installed launchers
+on a clean machine without Python/Node and verify that the helper is absent from
+running processes until explicitly opened. Do not claim other-platform packaging
+or Store installation has been tested based on the local standalone checks.

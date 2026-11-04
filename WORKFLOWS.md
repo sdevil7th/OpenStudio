@@ -45,6 +45,17 @@ A Debug build is evidence for that configuration only. Release and installed
 WebView startup are qualified separately; see the
 [release smoke checklist](docs/release-smoke-checklist.md).
 
+## Offline support
+
+Offline support runs in a separate, manually opened process after the DAW is closed.
+Windows production builds package **OpenStudio Support** with its own runtime and
+Start menu shortcut; users need no Python or terminal. Read [offline support](docs/offline-support.md)
+for build commands, qualification, privacy review and platform limits. Source launch
+remains `python tools/openstudio-support.py`. Test with
+`python -m unittest tools.test_openstudio_support -v` and qualify the actual executable
+with `python tools/test-packaged-support.py --bundle <runtime-folder>`. Tool-only
+changes do not change native app/frontend assets or require a DAW rebuild.
+
 ## Frontend checks
 
 ```sh

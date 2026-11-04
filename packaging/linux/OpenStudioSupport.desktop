@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=OpenStudio Support
+Comment=Collect offline diagnostics after closing OpenStudio
+Exec=OpenStudioSupport
+Icon=OpenStudio
+Type=Application
+Categories=AudioVideo;Utility;
+Terminal=false
+Keywords=diagnostics;support;logs;

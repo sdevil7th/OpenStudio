@@ -34,7 +34,7 @@ foreach ($part in @($packageVersion.Major, $packageVersion.Minor, $packageVersio
 }
 $source = Resolve-RepoPath $SourceDir
 $output = Resolve-RepoPath $OutputDir
-foreach ($file in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'ffmpeg.exe', 'onnxruntime.dll',
+foreach ($file in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'OpenStudioSupport.exe', 'ffmpeg.exe', 'onnxruntime.dll',
                     'OpenStudio.version', 'webui/index.html', 'LICENSE', 'THIRD_PARTY_LICENSES.md')) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $file) -PathType Leaf)) { throw "Missing package input: $file" }
 }
@@ -50,12 +50,14 @@ if ([string]::IsNullOrWhiteSpace($NotesFile)) {
 }
 & python (Join-Path $PSScriptRoot 'validate-release-notes.py') --version $applicationVersion --notes-file $NotesFile
 if ($LASTEXITCODE -ne 0) { throw 'Release notes failed validation; packaging stopped.' }
-foreach ($name in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe')) {
+foreach ($name in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'OpenStudioSupport.exe')) {
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $source $name))
     if ($info.IsDebug -or $info.ProductName.TrimEnd() -cne 'OpenStudio' -or [version]$info.ProductVersion.TrimEnd() -ne $appVersion) {
         throw "Expected matching OpenStudio Release metadata: $name"
     }
 }
+& python (Join-Path $PSScriptRoot 'validate-support-tool.py') --bundle $source --version $applicationVersion
+if ($LASTEXITCODE -ne 0) { throw 'Offline support package failed validation.' }
 if (!$SdkBinDir) {
     $sdkRoot = "${env:ProgramFiles(x86)}/Windows Kits/10/bin"
     $SdkBinDir = Get-ChildItem -LiteralPath $sdkRoot -Directory |
@@ -101,7 +103,7 @@ if ([Diagnostics.FileVersionInfo]::GetVersionInfo($runtimeExe[0].FullName).Produ
 Copy-Item -LiteralPath $runtimeExe[0].DirectoryName -Destination (Join-Path $stage 'WebView2Runtime') -Recurse
 # A deliberate allowlist excludes PDBs, prerequisite installers, debug and AI
 # download caches. Optional AI runtimes are installed into writable user storage.
-foreach ($file in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'ffmpeg.exe', 'OpenStudio.version', 'LICENSE', 'THIRD_PARTY_LICENSES.md')) {
+foreach ($file in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'OpenStudioSupport.exe', 'ffmpeg.exe', 'OpenStudio.version', 'LICENSE', 'THIRD_PARTY_LICENSES.md')) {
     Copy-Item -LiteralPath (Join-Path $source $file) -Destination $stage
 }
 foreach ($file in Get-ChildItem -LiteralPath $source -Filter '*.dll' -File) {

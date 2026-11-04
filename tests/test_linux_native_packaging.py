@@ -5,10 +5,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import sys
+import json
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
 spec = importlib.util.spec_from_file_location('linux_native', ROOT / 'tools/package-linux-native.py')
 packaging = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packaging)
@@ -27,6 +30,15 @@ class NativePackageTests(unittest.TestCase):
             shutil.copyfile('/bin/true', self.bundle / name)
             (self.bundle / name).chmod(0o755)
         (self.bundle / 'OpenStudio.version').write_text('1.2.3\n')
+        shutil.copy2('/bin/true', self.bundle / 'OpenStudioSupport')
+        resources = self.bundle / 'support-runtime'
+        (resources / 'support-licenses').mkdir(parents=True)
+        (resources / 'support-build.json').write_text(json.dumps({'version':'1.2.3','launch':'manual_only'}))
+        for name in ['support-midi.js', 'support-midi-sources.json', 'support-licenses/README.txt'] + [f'fixture-{i}' for i in range(20)]:
+            (resources / name).write_text('fixture')
+        from support_package import write_inventory
+        write_inventory(self.bundle, '1.2.3', platform='linux')
+
         for name in ('webui/index.html', 'effects/example.jsfx', 'scripts/example.lua',
                      'models/basic_pitch_nmp.onnx', 'licenses/fixture.txt'):
             path = self.bundle / name
@@ -99,7 +111,7 @@ class NativePackageTests(unittest.TestCase):
 
     def test_windows_snapshot_desktop_entry_is_staged_with_unix_line_endings(self):
         source_root = self.root / 'source'
-        for relative in ('tools/OpenStudio.desktop', 'assets/icon-256x256.png',
+        for relative in ('tools/OpenStudio.desktop', 'packaging/linux/OpenStudioSupport.desktop', 'assets/icon-256x256.png',
                          'packaging/linux/openstudio-mime.xml',
                          'packaging/linux/in.org.openstudio.OpenStudio.metainfo.xml', 'LICENSE'):
             target = source_root / relative

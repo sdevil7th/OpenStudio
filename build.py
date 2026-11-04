@@ -1,3 +1,5 @@
+from pathlib import Path
+import tempfile
 import os
 import subprocess
 import sys
@@ -311,6 +313,12 @@ def main():
         run_command(validation, shell=False)
         build_frontend("prod")
         build_backend("release", app_version=version)
+        if platform.system() in ("Windows", "Linux", "Darwin"):
+            with tempfile.TemporaryDirectory(prefix="openstudio-support-") as support_output:
+                run_command([sys.executable, "tools/build-support-tool.py", "--version", version,
+                             "--output", support_output,
+                             "--stage", (str(Path(get_cpp_exe_path("Release")).parents[2]) if platform.system() == "Darwin"
+                                         else os.path.dirname(get_cpp_exe_path("Release")))], shell=False)
         print("\nProduction Build Complete.")
         print(f"Run: {get_cpp_exe_path('Release')}")
 

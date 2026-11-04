@@ -193,6 +193,20 @@ jobs:
         shell: pwsh
         run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
 
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Build and qualify standalone support (Windows)
+        shell: pwsh
+        run: |
+          python tools/build-support-tool.py --version $env:VERSION --stage "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          if ($LASTEXITCODE -ne 0) { throw 'Support build failed.' }
+          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support -q
+          if ($LASTEXITCODE -ne 0) { throw 'Support regression failed.' }
+          python tools/test-packaged-support.py --bundle "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          if ($LASTEXITCODE -ne 0) { throw 'Support qualification failed.' }
+
       - name: Verify signed updater (Windows Release)
         shell: pwsh
         run: |

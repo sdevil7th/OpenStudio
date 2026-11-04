@@ -31,6 +31,12 @@
         </uap:Extension>
       </Extensions>
     </Application>
+    <Application Id="OpenStudioSupport" Executable="OpenStudioSupport.exe"
+                 uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL">
+      <uap:VisualElements DisplayName="OpenStudio Support" Description="Collect offline diagnostics after closing OpenStudio."
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png" BackgroundColor="transparent" />
+    </Application>
   </Applications>
   <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
 </Package>

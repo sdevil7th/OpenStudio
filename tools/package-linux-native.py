@@ -9,6 +9,7 @@ import argparse
 import importlib.util
 import os
 from pathlib import Path
+from support_package import validate as validate_support
 import re
 import shutil
 import subprocess
@@ -63,10 +64,11 @@ def validate_bundle(bundle, version):
     for path in bundle.rglob('*'):
         if path.is_symlink() and not path.resolve().is_relative_to(bundle.resolve()):
             raise ValueError(f'Runtime symlink escapes the bundle: {path}')
-        if path.is_file() and '.so' in path.name and not path.name.startswith('libonnxruntime.so'):
+        if path.is_file() and '.so' in path.name and not path.name.startswith('libonnxruntime.so') and not path.is_relative_to(bundle / 'support-runtime'):
             raise ValueError(f'Unexpected bundled shared library: {path}')
     if (bundle / 'python').exists() or (bundle / 'ffmpeg').exists():
         raise ValueError('Native Linux packages use system FFmpeg and optional AI runtimes')
+    validate_support(bundle, version, platform='linux')
 
 
 def stage_bundle(bundle, stage, package_format):
@@ -85,8 +87,10 @@ def stage_bundle(bundle, stage, package_format):
     bin_dir = stage / 'usr/bin'
     bin_dir.mkdir(parents=True)
     (bin_dir / 'OpenStudio').symlink_to('../lib/openstudio/OpenStudio')
+    (bin_dir / 'OpenStudioSupport').symlink_to('../lib/openstudio/OpenStudioSupport')
     for source, relative in (
         (ROOT / 'tools/OpenStudio.desktop', 'usr/share/applications/OpenStudio.desktop'),
+        (ROOT / 'packaging/linux/OpenStudioSupport.desktop', 'usr/share/applications/OpenStudioSupport.desktop'),
         (ROOT / 'assets/icon-256x256.png', 'usr/share/icons/hicolor/256x256/apps/OpenStudio.png'),
         (ROOT / 'packaging/linux/openstudio-mime.xml', 'usr/share/mime/packages/openstudio.xml'),
         (ROOT / 'packaging/linux/in.org.openstudio.OpenStudio.metainfo.xml', 'usr/share/metainfo/in.org.openstudio.OpenStudio.metainfo.xml'),
@@ -134,7 +138,7 @@ def deb_dependencies(stage, work):
         'libx11-6', 'libxext6', 'libxrandr2', 'libxinerama1', 'libxcursor1',
         'libxcomposite1', 'libxrender1', 'libfreetype6', 'libfontconfig1',
         'libcurl4t64 | libcurl4', 'ffmpeg', 'libsecret-tools',
-        'shared-mime-info', 'desktop-file-utils',
+        'shared-mime-info', 'desktop-file-utils', 'libxft2', 'libxss1', 'libxrender1',
     ))
 
 
@@ -188,7 +192,7 @@ Summary: OpenStudio digital audio workstation
 License: AGPL-3.0-only
 URL: https://openstudio.org.in
 BuildArch: x86_64
-Requires: webkit2gtk4.1 >= 2.40, gtk3, alsa-lib
+Requires: webkit2gtk4.1 >= 2.40, gtk3, alsa-lib, libXft, libXScrnSaver
 Requires: libjack.so.0()(64bit), libX11, libXext, libXrandr, libXinerama, libXcursor, libXcomposite, libXrender
 Requires: fontconfig, freetype, libcurl.so.4()(64bit), ffmpeg-free, /usr/bin/secret-tool, shared-mime-info, desktop-file-utils
 
@@ -201,8 +205,10 @@ cp -a "{stage}/usr" "%{{buildroot}}/"
 
 %files
 /usr/bin/OpenStudio
+/usr/bin/OpenStudioSupport
 /usr/lib/openstudio
 /usr/share/applications/OpenStudio.desktop
+/usr/share/applications/OpenStudioSupport.desktop
 /usr/share/icons/hicolor/256x256/apps/OpenStudio.png
 /usr/share/mime/packages/openstudio.xml
 /usr/share/metainfo/in.org.openstudio.OpenStudio.metainfo.xml
