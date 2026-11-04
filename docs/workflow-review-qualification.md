@@ -128,3 +128,16 @@ evaluation context during development-server startup; the complete subsequent
 25-case run passed. Remote Windows/Linux/macOS qualification is tracked in the
 PR checks and must not be inferred from these local results. These fixes do not
 change the strict eight-sample hardware timing and listening limits above.
+
+The replacement run on `5fc661b0` passed all four native jobs, all AI/Python jobs
+and the macOS browser job. Windows and Linux each passed 285 browser cases but
+failed the same ruler setup: Chromium collected the pending dynamic-import
+Promise inside `page.evaluate`. This is the same local failure noted above;
+the earlier passing rerun was insufficient to establish setup reliability.
+The ruler fixture now waits for the actual transport UI, resolves App's store
+import with Playwright's request client and loads it in a document-owned module
+before synchronous seeding. All nine ruler behavior assertions are retained,
+without adding retries, skips or longer timeouts. Website PR #32's updated CI
+also passed; this fixture correction changes no app behavior or shortcut.
+Local e2e TypeScript and 12 consecutive complete ruler runs passed
+(`output/ci-nov04/ruler-followup/repeated-ruler.log`).
