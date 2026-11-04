@@ -15,21 +15,23 @@ The user requested certification checks and a release PR, with publication held.
   Its Store version is `0.1.9.0` (MSIX requires canonical numeric components);
   the application and notes retain `0.1.09`. This unsigned package was not
   registered over the user's installed Store app or submitted to Microsoft.
-- **Pass — full Windows installer and MSIX:** the [candidate package job](https://github.com/sdevil7th/OpenStudio/actions/runs/41858351056/job/126673030017)
+- **Pass — full Windows installer and MSIX:** the [final candidate package job](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801/job/126710168849)
   built the production app, created and validated its MSIX, installed the actual
   setup executable, passed installed window-lifecycle and frozen Support checks,
-  and uninstalled it. These packages predate the Support display-scaling fix
-  below; a rebuilt package and another WACK run are required.
-- **Pass — full Linux candidate:** the [final Linux job](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801/job/126710168141)
+  and uninstalled it. The [candidate packages](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801/artifacts/13345943940)
+  include the Support display-scaling fix at `d8202953`. WACK and Microsoft's
+  account-backed certification are separate checks.
+- **Pass — full Linux candidate:** the [final Linux job](https://github.com/sdevil7th/OpenStudio/actions/runs/41875186464/job/126732566058)
   built the production app and Support, installed the actual DEB, checked normal
   and safe desktop launches, render/features, and the AppImage payload and
-  launchers. The [candidate packages](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801/artifacts/13343059637)
-  include the final Support display changes at `d8202953`. AppImage launcher
+  launchers. The [candidate packages](https://github.com/sdevil7th/OpenStudio/actions/runs/41875186464/artifacts/13348345909)
+  are from `8f75022a`, with the same production app/Support source as `d8202953`.
+  AppImage launcher
   tests used extract-and-run mode; physical desktop/FUSE and Fedora RPM
   installation remain in the manual matrix.
-- **Pass — final Windows browser checks:** all four groups at `d8202953` passed,
+- **Pass — final Windows browser checks:** all four groups at `8f75022a` passed,
   with 295 passing cases and 33 native-schema/explicit-input skips, zero failures and zero
-  retries. The [run](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801)
+  retries. The [run](https://github.com/sdevil7th/OpenStudio/actions/runs/41875186464)
   retains the evidence. Earlier Windows runs exposed two test-fixture problems:
   driver round trips made a
   purported sustained gesture exceed its 200 ms idle boundary, and a second
@@ -42,16 +44,29 @@ The user requested certification checks and a release PR, with publication held.
   the evaluation's pending module-import promise. That fixture now uses the
   existing document-owned loading pattern from the ruler/track-copy tests,
   without changing keyboard assertions. Its focused local check passes; the
-  Linux rerun remains required. Linux now also uses four test groups for faster
-  feedback, with the system WebKitGTK check retained once per run.
+  Linux groups 1–3 at `8f75022a` passed (218 cases, 33 declared skips), including
+  the system WebKitGTK check. Group 4 was cancelled after 30 minutes downloading
+  Ubuntu browser dependencies, before its tests started. The remaining group
+  still needs a completed run; GitHub initially refused the scoped retry while
+  the cancelled run remained open. Linux now also uses four test groups for
+  faster feedback, with the system WebKitGTK check retained once per run.
   Native-schema editor tests run separately after the native app build. Tests
   requiring a private project or explicit native tempo-preview input do not run
   automatically in this general browser suite.
+
+Windows package/WACK evidence is from `d8202953`; the Linux package and latest
+browser evidence above is from `8f75022a`. Between those commits only CI, a test
+fixture, the WACK result checker and this qualification document changed. App,
+Support and runtime dependency source is identical. Later documentation updates
+do not retroactively change the packaged release notes or certify a new binary.
 - **Blocked — full macOS candidate execution:** GitHub repeatedly failed to
   allocate either Mac architecture before any steps ran. The workflow now uses
   supported macOS 15 images and includes installed universal-DMG checks on both
   architectures, but these have not completed for this candidate. No alternative
-  runner is configured. Earlier fixture passes do not clear this gate.
+  runner is configured. The user requested finishing the available Windows/Linux
+  work. Native Support builds/tests subsequently passed on both Mac architectures
+  in [the current run](https://github.com/sdevil7th/OpenStudio/actions/runs/41875186464),
+  but these component checks do not clear the full application/DMG gate.
 - **Pass — support packaging:** the [six-job qualification](https://github.com/sdevil7th/OpenStudio/actions/runs/41841385666)
   covers Windows installer/MSIX fixtures, native macOS and universal Finder/DMG
   launches on both architectures, and Linux DEB/RPM/AppImage payload checks.
@@ -73,24 +88,25 @@ The user requested certification checks and a release PR, with publication held.
   permits only `v*` tags. It rejected the certification branch before any Store
   request. The policy has not been changed. The local installed Store app is
   0.1.8.0; it is not the proposed candidate and must not be replaced for a test.
-- **Not passed — WACK:** the [actual report](https://github.com/sdevil7th/OpenStudio/actions/runs/41858351056/artifacts/13341803458)
-  returned `WARNING`, exit 0, on Windows Server 2025 (kit 10.0.26100.9457), with
-  a complete rather than partial run. The required DPI-awareness test warned
-  about `OpenStudioSupport.exe`. Support now has a PerMonitorV2 manifest,
-  event-driven font scaling and scrollable content; the rebuilt frozen helper
-  passes its PMv2-context and 100/150/200% font-scaling checks. Physical mixed-DPI
-  monitor transitions and the rebuilt MSIX's WACK result remain unasserted.
-  The tested package SHA-256 was
-  `039cae8db65124a9212e1ab6b1b786e1f71d4ea78789d0f77f75072ce3566c80`.
-- **Informational findings retained:** that WACK XML marks application count
+- **Pass — WACK:** the [final report](https://github.com/sdevil7th/OpenStudio/actions/runs/41868876801/artifacts/13348650296)
+  returned aggregate `PASS`, exit 0, on Windows Server 2025 (kit
+  10.0.26100.9457), with `PARTIAL_RUN=FALSE` and all 13 required tests passing.
+  The earlier required DPI-awareness warning is cleared in the rebuilt MSIX.
+  Support has a PerMonitorV2 manifest, event-driven font scaling and scrollable
+  content; its frozen PMv2-context and 100/150/200% font-scaling checks also pass.
+  Physical mixed-DPI monitor transitions remain **not_asserted**. The tested
+  package SHA-256 is
+  `158012e4ea54fe0a3a32e9f970ea85abe37dfc56040f73fe173c633666f05f52`.
+  This is a certification-kit pass, not Microsoft Store submission or approval.
+- **Informational findings retained:** the final WACK XML marks application count
   (the independent Support entry) and blocked-executable references as optional
   failures. Microsoft's [Desktop Bridge test guidance](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/windows-desktop-bridge-app-tests)
   distinguishes these from required tests. Process-launch references span the
   app, Support, Python/Tcl and Microsoft WebView2; this static scan does not prove
   any process was started during recording. The independent launcher remains;
   the strict aggregate WACK gate has not been weakened. S-mode compatibility and
-  Microsoft's final certification remain **not_asserted**. The report retains
-  every finding for review rather than relabelling `WARNING` as `PASS`.
+  Microsoft's final certification remain **not_asserted**. WACK itself reports
+  aggregate `PASS` with these two optional failures; every finding is retained.
 
 Merging a PR does not currently run Store submission. The release workflow uses
 release tags and contains public-release steps. Do not create a `v0.1.09` tag or
