@@ -139,7 +139,8 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
                     "vars.OPENSTUDIO_STORE_ENABLED": enabled,
                 }), expected)
         for name in ("build-windows", "build-macos", "build-linux"):
-            self.assertEqual(self.jobs[name]["needs"], "validate-release-notes")
+            needs = self.jobs[name]["needs"]
+            self.assertIn("validate-release-notes", [needs] if isinstance(needs, str) else needs)
 
         if os.name == "nt":
             git = shutil.which("git")

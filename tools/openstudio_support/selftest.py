@@ -37,7 +37,8 @@ def run_selftest(output):
                 if api(ctypes.byref(length), name) == 0:
                     result['packageIdentity'] = name.value
     except Exception as exc:
-        result = {'status': 'fail', 'error': str(exc)}
+        import traceback
+        result = {'status': 'fail', 'error': str(exc), 'traceback': traceback.format_exc()}
     with output.open('x', encoding='utf-8') as stream:
         json.dump(result, stream, indent=2)
     return 0 if result['status'] == 'pass' else 1

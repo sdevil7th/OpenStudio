@@ -69,7 +69,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: support-${{ matrix.platform }}-${{ matrix.arch }}
-          path: support-*.tgz
+          path: |
+            support-*.tgz
+            output/support-distribution/*.AppImage
           if-no-files-found: error
   universal-macos:
     needs: native

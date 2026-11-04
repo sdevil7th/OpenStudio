@@ -30,5 +30,7 @@ def prepare_project(path, clip_ids=(), resources=None):
     except quickjs.JSException as exc:
         raise ValueError('Could not compare this saved project: ' + str(exc)) from exc
     result['sourceProjectSha256'] = hashlib.sha256(data).hexdigest()
-    result['preparationSources'] = read_json(root / 'support-midi-sources.json')
+    # PyInstaller cross-links its own macOS Resources/Frameworks directories.
+    # Resolve only this trusted bundled resource; user inputs retain no-symlink checks.
+    result['preparationSources'] = read_json((root / 'support-midi-sources.json').resolve(strict=True))
     return result

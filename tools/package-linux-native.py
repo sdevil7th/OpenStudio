@@ -214,8 +214,21 @@ cp -a "{stage}/usr" "%{{buildroot}}/"
 /usr/share/metainfo/in.org.openstudio.OpenStudio.metainfo.xml
 %license /usr/share/doc/openstudio/copyright
 ''')
+    # The frozen runtime is already built: RPM's strip pass can corrupt vendored
+    # extension libraries. Preserve this private payload; keep dependency scanning
+    # and the normal stripping of the DAW and its other libraries enabled.
+    strip_wrapper = work / 'strip-preserving-support.sh'
+    strip_wrapper.write_text('''#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    */usr/lib/openstudio/OpenStudioSupport|*/usr/lib/openstudio/support-runtime/*) exit 0 ;;
+  esac
+done
+exec /usr/bin/strip "$@"
+''')
+    strip_wrapper.chmod(0o755)
     run(['rpmbuild', '-bb', '--define', f'_topdir {work / "rpm"}',
-         '--define', '_build_id_links none', spec])
+         '--define', f'__strip {strip_wrapper}', '--define', '_build_id_links none', spec])
     packages = list((work / 'rpm/RPMS/x86_64').glob('openstudio-*.rpm'))
     if len(packages) != 1:
         raise ValueError('Expected exactly one RPM output')

@@ -2,6 +2,7 @@
 import argparse
 import importlib.util
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -50,9 +51,17 @@ def main():
         rpm_root = root / 'rpm-extracted'; rpm_root.mkdir()
         archive = subprocess.run(['rpm2cpio', str(rpm)], stdout=subprocess.PIPE, check=True)
         subprocess.run(['cpio', '-idm', '--quiet'], input=archive.stdout, cwd=rpm_root, check=True)
+        changed = []
+        for original in (bundle / 'support-runtime').rglob('*'):
+            if original.is_file():
+                copy = rpm_root / 'usr/lib/openstudio' / original.relative_to(bundle)
+                if not copy.is_file() or hashlib.sha256(copy.read_bytes()).digest() != hashlib.sha256(original.read_bytes()).digest():
+                    changed.append(str(original.relative_to(bundle)))
+        if changed:
+            raise AssertionError('RPM changed frozen runtime files: ' + ', '.join(changed[:20]))
         subprocess.run([sys.executable, str(ROOT / 'tools/test-packaged-support.py'), '--bundle',
                         str(rpm_root / 'usr/lib/openstudio')], check=True)
-        image = appimage.package(bundle, root / 'appimage', args.version)
+        image = appimage.package(bundle, ROOT / 'output/support-distribution', args.version)
         report = root / 'appimage-selftest.json'
         subprocess.run([str(image), '--self-test', str(report)], env=dict(os.environ, APPIMAGE_EXTRACT_AND_RUN='1'), check=True)
         assert json.loads(report.read_text())['status'] == 'pass'
