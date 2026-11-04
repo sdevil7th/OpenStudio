@@ -7,7 +7,8 @@ juce::var AudioEngine::runParallelTrackRegression()
     class FixtureDevice final : public juce::AudioIODevice
     {
     public:
-        FixtureDevice() : AudioIODevice("Parallel track fixture", "Offline fixture") {}
+        explicit FixtureDevice(int block = 512)
+            : AudioIODevice("Parallel track fixture", "Offline fixture"), blockSize(block) {}
         juce::StringArray getOutputChannelNames() override { return { "Left", "Right" }; }
         juce::StringArray getInputChannelNames() override
         {
@@ -16,8 +17,8 @@ juce::var AudioEngine::runParallelTrackRegression()
             return names;
         }
         juce::Array<double> getAvailableSampleRates() override { return { 48000.0 }; }
-        juce::Array<int> getAvailableBufferSizes() override { return { 512 }; }
-        int getDefaultBufferSize() override { return 512; }
+        juce::Array<int> getAvailableBufferSizes() override { return { blockSize }; }
+        int getDefaultBufferSize() override { return blockSize; }
         juce::String open(const juce::BigInteger&, const juce::BigInteger&, double, int) override
         { return "Offline fixture cannot open hardware"; }
         void close() override {}
@@ -26,13 +27,15 @@ juce::var AudioEngine::runParallelTrackRegression()
         void stop() override {}
         bool isPlaying() override { return false; }
         juce::String getLastError() override { return {}; }
-        int getCurrentBufferSizeSamples() override { return 512; }
+        int getCurrentBufferSizeSamples() override { return blockSize; }
         double getCurrentSampleRate() override { return 48000.0; }
         int getCurrentBitDepth() override { return 32; }
         juce::BigInteger getActiveOutputChannels() const override { return juce::BigInteger(3); }
         juce::BigInteger getActiveInputChannels() const override { return juce::BigInteger(4095); }
         int getOutputLatencyInSamples() override { return 0; }
         int getInputLatencyInSamples() override { return 0; }
+    private:
+        const int blockSize;
     } device;
 
     juce::Array<juce::var> checks, configurations;
@@ -48,6 +51,25 @@ juce::var AudioEngine::runParallelTrackRegression()
         checks.add(result);
         passed = passed && success;
     };
+    for (const int blockSize : { 8, 64 })
+    {
+        FixtureDevice tinyDevice(blockSize);
+        auto engine = std::make_unique<AudioEngine>(DeviceStartup::offline);
+        engine->requestedRealtimeWorkers = 0;
+        engine->audioDeviceAboutToStart(&tinyDevice);
+        const juce::String id = "native-nam-insertion";
+        const bool inserted = engine->addTrack(id, "audio") == id
+            && engine->addTrackBuiltInFX(id, "OpenStudio NAM Rack", true)
+            && engine->addTrackBuiltInFX(id, "OpenStudio NAM Rack", false);
+        const auto input = engine->getNAMRackDiagnostics(id, "input", 0);
+        const auto output = engine->getNAMRackDiagnostics(id, "track", 0);
+        check("native_nam_insert_after_device_start_" + juce::String(blockSize), inserted
+                && static_cast<int>(input.getProperty("preparedBlockSize", 0)) == blockSize
+                && static_cast<int>(output.getProperty("preparedBlockSize", 0)) == blockSize
+                && engine->hardwareCallbackRegistrationCount.load() == 0,
+            "The app's built-in insertion route prepares both input and track NAM for the running device size without another device restart; the fixture opens no physical device.");
+        engine->audioDeviceStopped();
+    }
     {
         // Use the real query and response serialization with a simulated driver.
         // An equal cloned current object must not detach later draft edits from

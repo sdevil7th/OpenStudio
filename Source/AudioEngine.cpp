@@ -66940,14 +66940,17 @@ bool AudioEngine::addTrackBuiltInFX(const juce::String& trackId, const juce::Str
         auto it = trackMap.find(trackId);
         if (it != trackMap.end() && it->second)
         {
+            // The track applies its per-processor preparation policy. Preserve
+            // the device capacity here so native NAM does not inherit the
+            // compatibility reserve used for the initial generic preparation.
             if (isInputFX)
             {
-                success = it->second->addInputFX(std::move(plugin), sr, bs);
+                success = it->second->addInputFX(std::move(plugin), sr, currentBlockSize);
 
             }
             else
             {
-                success = it->second->addTrackFX(std::move(plugin), sr, bs);
+                success = it->second->addTrackFX(std::move(plugin), sr, currentBlockSize);
 
             }
         }

@@ -272,7 +272,15 @@ items retained); the render/export matrix passed all 422 checks. Debug's copied
 frontend is current. These local passes do not extend the earlier installer or
 WACK result to the modified executable.
 
-Three subsequent physical-interface runs used four loaded NAM tracks, normal
+The final call-path review also corrected the app's built-in insertion entry
+point: it must pass the actual device capacity into TrackProcessor rather than
+the generic creation reserve. Two engine-level fixtures verify inserting NAM
+into both chains after a simulated device has already started at 8 or 64 samples,
+without requiring a device restart. They pass in Release and Debug. The full
+NAM and 422-check render/export matrices were repeated and passed after this
+correction; both configurations rebuilt without C++ compiler warnings.
+
+Four subsequent physical-interface runs used four loaded NAM tracks, normal
 workers, 4x oversampling, Audient ASIO / 48 kHz / 8 samples, three seconds of
 warmup and 30 measured seconds. ETW and optional thread-cycle queries were off;
 the explicit probe still measured each callback. Dota 2 remained running.
@@ -282,8 +290,9 @@ the explicit probe still measured each callback. Dota 2 remained running.
 | 1 | Actual host block | 87.3 / 201.8 / 386.7 | 3,958 | 6,299 |
 | 2 | Saved previous 512-block build | 116.6 / 237.6 / 406.1 | 8,948 | 36,173 |
 | 3 | Actual host block, repeat | 85.5 / 197.9 / 343.2 | 3,955 | 6,183 |
+| 4 | Final app-insertion correction | 82.6 / 190.8 / 408.7 | 3,658 | 7,360 |
 
-All three passed raw synthetic-recording checks and failed engine/worker
+All four passed raw synthetic-recording checks and failed engine/worker
 capacity. Worker counts cover a different interval and must not be added to
 the measured outer misses. These runs support the direction of improvement
 under this test setup, not a universal percentage claim: game activity was not
@@ -293,8 +302,10 @@ latency and audition remain **not_asserted**. **The zero-miss 8-sample gate fail
 
 Previous build / trace executable SHA-256:
 `663b9d97ac4d3a5f277b2c0f46315750a2fa0ca78e97c9b539fdb1ecb3870249`.
-Updated Release executable SHA-256:
+Updated Release executable SHA-256 for runs 1 and 3:
 `bc404150f7494ae493a4ca3c7075bc93debc51c9fed99430a404e362a234b21a`.
+Final insertion-corrected Release executable SHA-256 for run 4:
+`77306c0434c3e050974d5c99c259b40656ded55a2d3379b850ce2100eef5bbe9`.
 Local traces, matching binaries, analysis and reports remain under
 `output/eight-sample-investigation/`; private machine traces are not committed
 or uploaded. Trace artifacts are evidence of this explicit diagnostic session,
