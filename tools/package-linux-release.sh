@@ -25,6 +25,7 @@ python3 - "$ROOT_DIR/$BUILD_DIR" "$SCRIPT_DIR/package-linux-native.py" <<'PYCODE
 import importlib.util
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[2]).parent))
 spec = importlib.util.spec_from_file_location("native_packaging", sys.argv[2])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -66,10 +67,13 @@ chmod +x "$APPDIR/usr/bin/OpenStudio"
 
 # Copy all runtime assets that sit beside the binary (models/, scripts/, ffmpeg, webui/, etc.)
 RELEASE_ASSET_DIR="$(dirname "$BINARY")"
+python3 "$TOOLS_DIR/validate-support-tool.py" --bundle "$RELEASE_ASSET_DIR" --version "$VERSION"
 for item in "$RELEASE_ASSET_DIR"/*/; do
+    [ "$(basename "$item")" != "support-runtime" ] || continue
     [ -d "$item" ] && cp -r "$item" "$APPDIR/usr/bin/"
 done
 for item in "$RELEASE_ASSET_DIR"/*; do
+    [ "$(basename "$item")" != "OpenStudioSupport" ] || continue
     [ -f "$item" ] && [ "$(basename "$item")" != "OpenStudio" ] && cp "$item" "$APPDIR/usr/bin/"
 done
 

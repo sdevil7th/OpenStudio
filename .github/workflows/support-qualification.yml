@@ -21,6 +21,7 @@ jobs:
           - {os: macos-14, platform: macos, arch: arm64}
           - {os: macos-15-intel, platform: macos, arch: x86_64}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     env:
       SUPPORT_VERSION: ${{ inputs.version || '0.0.0' }}
       MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -53,8 +54,9 @@ jobs:
           ./tools/test-support-msix.ps1 -BundlePath $env:OPENSTUDIO_SUPPORT_TEST_BUNDLE -OutputDir output/support-msix-qa
       - name: macOS support tests
         if: runner.os == 'macOS'
+        timeout-minutes: 6
         run: |
-          .venv-support/bin/python -m unittest tools.test_openstudio_support -q
+          .venv-support/bin/python -c "import faulthandler, unittest; faulthandler.dump_traceback_later(180, exit=True); unittest.main(module=None, argv=['unittest', 'tools.test_openstudio_support', '-v'])"
           python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport.app
           codesign --verify --deep --strict output/support-package/OpenStudioSupport.app
       - name: Linux support tests and native packaging
@@ -80,6 +82,7 @@ jobs:
     needs: native
     if: ${{ !cancelled() }}
     runs-on: macos-14
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -102,6 +105,7 @@ jobs:
   universal-macos-intel:
     needs: universal-macos
     runs-on: macos-15-intel
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
