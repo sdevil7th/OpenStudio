@@ -838,7 +838,6 @@ jobs:
           if-no-files-found: error
 
   verify-linux:
-    needs: support-packages
     runs-on: ubuntu-22.04
     env:
       # AppImage verification exercises the real release-notes gate.
@@ -848,6 +847,10 @@ jobs:
       ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: '3.13'
 
       - name: Validate AppImage release notes
         run: python3 tools/validate-release-notes.py --version "$VERSION"
@@ -863,7 +866,7 @@ jobs:
               | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           fi
           bash ./tools/setup-linux-prereqs.sh
-          sudo apt-get install -y xvfb xauth openbox
+          sudo apt-get install -y xvfb xauth openbox python3-tk
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -961,16 +964,11 @@ jobs:
       - name: Test native package construction
         run: python3 -m unittest discover -s tests -p 'test_linux_*.py' -v
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: support-linux-x64
-          path: output/support-native
-
-      - name: Stage complete candidate support payload
+      - name: Build and qualify candidate support without waiting for other platforms
         run: |
-          tar -xzf output/support-native/support-linux-x64.tgz -C output/support-native
-          cp -a output/support-native/OpenStudioSupport/. "$BUILD_DIR/OpenStudio_artefacts/Release/"
+          python3 tools/build-support-tool.py --version "$VERSION" --stage "$BUILD_DIR/OpenStudio_artefacts/Release"
           python3 tools/validate-support-tool.py --bundle "$BUILD_DIR/OpenStudio_artefacts/Release" --version "$VERSION"
+          xvfb-run -a python3 tools/test-packaged-support.py --bundle "$BUILD_DIR/OpenStudio_artefacts/Release"
 
       - name: Build and install Ubuntu package
         shell: bash
