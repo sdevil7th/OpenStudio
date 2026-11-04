@@ -785,11 +785,17 @@ jobs:
       - name: Package complete macOS candidate without notarization or publication
         if: env.CALLBACK_DIAGNOSTICS == 'OFF'
         shell: bash
+        env:
+          MACOS_CODESIGN_KIND: ad-hoc
         run: |
           tar -xzf output/support-universal/support-macos-universal.tgz -C output/support-universal
           ditto output/support-universal/OpenStudioSupport.app "$APP_BUNDLE/Contents/Helpers/OpenStudioSupport.app"
           ditto 'output/support-universal/OpenStudio Support.app' "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio Support.app"
           bash tools/package-macos-release.sh "$APP_BUNDLE" "$VERSION" dist/macos
+
+      - name: Qualify installed apps from the finished candidate DMG
+        if: env.CALLBACK_DIAGNOSTICS == 'OFF'
+        run: python3 tools/test-macos-candidate.py --dmg dist/macos/OpenStudio-macOS.dmg --version "$VERSION" --output "$RUNNER_TEMP/candidate-macos-installed"
 
       - name: Check callback diagnostic build contract
         shell: pwsh
@@ -800,6 +806,35 @@ jobs:
         with:
           name: candidate-macos-universal
           path: dist/macos/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && env.CALLBACK_DIAGNOSTICS == 'OFF'
+        with:
+          name: candidate-macos-installed-arm64
+          path: ${{ runner.temp }}/candidate-macos-installed/
+          if-no-files-found: warn
+
+  qualify-macos-candidate-intel:
+    name: Installed universal DMG (Intel)
+    needs: verify-macos
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version || '0.1.09' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: candidate-macos-universal
+          path: candidate
+      - name: Qualify the same finished DMG on Intel
+        run: python3 tools/test-macos-candidate.py --dmg candidate/OpenStudio-macOS.dmg --version "$VERSION" --output "$RUNNER_TEMP/candidate-macos-installed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: candidate-macos-installed-intel
+          path: ${{ runner.temp }}/candidate-macos-installed/
           if-no-files-found: error
 
   verify-linux:
