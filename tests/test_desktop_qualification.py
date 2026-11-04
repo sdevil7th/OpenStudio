@@ -1,5 +1,7 @@
 import importlib.util
+from contextlib import redirect_stderr
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import wave
 
 
@@ -30,6 +33,95 @@ SUPERVISOR = LIFECYCLE.with_name("owned-desktop-process.py")
 
 
 class DesktopQualification(unittest.TestCase):
+    def test_appimage_default_report_is_inside_retained_artifact_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            appimage = root / "OpenStudio.AppImage"
+            appimage.touch()
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.object(sys, "argv", ["smoke-linux-appimage.py", str(appimage)]), \
+                     mock.patch.object(desktop.shutil, "which", return_value="fixture-tool"), \
+                     mock.patch.object(desktop.subprocess, "call", return_value=7) as launch:
+                    self.assertEqual(desktop.main(), 7)
+                command = launch.call_args.args[0]
+                report = Path(command[command.index("--report") + 1])
+                self.assertEqual(report, root.resolve() / "output/linux-appimage/window-manager-lifecycle.json")
+                self.assertTrue(report.parent.is_dir())
+            finally:
+                os.chdir(previous)
+
+    def test_appimage_failure_summary_is_bounded_and_only_includes_lifecycle_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "lifecycle.json"
+            report.write_text(json.dumps({
+                "harnessMode": "window_lifecycle", "success": False, "environment": {"secret": "do-not-print"},
+                "checks": [{"id": "pitch_interactive", "status": "fail", "detail": "x" * 2000,
+                            "unrelated": "do-not-print"}] * 20,
+                "frontendDocuments": [{"role": "pitch", "startupState": "timedOut",
+                                       "url": "do-not-print"}] * 20,
+                "startupSelfTest": {"shellReady": True, "browserBackendSupported": False,
+                                    "packagedFrontendPresent": True, "runtimePath": "do-not-print"},
+            }), encoding="utf-8")
+            summary = desktop.failure_diagnostics(report)
+            self.assertIs(summary["success"], False)
+            self.assertEqual(summary["harnessMode"], "window_lifecycle")
+            self.assertEqual(summary["failedCheckCount"], 20)
+            self.assertEqual(len(summary["failedChecks"]), 12)
+            self.assertEqual(summary["failedChecks"][0],
+                             {"id": "pitch_interactive", "status": "fail", "detail": "x" * 512})
+            self.assertEqual(len(summary["frontendDocuments"]), 12)
+            self.assertEqual(summary["frontendDocuments"][0], {"role": "pitch", "startupState": "timedOut"})
+            self.assertEqual(summary["startupSelfTest"], {"shellReady": True, "browserBackendSupported": False,
+                                                        "packagedFrontendPresent": True})
+            self.assertEqual(summary["logPath"], str(report.with_suffix(".log")))
+            self.assertNotIn("do-not-print", json.dumps(summary))
+
+    def test_appimage_missing_or_invalid_failure_report_still_provides_log_locations(self):
+        cases = [(None, "report was not written"), (b"{bad-json", "report is unreadable or malformed"),
+                 (b"[]", "report is unreadable or malformed"), (b"\xff", "report is unreadable or malformed"),
+                 (b" " * (desktop.MAX_DIAGNOSTIC_REPORT_BYTES + 1), "report exceeds diagnostic size limit")]
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "lifecycle.json"
+            for content, expected in cases:
+                with self.subTest(expected=expected, bytes=None if content is None else len(content)):
+                    if content is not None:
+                        report.write_bytes(content)
+                    summary = desktop.failure_diagnostics(report)
+                    self.assertEqual(summary["reportError"], expected)
+                    self.assertEqual(summary["reportPath"], str(report))
+                    self.assertEqual(summary["startupLogPath"], str(report.with_suffix(".startup.log")))
+
+    def test_appimage_native_failure_prints_failed_check_and_preserves_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            appimage, report = root / "OpenStudio.AppImage", root / "lifecycle.json"
+            appimage.touch()
+            manager, application = mock.Mock(), mock.Mock()
+            manager.poll.return_value = None
+            application.wait.return_value = 2
+
+            def launch(command, **_):
+                if command[0] == "openbox":
+                    return manager
+                report.write_text(json.dumps({"harnessMode": "window_lifecycle", "success": False,
+                                              "checks": [{"id": "plugin_bounds_stable", "status": "fail",
+                                                          "detail": "window bounds changed"}]}), encoding="utf-8")
+                return application
+
+            error_output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["smoke-linux-appimage.py", str(appimage),
+                                                  "--inside-display", "--report", str(report)]), \
+                 mock.patch.object(desktop.subprocess, "Popen", side_effect=launch), \
+                 mock.patch.object(desktop, "stop_process_group") as cleanup, redirect_stderr(error_output):
+                self.assertEqual(desktop.main(), 1)
+            self.assertIn("Packaged application exited with 2", error_output.getvalue())
+            self.assertIn('"id": "plugin_bounds_stable"', error_output.getvalue())
+            self.assertIn('"detail": "window bounds changed"', error_output.getvalue())
+            self.assertEqual(cleanup.call_args_list, [mock.call(application), mock.call(manager)])
+            self.assertTrue(report.with_suffix(".log").is_file())
+
     def test_boot_alone_does_not_qualify_detached_windows(self):
         with self.assertRaises(ValueError):
             desktop.validate_report({"harnessMode": "window_lifecycle", "success": True,
@@ -241,8 +333,8 @@ try {
                 self.assert_child_stopped(self.child_record()["pid"])
 
 
-@unittest.skipUnless(POWERSHELL and os.name == "nt", "Windows PowerShell is required for lifecycle wrapper fixtures")
-class WindowsLifecycleQualification(unittest.TestCase):
+@unittest.skipUnless(POWERSHELL, "PowerShell is required for lifecycle wrapper fixtures")
+class LifecycleQualification(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -333,6 +425,7 @@ class WindowsLifecycleQualification(unittest.TestCase):
         report["startupSelfTest"]["packagedFrontendPresent"] = False
         self.assertNotEqual(self.validate(report).returncode, 0)
 
+    @unittest.skipUnless(os.name == "nt", "WebView2 user data is Windows-specific")
     def test_user_data_paths_and_override_evidence_cannot_hide_install_directory_writes(self):
         for key in ("webView2UserDataPath", "userDataFolderOverride"):
             for user_data in (self.bundle, self.bundle / "browser-data"):
@@ -403,13 +496,16 @@ try {
         return json.loads(record.read_text(encoding="utf-8-sig"))
 
     def test_wrapper_passes_safe_offline_flags_restores_environment_and_records_binary(self):
-        record = self.run_mock_process(mode="safe", stale=True)
+        record = self.run_mock_process(mode="safe", stale=os.name == "nt")
         self.assertTrue(record["success"], record.get("error"))
         self.assertIn("--ui-safe-mode", record["arguments"])
         self.assertIn("--window-lifecycle-offline", record["arguments"])
         self.assertEqual(record["waitMilliseconds"], 30000)
         self.assertEqual(record["childUI"], "1")
-        self.assertIn("missing-webview-runtime-", record["childRuntime"])
+        if os.name == "nt":
+            self.assertIn("missing-webview-runtime-", record["childRuntime"])
+        else:
+            self.assertEqual(record["childRuntime"], "parent-runtime")
         self.assertEqual((record["parentUI"], record["parentRuntime"]), ("parent-ui", "parent-runtime"))
         self.assertEqual(record["stopped"], [])
         self.assertTrue(record["disposed"])
@@ -432,7 +528,7 @@ try {
     def test_timeout_launch_failure_and_invalid_artifacts_restore_parent_state(self):
         for behavior in ("timeout", "start-failure", "invalid-json", "missing-report", "nonzero-exit", "cleanup-failure"):
             with self.subTest(behavior=behavior):
-                record = self.run_mock_process(stale=True, behavior=behavior)
+                record = self.run_mock_process(stale=os.name == "nt", behavior=behavior)
                 self.assertFalse(record["success"])
                 self.assertEqual((record["parentUI"], record["parentRuntime"]), ("parent-ui", "parent-runtime"))
                 self.assertEqual(record["stopped"], [])
@@ -440,6 +536,7 @@ try {
                 evidence = json.loads(self.report.with_suffix(".qualification.json").read_text(encoding="utf-8-sig"))
                 self.assertEqual(evidence["status"], "fail")
 
+    @unittest.skipUnless(os.name == "nt", "WebView2 runtime overrides are Windows-specific")
     def test_stale_override_must_be_cleared_by_application(self):
         report = self.report_fixture()
         report["browserExecutableFolderOverride"] = "still-invalid"
@@ -448,12 +545,74 @@ try {
         self.assertIn("not removed", record["error"])
 
     def test_report_from_another_executable_cannot_qualify_this_binary(self):
+        unrelated_directory = self.root / "unrelated bundle"
+        unrelated_directory.mkdir()
+        unrelated = unrelated_directory / self.app.name
+        shutil.copyfile(self.app, unrelated)
+        for reported in (unrelated, unrelated_directory / "missing executable"):
+            with self.subTest(reported=reported):
+                report = self.report_fixture()
+                report["executablePath"] = str(reported)
+                record = self.run_mock_process(report=report)
+                self.assertFalse(record["success"])
+                self.assertIn("different executable", record["error"])
+                evidence = json.loads(self.report.with_suffix(".qualification.json").read_text(encoding="utf-8-sig"))
+                self.assertEqual(evidence["status"], "fail")
+                self.assertTrue(record["disposed"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX filesystem identity is required")
+    def test_parent_directory_symlink_identifies_the_same_executable(self):
+        alias = self.root / "bundle alias"
+        alias.symlink_to(self.bundle, target_is_directory=True)
         report = self.report_fixture()
-        report["executablePath"] = str(self.root / "unrelated" / "OpenStudio.exe")
+        report["executablePath"] = str(alias / self.app.name)
+        record = self.run_mock_process(report=report)
+        self.assertTrue(record["success"], record.get("error"))
+        # Exercise the opposite spelling too: launch through the alias while
+        # the native report resolves the parent directory to its real path.
+        real_app = self.app
+        self.app = alias / self.app.name
+        report["executablePath"] = str(real_app)
+        record = self.run_mock_process(report=report)
+        self.assertTrue(record["success"], record.get("error"))
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS /var alias is required")
+    def test_macos_var_mount_alias_identifies_the_same_executable(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp", prefix="openstudio identity ") as temporary:
+            self.app = Path(temporary) / "OpenStudio"
+            self.app.write_bytes(b"fixture only --window-lifecycle-offline; never executed")
+            report = self.report_fixture()
+            report["executablePath"] = str(self.app.resolve(strict=True))
+            self.assertNotEqual(report["executablePath"], str(self.app), "Fixture must exercise /var -> /private/var")
+            record = self.run_mock_process(report=report)
+            self.assertTrue(record["success"], record.get("error"))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX filesystem identity is required")
+    def test_case_distinct_executable_cannot_qualify_on_case_sensitive_volume(self):
+        distinct = self.app.with_name(self.app.name.swapcase())
+        if distinct.exists():
+            self.skipTest("The fixture volume is not case-sensitive")
+        shutil.copyfile(self.app, distinct)
+        self.assertFalse(os.path.samefile(self.app, distinct))
+        report = self.report_fixture()
+        report["executablePath"] = str(distinct)
         record = self.run_mock_process(report=report)
         self.assertFalse(record["success"])
         self.assertIn("different executable", record["error"])
 
+    @unittest.skipUnless(os.name == "posix", "POSIX filesystem identity is required")
+    def test_report_path_alias_cannot_replace_the_executable(self):
+        alias = self.root / "bundle alias"
+        alias.symlink_to(self.bundle, target_is_directory=True)
+        self.report = alias / self.app.name
+        original = self.app.read_bytes()
+        record = self.run_mock_process()
+        self.assertFalse(record["success"])
+        self.assertFalse(record["started"])
+        self.assertIn("ReportPath must not replace", record["error"])
+        self.assertEqual(self.app.read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "nt", "Windows 8.3 aliases are required")
     def test_short_executable_path_uses_the_same_identity_normalization(self):
         import ctypes
         original_app = self.app
@@ -477,6 +636,7 @@ try {
         self.assertFalse(record["success"])
         self.assertIn("different executable", record["error"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows token elevation is required")
     def test_standard_user_requirement_cannot_report_elevated_success(self):
         record = self.run_mock_process(require_standard=True)
         if record["success"]:
@@ -486,6 +646,7 @@ try {
             self.assertFalse(record["started"])
             self.assertIn("non-elevated Windows", record["error"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows Job ownership is required")
     def test_owned_job_removes_descendants_after_parent_exit_and_preserves_unrelated_process(self):
         module = LIFECYCLE.with_name("OwnedDesktopProcess.psm1")
         fixture_dir = self.root / "fixture scripts"

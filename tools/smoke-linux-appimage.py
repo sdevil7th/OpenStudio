@@ -24,6 +24,53 @@ REQUIRED_CHECKS = {
     "pitch_native_relative_shift_committed", "pitch_native_correction_file_published",
     "pitch_native_undo_preserved", "pitch_owner_loss_retains_checkpoint",
 }
+MAX_DIAGNOSTIC_REPORT_BYTES = 256 * 1024
+MAX_DIAGNOSTIC_ROWS = 12
+
+
+def failure_diagnostics(report: Path) -> dict:
+    """Summarize known lifecycle fields without dumping the report or environment."""
+    summary = {"reportPath": str(report), "logPath": str(report.with_suffix(".log")),
+               "startupLogPath": str(report.with_suffix(".startup.log"))}
+    try:
+        with report.open("rb") as source:
+            content = source.read(MAX_DIAGNOSTIC_REPORT_BYTES + 1)
+        if len(content) > MAX_DIAGNOSTIC_REPORT_BYTES:
+            summary["reportError"] = "report exceeds diagnostic size limit"
+            return summary
+        document = json.loads(content)
+        if not isinstance(document, dict):
+            raise ValueError("Expected an object")
+    except FileNotFoundError:
+        summary["reportError"] = "report was not written"
+        return summary
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        summary["reportError"] = "report is unreadable or malformed"
+        return summary
+
+    def fields(row: dict, keys: tuple) -> dict:
+        return {key: row[key][:512 if key == "detail" else 96]
+                for key in keys if isinstance(row.get(key), str)}
+
+    summary.update(fields(document, ("harnessMode",)))
+    if isinstance(document.get("success"), bool):
+        summary["success"] = document["success"]
+    checks = document.get("checks", [])
+    failed = [row for row in checks if isinstance(row, dict) and row.get("status") == "fail"] \
+        if isinstance(checks, list) else []
+    summary["failedCheckCount"] = len(failed)
+    summary["failedChecks"] = [fields(row, ("id", "status", "detail"))
+                               for row in failed[:MAX_DIAGNOSTIC_ROWS]]
+    documents = document.get("frontendDocuments", [])
+    if isinstance(documents, list):
+        summary["frontendDocuments"] = [fields(row, ("role", "startupState"))
+                                        for row in documents[:MAX_DIAGNOSTIC_ROWS] if isinstance(row, dict)]
+    startup = document.get("startupSelfTest", {})
+    if isinstance(startup, dict):
+        summary["startupSelfTest"] = {
+            key: startup[key] for key in ("shellReady", "browserBackendSupported", "packagedFrontendPresent")
+            if isinstance(startup.get(key), bool)}
+    return summary
 
 
 def validate_report(report: dict) -> None:
@@ -53,7 +100,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("appimage", type=Path)
     parser.add_argument("--timeout", type=int, default=240)
-    parser.add_argument("--report", type=Path, default=Path("output/linux-appimage-lifecycle.json"))
+    parser.add_argument("--report", type=Path,
+                        default=Path("output/linux-appimage/window-manager-lifecycle.json"))
     parser.add_argument("--inside-display", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     appimage = args.appimage.resolve()
@@ -92,6 +140,7 @@ def main() -> int:
                 validate_report(json.loads(report.read_text(encoding="utf-8")))
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                 print(str(error), file=sys.stderr)
+                print("AppImage lifecycle diagnostics: " + json.dumps(failure_diagnostics(report)), file=sys.stderr)
                 return 1
             finally:
                 if process is not None:

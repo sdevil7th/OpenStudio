@@ -465,6 +465,29 @@ final run; the baseline's 43/62 amp/cab misses at 44.1 kHz / 8 and the earlier
 after-run's 11/35 demonstrate why noisy single runs cannot establish an overall
 performance improvement.
 
+### Plugin parameter gesture history
+
+Run `npm run test -- src/__tests__/builtInPluginPanel.test.tsx
+src/__tests__/builtInPluginParamHistory.test.ts` from `frontend`, then run
+`npx playwright test e2e/nam-fuzz-workflow.spec.ts --project=chromium --project=webkit` on
+Windows and macOS. The browser fixture starts its own Vite server and uses
+the platform's primary Undo modifier.
+
+For Fuzz Clean, enter 38.4%, cancel a 75% draft, adjust finely to 38.6%,
+then reset to 0%. Three Undo operations must restore 38.6%, 38.4%, and 0%;
+Redo must replay the three committed edits. Cancel must add no history step.
+Exercise transitions before deferred blur/key-up commits run, with native
+writes still pending; a delay added between actions can hide the race.
+Also verify pointer-to-focus handoff, held-key and wheel continuation,
+separate gestures of the same parameter, dependent parameter changes and
+failed writes. History boundaries must not duplicate native automation
+begins or allow an older gesture end to close a newer gesture. Keyboard Undo/Redo
+must finish native Touch even when it cancels the pending edit-commit timer;
+the browser regression checks balanced native begin/end calls as well as values.
+The core workflow retains its 30-second case budget. WebKit's image-heavy
+geometry and preset-copy cases allow 90 seconds, with assertion deadlines
+unchanged; this separates screenshot cost from a missing functional transition.
+
 ### Swollen Pickle reference fuzz review, October 23, 2026
 
 This is working-tree evidence against base app commit
@@ -1245,6 +1268,15 @@ The Playwright configuration starts its own Vite server. These migrated suites
 use typed helpers in `frontend/e2e/support/`; no standalone browser script or
 pre-running server is needed. Public behavior and profile-dependent ruler actions are described in
 [input profiles](input-profiles.md#mouse-and-wheel-safety).
+
+The PR #35 Ubuntu trace at `be48dfc1` failed in the ruler fixture's asynchronous
+module bootstrap with `Resulting promise was garbage collected`, before any
+ruler interaction. It showed one successful document load, no Vite reconnect or
+reload, and the fixture's seeded track already rendered. The fixture now uses
+App's exact store URL in a document-owned module script, followed by synchronous
+setup, as the recording fixture already does. This corrects test lifetime
+ownership; all ruler assertions and timeouts remain unchanged. It does not
+establish the cause of the separate packaged AppImage lifecycle exit 2.
 
 Recording zoom coverage is in `recordingWaveformPreview.test.ts` and
 `e2e/recording-zoom.spec.ts`. The browser fixture seeds two takes at 556 seconds,
@@ -2208,6 +2240,75 @@ For actual host/export integration, run `powershell -NoProfile -ExecutionPolicy 
 The opt-in native `-CaseName ten-hour-listening` retains its historical command name and produces deterministic source/settings/WAV artifacts. `python tools/create-free-suite-listening-preview.py --help` documents the local preview builder. Preview gain changes are recorded; original files remain unchanged. Listen to those exact artifacts before making a subjective claim. Fixtures and finite alias/peak tests do not prove commercial emulation, complete BS.1770/EBU conformance or arbitrary-input behavior.
 
 Keep generated JSON, WAV, screenshots, hashes and failed/intermediate runs under ignored `output/`. Store lasting contracts in the maintenance guide and executable tests. The 3 October development baseline passed 2,480 frontend tests, 168 native groups and 233 host checks; current source still requires appropriately scoped checks after changes.
+
+## October 24 0.1.06 release attempt
+
+[Release run 40067513185](https://github.com/sdevil7th/OpenStudio/actions/runs/40067513185)
+tested tag `v0.1.06` at `e0d9d41e7a2bfac7795a36f7f43c35e93d2561d5`.
+This was a failed publication attempt, not a distributed application release.
+
+- Windows: the actual installer passed installation, 99 normal-mode installed
+  lifecycle checks and uninstall. The tested executable SHA-256 was
+  `490ae61640acf6b3dc8586e1c1158110d00f2149228e3fca876facf0f2b4d08d`.
+  The host was build 26100 with an elevated account and explicit offline
+  operation. This does not qualify Windows 10 Repair, safe mode, a standard-user
+  installation, previous-version upgrade or physical audio. The direct-download
+  installer was unsigned; no code-signing certificate was configured.
+- Linux: the installed Ubuntu 22.04 package passed 85 normal and 76 safe lifecycle
+  checks, 264 render/export checks, 361 runtime-safety checks and 40 engine
+  groups. The glibc 2.35 ABI audit passed. The finished AppImage passed launcher,
+  85 lifecycle and 264 render checks under extract-and-run/Xvfb. These results
+  do not establish physical audio, native Wayland or the original Arch/fish
+  reporter's installation behavior.
+- macOS: universal compilation, runtime validation and unsigned DMG construction
+  passed. The mounted application exited successfully and its required native
+  lifecycle report assertions passed, but the wrapper then rejected executable
+  identity. Its lexical `GetFullPath` comparison did not account for parent
+  aliases such as `/var` and `/private/var`. The complete packaged qualification
+  therefore failed; do not count it as a macOS release pass.
+- Store: read-only preflight confirmed the previous 0.1.05 submission is
+  Published and the new package's effective publishing mode is Immediate.
+  Failed macOS qualification skipped GitHub publication, Store submission and
+  website dispatch. No 0.1.06 Store mutation occurred.
+
+The wrapper correction compares POSIX filesystem identity with
+`os.path.samefile`, using the Python 3 dependency already required by its owned
+process supervisor. Different existing files, missing paths and case-distinct
+files on a case-sensitive volume still fail. The report destination cannot
+alias and replace the executable. Windows retains its existing normalization
+and 8.3-path coverage without a new Python dependency. Parent-symlink and actual
+macOS `/var` fixtures run before native compilation; packaged failure JSON and
+adjacent logs are retained even when the qualification step fails.
+
+Local Windows qualification of that correction ran 26 tests: 16 passed and 10
+POSIX-only cases were skipped. An explicit Windows PowerShell 5.1 wrapper run
+passed 13 cases with four POSIX-only skips. Native POSIX/macOS fixtures
+subsequently passed in PR #33 on both macOS architectures; a new successful
+packaged release run remains required. Evidence is retained
+under ignored `output/review/release-0106/`; it does not change the separate
+audio, installation and listening limits above.
+
+The recovery branch's initial [PR #35 run](https://github.com/sdevil7th/OpenStudio/actions/runs/40074265576)
+passed the installed Linux package's normal/safe, render, runtime and engine
+checks, plus AppImage contents and ABI checks. Its separate Openbox AppImage
+lifecycle process exited with code 2. The report was outside the uploaded
+artifact directories, so that run cannot identify the failed native check;
+do not classify it as a missing-assets failure or a passing lifecycle test.
+`smoke-linux-appimage.py` now defaults to
+`output/linux-appimage/window-manager-lifecycle.json`, inside the retained
+artifact tree, and prints bounded, allowlisted failed-check/startup diagnostics.
+Its adjacent application and startup logs are retained too. Fixtures cover the
+actual default invocation, malformed reports, failure details and owned-process
+cleanup. The [diagnostic run](https://github.com/sdevil7th/OpenStudio/actions/runs/40075858881)
+then passed all 85 Openbox lifecycle checks and all ten frontend roles reached
+ready, using the extracted AppImage executable. This does not identify the
+earlier exit-2 cause. Its subsequent launcher suite stopped before launching
+because the retained report made that suite's output directory nonempty.
+Keep the window-manager report in the parent and run the launcher suite in
+fresh `output/linux-appimage/launcher`; both remain inside the uploaded artifact
+tree. The freshness guard must continue rejecting existing evidence, and
+neither a passing Openbox check nor a composition fixture qualifies the final
+launcher suite on its own.
 
 ## Desktop and recording acceptance
 
