@@ -48,8 +48,14 @@ The user requested certification checks and a release PR, with publication held.
   the system WebKitGTK check. Group 4 was cancelled after 30 minutes downloading
   Ubuntu browser dependencies, before its tests started. The remaining group
   still needs a completed run; GitHub initially refused the scoped retry while
-  the cancelled run remained open. Linux now also uses four test groups for
-  faster feedback, with the system WebKitGTK check retained once per run.
+  the cancelled run remained open. At 17:55 UTC GitHub was reporting an
+  [Actions incident](https://www.githubstatus.com/incidents/h02n9572mx9y), opened
+  at 17:40 UTC; the documentation push had not produced a new run either.
+  **The remaining Linux browser group is infrastructure-blocked, not passed.**
+  Linux now also uses four test groups for faster feedback, with the system
+  WebKitGTK check retained once per run. After Actions recovers, finish group 4
+  on the unchanged application source and retain its result before clearing this
+  software verification item. No more retries were started during the outage.
   Native-schema editor tests run separately after the native app build. Tests
   requiring a private project or explicit native tempo-preview input do not run
   automatically in this general browser suite.
