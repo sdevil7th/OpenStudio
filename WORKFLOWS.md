@@ -56,6 +56,15 @@ remains `python tools/openstudio-support.py`. Test with
 with `python tools/test-packaged-support.py --bundle <runtime-folder>`. Tool-only
 changes do not change native app/frontend assets or require a DAW rebuild.
 
+Ordinary builds use `OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS=OFF`. For an explicitly
+requested profiling reproduction only, configure a separate build directory with
+`-DOPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS=ON`. This enables measurements that have
+runtime cost; it is not the shipping performance baseline. Packaging validates
+`OpenStudio.build-policy.json` and rejects missing, mismatched or instrumented
+builds. Do not edit that generated policy to bypass the gate. An unavailable
+callback measurement must remain `not_asserted` in qualification reports.
+
+
 ## Frontend checks
 
 ```sh

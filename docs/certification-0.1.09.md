@@ -6,6 +6,19 @@ The user requested certification checks and a release PR, with publication held.
 
 ## Current evidence
 
+- **Pass — complete Windows candidate, locally:** Release and Debug were rebuilt
+  with callback profiling compiled out and no C++ warnings. The current frontend
+  build and all 3,136 tests passed; the native render/export matrix passed all 422
+  checks. The frozen 0.1.09 Support executable passed collection, privacy, audio,
+  MIDI, GUI construction and reviewed-archive checks without external Python/Node.
+  The actual MSIX packed/unpacked successfully and every payload hash matched.
+  Its Store version is `0.1.9.0` (MSIX requires canonical numeric components);
+  the application and notes retain `0.1.09`. This unsigned package was not
+  registered over the user's installed Store app or submitted to Microsoft.
+- **In progress — full candidate CI:** PR #36 now builds the actual Windows
+  installer/MSIX, macOS universal DMG and Linux packages, checks installed-app
+  behavior and runs WACK separately. See the latest PR checks for their final
+  state; fixture success below is not a substitute for those results.
 - **Pass — support packaging:** the [six-job qualification](https://github.com/sdevil7th/OpenStudio/actions/runs/41841385666)
   covers Windows installer/MSIX fixtures, native macOS and universal Finder/DMG
   launches on both architectures, and Linux DEB/RPM/AppImage payload checks.
@@ -18,6 +31,8 @@ The user requested certification checks and a release PR, with publication held.
   8-sample test added 19 engine deadline misses and 21 host overrun counts during
   a 59.979-second steady recording interval. These are not proven physical driver
   loss or an audition result. See [the exact-artifact report](workflow-review-qualification.md).
+- **Fail — fresh candidate 8-sample capacity checks:** see the measured cases
+  below. Compiling out the ordinary profiler did not establish the strict target.
 - **Blocked — macOS notarization:** the [read-only access check](https://github.com/sdevil7th/OpenStudio/actions/runs/41845529536)
   found none of the six required Apple signing/notarization values in GitHub or
   the configured Doppler project. The user confirmed credentials are unavailable.
@@ -27,14 +42,56 @@ The user requested certification checks and a release PR, with publication held.
   0.1.8.0; it is not the proposed candidate and must not be replaced for a test.
 - **Not asserted — WACK and Microsoft certification:** the Windows App
   Certification Kit is installed locally, but this session is not elevated and
-  no real 0.1.09 MSIX has been qualified. Old packages and dummy executables cannot
-  establish candidate certification.
+  WACK has not run locally. Actual MSIX payload validation passed; it does not
+  establish certification. The separate CI job retains WACK's XML and package
+  hash and fails closed if its prerequisites or checks fail.
 
 Merging a PR does not currently run Store submission. The release workflow uses
 release tags and contains public-release steps. Do not create a `v0.1.09` tag or
 run that workflow merely to expose Store actions. A release PR can show ordinary
 build/package checks; account-backed submission needs an explicitly permitted,
 nonpublishing path and a verified manual publishing hold.
+
+## Fresh Windows hardware evidence — 4 November 2026
+
+Release executable SHA-256:
+`84e529369dd7e2655f420f5130558ece85359dd92c470865889b692dcfa5719b`.
+The retained local executable hash must be checked against this record before
+reusing an artifact. The candidate has `callbackDiagnostics: false` in its build
+policy. Support and build jobs were closed during these runs.
+
+The explicitly launched `--nam-live-callback-probe` used the physical Audient
+ASIO driver at 48 kHz, one or four NAM tracks with 4x oversampling, three seconds
+of warmup and 30 seconds of measurement per case. It supplied synthetic input,
+ignored physical microphone input and silenced physical outputs. This probe adds
+its own measurement work only while explicitly running; it is not an audition,
+a game-contention test or a repeat of the earlier 31-track UI workload.
+
+| NAM tracks | Buffer | Mean / p99 / max callback, microseconds | Late callbacks | Capacity |
+| --- | --- | --- | --- | --- |
+| 1 | 8 samples | 58.0 / 113.3 / 422.5 | 227 / 180,000 | **fail** |
+| 4 | 8 samples | 77.8 / 155.6 / 441.5 | 451 / 180,000 | **fail** |
+| 1 | 64 samples | 194.5 / 302.1 / 455.0 | 0 / 22,500 | **pass**, this short case only |
+| 4 | 64 samples | 282.3 / 500.0 / 932.8 | 0 / 22,500 | **pass**, this short case only |
+
+The four-track / 8-sample case also recorded 3,425 worker deadline misses and
+6,183 quarantined blocks across warmup plus measurement. Other cases recorded
+zero worker deadline misses. Those worker figures have a different interval from
+the table's measured callbacks and must not be added together. Raw recording
+integrity passed in all four cases: exact frame counts, format and synthetic
+input comparison within PCM tolerance. Successful raw capture does not establish
+continuous monitoring through the overloaded processing chain.
+
+Driver xrun counters were unsupported (`-1`), so physical driver loss is
+**not_asserted**. Subjective quality, physical monitoring/loopback latency, game
+contention and long-session continuity are **not_asserted**. These data are
+**diagnostic_only** for cause attribution. There was no matched before/after
+test, so no performance improvement or regression is inferred from the numbers.
+Larger-buffer passes do not clear the failed 8-sample gate.
+
+Local evidence is retained under `output/candidate-0.1.09/hardware/`, with
+separate `1-tracks/result.json` and `4-tracks/result.json` reports. Those contain
+local device/preset details and are not automatically uploaded or committed.
 
 ## Physical test matrix
 
@@ -120,19 +177,15 @@ Without Apple credentials, record normal first-download acceptance as
 ## What diagnostics can and cannot establish
 
 The standalone support tool adds no callback hooks or background collector.
-This is distinct from diagnostics already present in the application branch:
-`AudioEngine::audioDeviceIOCallbackWithContext` reads the clock and updates
-timing counters even when detailed tracing is disabled, and samples stage
-timings every 16 callbacks. `RealtimeCallbackTrace` also allocates its fixed
-queue when the engine is constructed. These existing diagnostics are not
-zero-cost; their contribution to the observed deadline misses is unmeasured.
-
-Before making a literal zero-overhead claim for all application diagnostics,
-audit these operations and their consumers. Compile diagnostic-only work and
-storage out of the production configuration if that is the required policy,
-while retaining timing needed by actual engine scheduling. A runtime off
-switch alone does not eliminate the checks. This is a review finding and a
-proposed follow-up, not an implemented or measured optimization.
+Ordinary builds now also compile out callback timing histograms, stage sampling,
+arrival-gap profiling and paired trace storage. `OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS`
+defaults to OFF; release packaging rejects an enabled or missing build policy.
+Timing fields are absent/unavailable, never a false zero-miss pass. The callback
+start clock remains because MIDI event placement and worker deadlines need it;
+existing meters, transport state and recording/plugin fault handling remain.
+Those engine operations are not zero-cost. The promise is no additional runtime
+work from the closed support companion, not a claim that the DAW has no existing
+status handling or that all workloads meet every hardware deadline.
 
 The next timing investigation should compare the same Release configuration,
 interface and 48 kHz / 8-sample setting with a minimal project versus the

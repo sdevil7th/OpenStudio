@@ -32,6 +32,8 @@ $packageVersion = [version]$Version
 foreach ($part in @($packageVersion.Major, $packageVersion.Minor, $packageVersion.Build, $packageVersion.Revision)) {
     if ($part -gt 65535) { throw 'Package version components must be at most 65535.' }
 }
+# MSIX rejects leading zeros (the app's 0.1.09 spelling remains in its notes).
+$Version = $packageVersion.ToString()
 $source = Resolve-RepoPath $SourceDir
 $output = Resolve-RepoPath $OutputDir
 foreach ($file in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'OpenStudioSupport.exe', 'ffmpeg.exe', 'onnxruntime.dll',

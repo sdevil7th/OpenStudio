@@ -2,8 +2,11 @@
 
 Unreleased development work added after app commit `f45637be`. The support companion
 is packaged separately for Windows, macOS and Linux. It adds no collectors, timers,
-threads, buffers, callbacks, uploads, or logging to the running DAW. Existing app
-diagnostics remain unchanged; this is not a claim that those diagnostics cost zero.
+threads, buffers, callbacks, uploads, or logging to the running DAW. Ordinary
+0.1.09 candidate builds also compile out callback timing profiling and trace storage.
+Essential engine scheduling, meters and existing fault handling remain; this is
+not a claim that those engine operations cost zero. Missing timing is reported as
+unavailable, never as zero failures. See [candidate qualification](certification-0.1.09.md).
 No release containing this work has been published here.
 
 **Close OpenStudio before running support tools. Keep it closed until the operation
@@ -260,8 +263,9 @@ check package identity and unregister. Linux tests execute support after DEB/RPM
 round trips and inside its companion AppImage. macOS tests mount a read-only DMG
 and activate the Finder launcher. These are support-distribution tests; they do not
 claim Store certification, notarization, clean-machine full-DAW readiness, hardware
-recording performance or subjective audio quality. Source/audio execution paths in
-the DAW are unchanged. Existing release-note and signing gates remain mandatory.
+recording performance or subjective audio quality. These tests isolate support
+distribution; the complete candidate also changes the DAW and requires its separate
+qualification. Existing release-note and signing gates remain mandatory.
 
 ### Recorded development qualification — 2026-11-04
 

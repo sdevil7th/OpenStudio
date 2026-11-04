@@ -3117,6 +3117,11 @@ Dumps are optional and unredacted. See [Offline support and export inspection](o
 for platform launch instructions, source-tool setup, comparisons and limits. A valid file or
 matching duration alone does not prove that every track was rendered.
 
+Ordinary 0.1.09 candidate builds do not collect callback timing profiles. Timing
+readouts may therefore be unavailable rather than zero. Existing device, plugin
+and recording failure information can still help, but a later support bundle
+cannot reconstruct unmeasured CPU scheduling or RAM pressure at a past glitch.
+
 **Symptoms**: Rendered file is silent or contains only silence.
 
 **Solutions**:

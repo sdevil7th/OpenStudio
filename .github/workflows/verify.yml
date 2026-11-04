@@ -230,7 +230,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Validate candidate release notes
-        run: python tools/validate-release-notes.py --version "${{ env.VERSION }}"
+        shell: pwsh
+        run: python tools/validate-release-notes.py --version "$env:VERSION"
 
       - name: Install Inno Setup for installer regression tests
         shell: pwsh
@@ -635,7 +636,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Validate candidate release notes
-        run: python tools/validate-release-notes.py --version "${{ env.VERSION }}"
+        shell: pwsh
+        run: python tools/validate-release-notes.py --version "$env:VERSION"
 
       - name: Test POSIX desktop ownership and lifecycle identity
         shell: bash
