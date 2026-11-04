@@ -2,6 +2,7 @@
 #pragma once
 #include "RealtimeTrackExecutor.h"
 #include "RealtimeCallbackTrace.h"
+#include "RealtimeDiagnosticsConfig.h"
 
 #include <JuceHeader.h>
 #include "TrackProcessor.h"
@@ -406,11 +407,30 @@ public:
     // Explicit CLI diagnostics only. Reporter is the sole queue consumer;
     // ordinary UI/debug snapshots never drain or enable paired tracing.
     void setRealtimeCallbackTraceEnabled(bool enabled, bool threadCycles = false) noexcept
-    { realtimeCallbackTrace.setEnabled(enabled, threadCycles); }
+    {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+        realtimeCallbackTrace.setEnabled(enabled, threadCycles);
+#else
+        juce::ignoreUnused(enabled, threadCycles);
+#endif
+    }
     std::size_t drainRealtimeCallbackTrace(RealtimeCallbackTraceEvent* destination, std::size_t maximum) noexcept
-    { return realtimeCallbackTrace.drain(destination, maximum); }
+    {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+        return realtimeCallbackTrace.drain(destination, maximum);
+#else
+        juce::ignoreUnused(destination, maximum);
+        return 0;
+#endif
+    }
     RealtimeCallbackTraceStats getRealtimeCallbackTraceStats() const noexcept
-    { return realtimeCallbackTrace.getStats(); }
+    {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+        return realtimeCallbackTrace.getStats();
+#else
+        return {};
+#endif
+    }
     
     // Plugin State Serialization (F2 - Project Save/Load)
     juce::String getPluginState(const juce::String& trackId, int fxIndex, bool isInputFX);
@@ -1031,6 +1051,7 @@ private:
         bool useDefaultDevices);
     juce::File getDeviceSettingsFile() const;
     void resetAudioCallbackWindowTelemetry() noexcept;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     void recordAudioCallbackTiming(double callbackProcessMs,
                                    double callbackEndWallTimeMs,
                                    double expectedBlockMs,
@@ -1039,6 +1060,7 @@ private:
     void recordAudioCallbackStageTiming(
         const std::array<double, 5>& stageProcessMs,
         double callbackEndWallTimeMs) noexcept;
+#endif
 #if JUCE_WINDOWS
     void registerWindowsAudioCallbackMMCSS() noexcept;
 #endif
@@ -1169,6 +1191,7 @@ private:
     // count/value in the low 32 bits. The callback is the sole writer; message
     // thread diagnostics can therefore read an exact, lock-free rolling set of
     // one-second buckets without clearing memory on the realtime thread.
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     std::array<std::atomic<uint64>, audioCallbackHistogramCellCount>
         audioCallbackDurationHistogram {};
     std::array<std::atomic<uint64>, audioCallbackWindowSeconds>
@@ -1178,6 +1201,7 @@ private:
     std::array<AudioCallbackStageWindow, audioCallbackStageCount>
         audioCallbackStageWindows {};
     RealtimeCallbackTrace realtimeCallbackTrace;
+#endif
     std::atomic<double> firstAudioCallbackTelemetryWallTimeMs { 0.0 };
     std::atomic<bool> windowsAudioCallbackMMCSSRequested { false };
     std::atomic<bool> windowsAudioCallbackMMCSSActive { false };

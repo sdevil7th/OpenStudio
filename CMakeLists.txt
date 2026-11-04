@@ -63,6 +63,7 @@ endif()
 option(OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK "Allow dev/unbundled builds to bootstrap AI tools from a system Python interpreter" ON)
 option(OPENSTUDIO_REQUIRE_ARA "Fail configuration when the ARA SDK is unavailable" ON)
 option(OPENSTUDIO_REQUIRE_ASIO "Fail configuration when the ASIO SDK is unavailable for a Windows build" OFF)
+option(OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS "Instrument audio callbacks for explicit diagnostic builds (never release packages)" OFF)
 
 # Some third-party dependencies still expect CMAKE_BUILD_TYPE to exist even
 # under multi-config generators like Visual Studio. Seed a harmless default
@@ -616,7 +617,8 @@ target_sources(OpenStudio PRIVATE
     Source/ARAHostController.cpp
 )
 
-target_compile_definitions(OpenStudio PRIVATE OPENSTUDIO_BUILD_CONFIGURATION="$<CONFIG>")
+target_compile_definitions(OpenStudio PRIVATE OPENSTUDIO_BUILD_CONFIGURATION="$<CONFIG>"
+    OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS=$<BOOL:${OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS}>)
 if(WIN32)
     # Tiny hidden helper: no JUCE, WebView, audio device, plug-in or Python startup.
     add_executable(OpenStudioCrashReporter Source/CrashReporterMain.cpp Source/CrashReportWriter.cpp)
@@ -1056,6 +1058,16 @@ endfunction()
 set(OPENSTUDIO_VERSION_MANIFEST
     "${CMAKE_CURRENT_BINARY_DIR}/OpenStudio.version")
 file(WRITE "${OPENSTUDIO_VERSION_MANIFEST}" "${OPENSTUDIO_APP_VERSION}\n")
+if(OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS)
+    set(OPENSTUDIO_CALLBACK_DIAGNOSTICS_JSON true)
+else()
+    set(OPENSTUDIO_CALLBACK_DIAGNOSTICS_JSON false)
+endif()
+set(OPENSTUDIO_BUILD_POLICY "${CMAKE_CURRENT_BINARY_DIR}/OpenStudio.build-policy.json")
+file(WRITE "${OPENSTUDIO_BUILD_POLICY}"
+    "{\"version\":\"${OPENSTUDIO_APP_VERSION}\",\"callbackDiagnostics\":${OPENSTUDIO_CALLBACK_DIAGNOSTICS_JSON}}\n")
+openstudio_copy_runtime_file("${OPENSTUDIO_BUILD_POLICY}" "OpenStudio.build-policy.json"
+    "Copying callback instrumentation build policy")
 openstudio_copy_runtime_file(
     "${OPENSTUDIO_VERSION_MANIFEST}"
     "OpenStudio.version"

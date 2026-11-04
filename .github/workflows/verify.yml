@@ -34,6 +34,7 @@ jobs:
         run: >-
           python3 -m unittest
           tests.test_release_notes
+          tests.test_release_build_policy
           tests.test_build_process_lifecycle
           tests.test_juce_lv2_identifier_patch
           tests.test_juce_mac_browser_navigation_patch
@@ -252,6 +253,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Qualify standalone offline support
+        shell: pwsh
+        run: |
+          python tools/build-support-tool.py --version 0.0.0
+          if ($LASTEXITCODE -ne 0) { throw 'Support build failed.' }
+          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support -q
+          if ($LASTEXITCODE -ne 0) { throw 'Support regression failed.' }
+          python tools/validate-support-tool.py --bundle output/support-package/OpenStudioSupport --version 0.0.0
+          if ($LASTEXITCODE -ne 0) { throw 'Support inventory failed.' }
+          python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged support qualification failed.' }
 
       - name: Install ASIO SDK
         shell: pwsh

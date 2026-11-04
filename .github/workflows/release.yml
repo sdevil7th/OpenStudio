@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       notes_file: ${{ steps.notes.outputs.notes_file }}
+      app_version: ${{ steps.normalized.outputs.version }}
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
       NOTES_FILE: ${{ github.event.inputs.release_notes_file }}
@@ -35,9 +36,18 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Normalize support package version
+        id: normalized
+        run: echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
       - name: Validate exact-version release notes before building
         id: notes
         run: python3 tools/validate-release-notes.py --version "$VERSION" --notes-file "$NOTES_FILE" --github-output "$GITHUB_OUTPUT"
+
+  support-packages:
+    needs: validate-release-notes
+    uses: ./.github/workflows/support-qualification.yml
+    with:
+      version: ${{ needs.validate-release-notes.outputs.app_version }}
 
   build-windows:
     needs: validate-release-notes
@@ -192,6 +202,20 @@ jobs:
       - name: Build OpenStudio
         shell: pwsh
         run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
+
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Build and qualify standalone support (Windows)
+        shell: pwsh
+        run: |
+          python tools/build-support-tool.py --version $env:VERSION --stage "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          if ($LASTEXITCODE -ne 0) { throw 'Support build failed.' }
+          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support -q
+          if ($LASTEXITCODE -ne 0) { throw 'Support regression failed.' }
+          python tools/test-packaged-support.py --bundle "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          if ($LASTEXITCODE -ne 0) { throw 'Support qualification failed.' }
 
       - name: Verify signed updater (Windows Release)
         shell: pwsh
@@ -477,7 +501,7 @@ jobs:
           if-no-files-found: error
 
   build-macos:
-    needs: validate-release-notes
+    needs: [validate-release-notes, support-packages]
     runs-on: macos-14
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
@@ -615,6 +639,18 @@ jobs:
         shell: bash
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: support-macos-universal
+          path: output/support-universal
+      - name: Stage universal offline support
+        run: |
+          tar -xzf output/support-universal/support-macos-universal.tgz -C output/support-universal
+          APP="$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.app"
+          ditto output/support-universal/OpenStudioSupport.app "$APP/Contents/Helpers/OpenStudioSupport.app"
+          ditto 'output/support-universal/OpenStudio Support.app' "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio Support.app"
+          python3 tools/validate-support-tool.py --bundle "$APP" --version "$VERSION"
+
       - name: Verify signed updater (macOS Release)
         shell: bash
         run: |
@@ -725,7 +761,7 @@ jobs:
           if-no-files-found: error
 
   build-linux:
-    needs: validate-release-notes
+    needs: [validate-release-notes, support-packages]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -826,6 +862,16 @@ jobs:
       - name: Build OpenStudio
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: support-linux-x64
+          path: output/support-native
+      - name: Stage offline support
+        run: |
+          tar -xzf output/support-native/support-linux-x64.tgz -C output/support-native
+          cp -a output/support-native/OpenStudioSupport/. "$BUILD_DIR/OpenStudio_artefacts/Release/"
+          python3 tools/validate-support-tool.py --bundle "$BUILD_DIR/OpenStudio_artefacts/Release" --version "$VERSION"
+
       - name: Verify signed updater (Linux Release)
         shell: bash
         run: |
@@ -903,6 +949,8 @@ jobs:
           name: linux-release
           path: |
             dist/linux/OpenStudio-*-x86_64.AppImage
+            dist/linux/OpenStudioSupport-*-x86_64.AppImage
+            dist/linux/OpenStudio-*-with-support.tar.gz
             dist/linux/OpenStudio-*-ubuntu-22.04-amd64.deb
           if-no-files-found: error
 
@@ -1153,6 +1201,8 @@ jobs:
             dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip
             dist/macos/OpenStudio-macOS.dmg
             dist/linux/OpenStudio-*-x86_64.AppImage
+            dist/linux/OpenStudioSupport-*-x86_64.AppImage
+            dist/linux/OpenStudio-*-with-support.tar.gz
             dist/linux/OpenStudio-*-ubuntu-22.04-amd64.deb
             dist/release-publish-assets/OpenStudio-checksums.txt
             dist/release-publish-assets/OpenStudio-release-latest.json

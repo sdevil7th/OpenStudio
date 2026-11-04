@@ -94,7 +94,9 @@ public:
         : engine(engineToRead), report(std::move(reportToWrite))
     {
         report.getParentDirectory().createDirectory();
-        if (callbackTraceToWrite != juce::File())
+        if (callbackTraceToWrite != juce::File() && !OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS)
+            juce::Logger::writeToLog("Callback trace unavailable: use an explicit callback-diagnostics build.");
+        if (callbackTraceToWrite != juce::File() && OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS)
         {
             callbackTraceFile = std::move(callbackTraceToWrite);
             if (callbackTraceFile == report

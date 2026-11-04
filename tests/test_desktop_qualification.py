@@ -60,6 +60,9 @@ class DesktopQualification(unittest.TestCase):
             self.assertEqual(recording.evaluate(known | {"audioDeviceXRunCount": 2}, known, path, 1)["status"], "fail")
             self.assertEqual(recording.evaluate(known, known | {"audioDeviceStopCount": 1}, path, 1)["status"], "fail")
             self.assertEqual(recording.evaluate({}, {}, path, 1)["status"], "not_asserted")
+            unavailable = known | {"audioCallbackTimingAvailable": False}
+            self.assertEqual(recording.evaluate(unavailable, unavailable, path, 1)["status"], "not_asserted")
+            self.assertEqual(recording.evaluate(known, known | {"audioCallbackDeadlineMissCount": 1}, path, 1)["status"], "fail")
             self.assertEqual(recording.evaluate(known, known, path, 60)["status"], "fail")
 
 

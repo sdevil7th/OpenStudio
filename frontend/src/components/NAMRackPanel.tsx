@@ -2970,7 +2970,9 @@ export function NAMRackPanel({
       label: namRealtimeBlocked ? "Blocked" : trackExecutionWarning ? "Overload" : dspBudgetLabel,
       alert: dspBudgetAlert,
       meterPct: namRealtimeBlocked ? undefined : dspBudgetMeterPct,
-      title: audioBlockBudgetMs > 0
+      title: audioDebugSnapshot?.audioCallbackTimingAvailable === false
+        ? "Callback timing is not collected in this build"
+        : audioBlockBudgetMs > 0
         ? `Callback ${audioCallbackMs.toFixed(2)} ms / ${audioBlockBudgetMs.toFixed(2)} ms block budget; device-session max ${audioCallbackMaxMs.toFixed(2)} ms (${dspMaxBudgetLabel}); over-budget callbacks ${audioDeadlineMisses}${trackExecutionStatus.hasRecordedFailures ? `; lifetime track deadline misses ${trackExecutionStatus.deadlineMisses}; rejected jobs ${trackExecutionStatus.rejectedTrackJobs}; cancelled jobs ${trackExecutionStatus.cancelledJobs}; rejected batches ${trackExecutionStatus.rejectedBatches}; quarantined blocks ${trackExecutionStatus.quarantinedBlocks}` : ""}`
         : "DSP callback budget is waiting for native audio debug data",
     },

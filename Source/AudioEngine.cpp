@@ -74,6 +74,27 @@
 
 namespace
 {
+void publishCallbackDiagnosticsAvailability(juce::DynamicObject& object)
+{
+    object.setProperty("audioCallbackTimingAvailable", OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS != 0);
+#if !OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    object.setProperty("audioCallbackTimingStatus", "not_collected_in_this_build");
+    for (const auto* name : {
+        "lastAudioCallbackProcessMs", "maxAudioCallbackProcessMs",
+        "audioCallbackDeadlineMissCount", "lifetimeAudioCallbackDeadlineMissCount",
+        "audioCallbackArrivalGapCount", "lastAudioCallbackArrivalGapCounter",
+        "lastAudioCallbackArrivalGapMs", "maxAudioCallbackArrivalGapMs",
+        "audioCallbackDeadlineMissBurstCount", "lastAudioCallbackDeadlineMissCounter",
+        "lastAudioCallbackDeadlineMissProcessMs", "lastAudioCallbackDeadlineMissWhileRecording",
+        "audioCallbackScopedNoDenormalsCount", "lastDeviceOutputDiscontinuityDeadlineMissCount",
+        "postTrackPlaybackPeak", "postMonitoringInputPeak", "postMasterFxPeak",
+        "postMonitoringFxPeak", "finalOutputPeak",
+        "signalChainDiagnosticPeakSampleIntervalCallbacks", "signalChainDiagnosticPeaksPreserveLastSample" })
+        object.removeProperty(name);
+#endif
+}
+
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
 struct CallbackTraceThreadSample
 {
     std::uint64_t threadId = 0, cycles = 0;
@@ -104,6 +125,7 @@ CallbackTraceThreadSample captureCallbackTraceThread(bool includeCycles) noexcep
     return sample;
 }
 
+#endif
 juce::String builtInInstanceIdentity(const std::shared_ptr<juce::AudioProcessor>& processor);
 void registerBuiltInInstanceIdentity(const std::shared_ptr<juce::AudioProcessor>&, const juce::String&);
 // Called by control/state workers with the route publication lease held.
@@ -126,6 +148,7 @@ bool restorePreparedProcessorState(juce::AudioProcessor& processor, const juce::
     return !isolated || isolated->isHealthy();
 }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
 constexpr std::uint64_t packEpochValue(
     std::uint32_t epoch,
     std::uint32_t value) noexcept
@@ -174,6 +197,7 @@ void updateEpochMaximum(
         maximum.store(packEpochValue(epoch, value), std::memory_order_relaxed);
 }
 
+#endif
 void addMonoHardwareInputToStereoProcessingPath(
     juce::AudioBuffer<float>& processingBuffer,
     const float* monoInput,
@@ -4376,6 +4400,7 @@ void AudioEngine::requestAudioInputAccess(std::function<void(bool)> completion)
 
 void AudioEngine::resetAudioCallbackWindowTelemetry() noexcept
 {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     for (auto& cell : audioCallbackDurationHistogram)
         cell.store(0, std::memory_order_relaxed);
     for (auto& cell : audioCallbackWindowMissCounts)
@@ -4391,8 +4416,10 @@ void AudioEngine::resetAudioCallbackWindowTelemetry() noexcept
     }
     firstAudioCallbackTelemetryWallTimeMs.store(
         0.0, std::memory_order_relaxed);
+#endif
 }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
 void AudioEngine::recordAudioCallbackTiming(
     double callbackProcessMs,
     double callbackEndWallTimeMs,
@@ -4539,6 +4566,7 @@ void AudioEngine::recordAudioCallbackStageTiming(
                 durationNanoseconds + 0.5));
     }
 }
+#endif
 
 #if JUCE_WINDOWS
 void AudioEngine::registerWindowsAudioCallbackMMCSS() noexcept
@@ -6446,17 +6474,22 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     int numSamples,
                                                     const juce::AudioIODeviceCallbackContext& context)
 {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto traceOptions = realtimeCallbackTrace.getOptions();
     const bool tracingCallback = (traceOptions & RealtimeCallbackTrace::enabledFlag) != 0;
     const auto callbackEntryTicks = tracingCallback ? juce::Time::getHighResolutionTicks() : 0;
+#endif
     const double callbackStartWallTimeMs = juce::Time::getMillisecondCounterHiRes();
 #if JUCE_WINDOWS
     registerWindowsAudioCallbackMMCSS();
 #endif
     juce::ScopedNoDenormals noDenormals;
     juce::ignoreUnused(context);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     audioCallbackScopedNoDenormalsCount.fetch_add (1, std::memory_order_relaxed);
+#endif
     const uint64 callbackCounter = audioCallbackCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const bool shouldSampleAudioCallbackStages = tracingCallback ||
         (callbackCounter
          % audioCallbackStageSampleInterval) == 0;
@@ -6465,6 +6498,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     std::int64_t sampledTrackPlaybackTicks = 0;
     std::int64_t sampledMasterMonitoringTicks = 0;
     std::int64_t sampledMeteringSyncTicks = 0;
+#endif
     lastAudioCallbackCounter.store(callbackCounter, std::memory_order_relaxed);
     // One transport snapshot owns the entire block. A prepared start published
     // midway through a stopped callback must not advance that unrecorded block.
@@ -6486,6 +6520,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                / currentSampleRate)
                   * 1000.0
             : 0.0;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     std::optional<RealtimeCallbackTraceEvent> pairedTrace;
     if (tracingCallback)
     {
@@ -6536,11 +6571,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (stages != nullptr) event.stageMs = *stages;
         realtimeCallbackTrace.tryPush(event);
     };
+#endif
     if (callbackBlockDurationMs > 0.0)
         lastAudioBlockDurationMs.store(
             callbackBlockDurationMs,
             std::memory_order_release);
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     // Processing-duration telemetry cannot detect a callback that the driver
     // delivered late. Use the already-read callback timestamp to separately
     // retain arrival-gap evidence without another clock query.
@@ -6581,6 +6618,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
+#endif
     // Clear outputs first
     for (int i = 0; i < numOutputChannels; ++i)
         juce::FloatVectorOperations::clear (outputChannelData[i], numSamples);
@@ -6611,6 +6649,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             oversizedAudioCallbackCount.fetch_add(
                 1, std::memory_order_relaxed);
         }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         const double callbackEndWallTimeMs =
             finishCallbackTraceClock();
         recordAudioCallbackTiming(
@@ -6620,6 +6659,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             callbackCounter,
             callbackStartedWhileRecording);
         publishCallbackTrace(callbackEndWallTimeMs, nullptr);
+#endif
         return;
     }
 
@@ -6636,6 +6676,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 numSamples,
                 tunerRouteGeneration(route));
         }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         const double callbackEndWallTimeMs =
             finishCallbackTraceClock();
         const double callbackDurationMs =
@@ -6647,6 +6688,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             callbackCounter,
             callbackStartedWhileRecording);
         publishCallbackTrace(callbackEndWallTimeMs, nullptr);
+#endif
         return;
     }
 
@@ -6709,14 +6751,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     jassert(rtTracks != nullptr);
     if (rtTracks == nullptr)
     {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         if (pairedTrace) publishCallbackTrace(finishCallbackTraceClock(), nullptr);
+#endif
         return;
     }
     const auto blockCaptureEpoch = pluginAutomationClock->epoch.load(std::memory_order_acquire);
     const auto blockStartSamplePosition =
         currentSamplePosition.load(
             std::memory_order_acquire);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (pairedTrace) pairedTrace->startSamplePosition = blockStartSamplePosition;
+#endif
     pluginAutomationClock->update(static_cast<double>(blockStartSamplePosition) / juce::jmax(1.0, currentSampleRate), currentSampleRate, callbackPlaying);
     const ScopedPluginAutomationProcessing blockCaptureContext(static_cast<double>(blockStartSamplePosition) / juce::jmax(1.0, currentSampleRate), currentSampleRate, blockCaptureEpoch, callbackPlaying);
     // Every routed buffer represents exactly one callback. Clearing at the
@@ -6741,9 +6787,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
     const bool shouldLogCallbackSummary = kAudioPathDebugLogs
         && (((callbackCounter % 50) == 1) || ((callbackPlaying || callbackRecording) && firstCallbackAfterTransportStart));
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const bool shouldSampleSignalChainPeaks =
         shouldSampleAudioCallbackStages
         || kAudioPathDebugLogs;
+#else
+    constexpr bool shouldSampleSignalChainPeaks = kAudioPathDebugLogs;
+#endif
     float postTrackPlaybackPeak = 0.0f;
     float postMonitoringInputPeak = 0.0f;
     // preTrackPeak is only ever used in logging — compute it only when logging is active.
@@ -6774,10 +6824,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // position for the samples being output right now.  The increment is at the
     // very end of the callback (search "Advance transport position").
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledPlaybackSetupStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
 
     // The common no-marker path is lock-free. Reuse this block's resolved
     // tempo for every downstream timing consumer.
@@ -6802,12 +6854,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // record latch must not repeatedly restart the click at one position.
             callbackPlaying);
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledPlaybackTicks +=
             juce::Time::getHighResolutionTicks()
             - sampledPlaybackSetupStartTicks;
     }
+#endif
 
     const bool useHybrid64Summing = processingPrecisionMode == ProcessingPrecisionMode::Hybrid64
                                  && reusableMasterBufferDouble.getNumChannels() >= numOutputChannels
@@ -6828,10 +6882,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // Use cached solo state (updated when solo changes, avoids scanning every callback)
     bool anySoloed = cachedAnySoloed.load();
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledTrackStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
 
     // Both execution modes share input preparation, raw recording and final
     // reduction. Only the independent per-track DSP runs on audio workers.
@@ -6952,10 +7008,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 - trackOffsetSec;
 
             // Fill buffer with playback audio from clips
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
             const auto sampledClipPlaybackStartTicks =
                 shouldSampleAudioCallbackStages
                     ? juce::Time::getHighResolutionTicks()
                     : 0;
+#endif
             playbackEngine.fillTrackBuffer(
                 trackId,
                 trackBuffer,
@@ -6965,6 +7023,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 track->getTrackChannelCount() == 1,
                 trackEntry.playbackContinuityKey
             );
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
             if (shouldSampleAudioCallbackStages)
             {
                 const auto elapsedTicks =
@@ -6973,6 +7032,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 sampledPlaybackTicks += elapsedTicks;
                 sampledTrackPlaybackTicks += elapsedTicks;
             }
+#endif
+
             if (shouldSampleSignalChainPeaks)
             {
                 postTrackPlaybackPeak = juce::jmax(
@@ -7334,6 +7395,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledTrackTicks =
@@ -7343,12 +7405,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     - sampledTrackStartTicks
                     - sampledTrackPlaybackTicks);
     }
+#endif
 
     // ========== FX Chains (extracted helpers) ==========
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledPitchScrubStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
     if (playbackEngine.mayRenderPitchScrubPreview())
     {
         const bool pitchScrubBufferReady =
@@ -7393,12 +7458,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             }
         }
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledPlaybackTicks +=
             juce::Time::getHighResolutionTicks()
             - sampledPitchScrubStartTicks;
     }
+#endif
 
     // Isolated instrument audition joins only the live monitor/master path.
     // Track recording queues and offline rendering never see these notes.
@@ -7415,10 +7482,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 else outputChannelData[ch][i] += reusablePitchScrubBuffer.getSample(ch, i);
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledMasterMonitoringStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
     if (shouldSampleSignalChainPeaks)
     {
         lastPostTrackPlaybackPeak.store(
@@ -7497,12 +7566,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             finalOutputPeak,
             std::memory_order_relaxed);
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledMasterMonitoringTicks =
             juce::Time::getHighResolutionTicks()
             - sampledMasterMonitoringStartTicks;
     }
+#endif
+
     // Silence-detection log: only fires when kAudioPathDebugLogs is on.
     // Previously also fired unconditionally in release builds; removed because
     // it calls FileLogger (disk write + mutex) from the audio thread.
@@ -7521,10 +7593,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             + " finalOutputPeak=" + juce::String(finalOutputPeak, 4));
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledMeteringSyncStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
 
     // ========== Metering & Analysis (extracted helpers) ==========
     updateMasterMetering (outputChannelData, numOutputChannels, numSamples);
@@ -7546,12 +7620,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         triggerEngine.processBlock(
             numSamples, currentSampleRate, callbackTempo, currentBeat);
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledMeteringSyncTicks =
             juce::Time::getHighResolutionTicks()
             - sampledMeteringSyncStartTicks;
     }
+#endif
 
     // ========== Advance transport position ==========
     // IMPORTANT: This is intentionally AFTER all processing (metronome, playback,
@@ -7603,6 +7679,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const double callbackEndWallTimeMs =
         finishCallbackTraceClock();
     const double callbackProcessMs =
@@ -7661,6 +7738,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 std::memory_order_relaxed),
             std::memory_order_relaxed);
     }
+#endif
+
 }
 
 juce::String AudioEngine::addTrack(const juce::String& explicitId, const juce::String& initialType)
@@ -50751,10 +50830,15 @@ juce::var AudioEngine::runNAMRackRegression()
             && getNumber(secondSnapshot, "sampleRate", 0.0) > 0.0;
         const bool blockSizeSane = isFiniteProperty(secondSnapshot, "blockSize")
             && getNumber(secondSnapshot, "blockSize", 0.0) > 0.0;
-        const bool callbackMsSane = isFiniteProperty(secondSnapshot, "lastAudioCallbackProcessMs")
-            && getNumber(secondSnapshot, "lastAudioCallbackProcessMs", -1.0) >= 0.0;
-        const bool deadlineMissesSane = isFiniteProperty(secondSnapshot, "audioCallbackDeadlineMissCount")
-            && getNumber(secondSnapshot, "audioCallbackDeadlineMissCount", -1.0) >= 0.0;
+        const bool timingAvailable = static_cast<bool>(secondSnapshot.getProperty("audioCallbackTimingAvailable", false));
+        const bool callbackMsSane = timingAvailable
+            ? isFiniteProperty(secondSnapshot, "lastAudioCallbackProcessMs")
+                && getNumber(secondSnapshot, "lastAudioCallbackProcessMs", -1.0) >= 0.0
+            : secondSnapshot.getProperty("lastAudioCallbackProcessMs", {}).isVoid();
+        const bool deadlineMissesSane = timingAvailable
+            ? isFiniteProperty(secondSnapshot, "audioCallbackDeadlineMissCount")
+                && getNumber(secondSnapshot, "audioCallbackDeadlineMissCount", -1.0) >= 0.0
+            : secondSnapshot.getProperty("audioCallbackDeadlineMissCount", {}).isVoid();
         const bool tunerFieldsSane = isFiniteProperty(secondSnapshot, "tunerFrequencyHz")
             && isFiniteProperty(secondSnapshot, "tunerCents")
             && isFiniteProperty(secondSnapshot, "tunerConfidence")
@@ -72799,6 +72883,7 @@ juce::var AudioEngine::getRealtimeAudioTelemetry() const
     root->setProperty(
         "playbackTracks",
         juce::Array<juce::var>());
+    publishCallbackDiagnosticsAvailability(*root);
     return juce::var(root);
 }
 
@@ -72861,6 +72946,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("lastCallbackCounter", static_cast<int64>(lastAudioCallbackCounter.load(std::memory_order_relaxed)));
     root->setProperty("lastAudioCallbackProcessMs", lastAudioCallbackProcessMs.load(std::memory_order_relaxed));
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const double callbackTelemetryNowMs =
         juce::Time::getMillisecondCounterHiRes();
     const auto currentWindowEpoch = static_cast<std::uint32_t>(
@@ -73277,6 +73363,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty(
         "audioCallbackStageTimings",
         stageTimings);
+#endif
     root->setProperty("audioCallbackDeadlineMissCount", static_cast<int64>(audioCallbackDeadlineMissCount.load(std::memory_order_relaxed)));
     root->setProperty(
         "lifetimeAudioCallbackDeadlineMissCount",
@@ -73336,9 +73423,12 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("lastAudioCallbackDeadlineMissCounter", static_cast<int64>(lastAudioCallbackDeadlineMissCounter.load(std::memory_order_relaxed)));
     // Backward-compatible name used by the current warning UI. It is now the
     // actual rolling-window count, not an indefinitely growing miss cluster.
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     root->setProperty(
         "audioCallbackDeadlineMissBurstCount",
         static_cast<int64>(windowDeadlineMissCount));
+#endif
+
     root->setProperty("lastAudioCallbackDeadlineMissProcessMs", lastAudioCallbackDeadlineMissProcessMs.load(std::memory_order_relaxed));
     root->setProperty("lastAudioCallbackDeadlineMissWhileRecording", lastAudioCallbackDeadlineMissWhileRecording.load(std::memory_order_relaxed));
     root->setProperty(
@@ -73574,6 +73664,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("pitchRouteScrubPreviewActive", pitchRouting.scrubPreviewActive);
     root->setProperty("pitchRouteCorrectedSourceActive", pitchRouting.correctedSourceActive);
     root->setProperty("playbackTracks", playbackTracks);
+    publishCallbackDiagnosticsAvailability(*root);
     return juce::var(root);
 }
 
@@ -76125,6 +76216,28 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
     runRealtimeCallbackTraceRegression([&](const char* id, bool pass) {
         addCheck(id, pass, "Opt-in paired callback tracing preserves bounded SPSC ownership, sample identity and drop accounting.");
     });
+    {
+        auto probe = std::make_unique<AudioEngine>(DeviceStartup::offline);
+        probe->setRealtimeCallbackTraceEnabled(true);
+        for (int index = 0; index < 16; ++index)
+            probe->audioDeviceIOCallbackWithContext(nullptr, 0, nullptr, 0, 8, {});
+        const auto snapshot = probe->getAudioDebugSnapshot();
+        const auto compact = probe->getRealtimeAudioTelemetry();
+        const auto stats = probe->getRealtimeCallbackTraceStats();
+        const bool expected = OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS != 0;
+        const bool availability = static_cast<bool>(snapshot["audioCallbackTimingAvailable"]) == expected
+            && static_cast<bool>(compact["audioCallbackTimingAvailable"]) == expected;
+        const bool timing = expected
+            ? static_cast<juce::int64>(snapshot["audioCallbackWindowCallbackCount"]) == 16
+                && stats.enabled && stats.published > 0
+            : snapshot["lastAudioCallbackProcessMs"].isVoid()
+                && snapshot["audioCallbackDeadlineMissCount"].isVoid()
+                && snapshot["audioCallbackStageTimings"].isVoid()
+                && compact["audioCallbackDeadlineMissCount"].isVoid()
+                && !stats.enabled && stats.published == 0 && stats.pending == 0;
+        addCheck("callback_diagnostics_build_contract", availability && timing,
+                 "Production omits measurements and cannot enable tracing; diagnostic builds collect explicit fixture callbacks. No hardware timing claim.");
+    }
     runEditingWorkflowRegression([&](const char* id, bool pass) {
         addCheck(id, pass, "Fader silence and bounded, cancellable tempo work; no hardware timing or listening claim.");
     });

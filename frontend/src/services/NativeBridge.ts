@@ -2113,6 +2113,8 @@ export interface AudioDebugSnapshot {
     maxMs: number;
     histogramOverflowCount: number;
   }>;
+  audioCallbackTimingAvailable?: boolean;
+  audioCallbackTimingStatus?: string;
   audioCallbackDeadlineMissCount?: number;
   lifetimeAudioCallbackDeadlineMissCount?: number;
   oversizedAudioCallbackCount?: number;
