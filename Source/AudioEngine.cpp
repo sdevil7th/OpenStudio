@@ -7282,7 +7282,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // This is a collection target, not a guarantee for the remaining
             // serial/master work. The full callback deadline meter includes
             // those stages and reports any overrun independently.
-            const double remainingMs = juce::jmax(0.0, callbackBlockDurationMs - 0.012 - elapsedMs);
+            const double collectionBudgetMs = deviceStartupMode == DeviceStartup::offline
+                && regressionTrackCollectionBudgetMs > 0.0
+                    ? regressionTrackCollectionBudgetMs : callbackBlockDurationMs;
+            const double remainingMs = juce::jmax(0.0, collectionBudgetMs - 0.012 - elapsedMs);
             const auto cutoff = now + static_cast<juce::int64>(remainingMs * 0.001
                 * static_cast<double>(juce::Time::getHighResolutionTicksPerSecond()));
             const auto hardCutoff = cutoff

@@ -141,3 +141,22 @@ without adding retries, skips or longer timeouts. Website PR #32's updated CI
 also passed; this fixture correction changes no app behavior or shortcut.
 Local e2e TypeScript and 12 consecutive complete ruler runs passed
 (`output/ci-nov04/ruler-followup/repeated-ruler.log`).
+
+All three browser jobs passed on `392d66b4`, including the previously failing
+Windows/Linux jobs. The local fresh-Vite-cache sequence through the first 28 CI
+cases also passed. That remote run exposed a separate macOS ARM failure in
+`serial_parallel_exact_12`; the exact tiny-buffer gate and worker ownership tests
+passed. The full-host parity fixture required 11 helpers on a three-core runner
+to complete inside the live 512-frame deadline, coupling output correctness to
+shared-runner scheduling. Its aggregate report lacked per-parity-block evidence.
+
+The device-free exact-output and restart cases now scope a private 1,000 ms
+collection budget, while retaining the actual sample rate/block length, exact
+comparisons, worker dispatch/completion requirements, nominal callback timing
+counters, and normal deadlines for small-buffer bounds and injected late-worker
+tests. The budget is zero by default, guarded by offline startup, restored after
+each fixture callback and has no app/probe setter. Parity reports include the
+budget, first mismatch and executor counters; they assert no timing capacity.
+Local Release qualification passed four simultaneous realtime-safety runs on
+four logical CPUs and all 421 native render/export checks. This is a correctness
+fixture correction, not evidence of improved eight-sample hardware timing.

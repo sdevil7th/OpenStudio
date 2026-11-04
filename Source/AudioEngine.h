@@ -1076,6 +1076,9 @@ private:
     std::atomic<std::uint32_t> realtimeSnapshotAudioReaders { 0 };
     RealtimeTrackExecutor realtimeTrackExecutor;
     int requestedRealtimeWorkers = -1;
+    // Only the device-free regression scopes this while driving callbacks
+    // synchronously. Never configurable by the app or a hardware probe.
+    double regressionTrackCollectionBudgetMs = 0.0;
     std::atomic<int> probeTrackRecoveryGraceMicroseconds { 0 };
     const RealtimeTrackSnapshot* pendingParallelSnapshot = nullptr;
     std::atomic<uint64> parallelTrackBlocks { 0 }, parallelTrackRejectedJobs { 0 };

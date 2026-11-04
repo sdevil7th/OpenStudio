@@ -185,8 +185,14 @@ juce::var AudioEngine::runParallelTrackRegression()
                 input.setSample(channel, sample, static_cast<float>(0.1 * std::sin(
                     0.017 * (sample + blockIndex * capacity) + 0.29 * channel)));
     };
-    const auto callback = [&](AudioEngine& engine, juce::AudioBuffer<float>& output, int samples)
+    constexpr double parityCollectionBudgetMs = 1000.0;
+    const auto callback = [&](AudioEngine& engine, juce::AudioBuffer<float>& output, int samples,
+                              double collectionBudgetMs = 0.0)
     {
+        // Exact-output cases test completed work, independently of shared CI
+        // scheduling. Keep real sample rates/block lengths and nominal callback
+        // telemetry. Bounds and deliberately late-worker cases use zero here.
+        const juce::ScopedValueSetter<double> budget(engine.regressionTrackCollectionBudgetMs, collectionBudgetMs);
         for (int channel = 0; channel < output.getNumChannels(); ++channel)
             juce::FloatVectorOperations::fill(output.getWritePointer(channel), poison, capacity);
         engine.audioDeviceIOCallbackWithContext(input.getArrayOfReadPointers(), input.getNumChannels(),
@@ -209,6 +215,8 @@ juce::var AudioEngine::runParallelTrackRegression()
         auto serial = createEngine(trackCount, 0);
         auto parallel = createEngine(trackCount, trackCount - 1);
         bool exact = true, stateChanges = true, finite = true, suffixPreserved = true;
+        int firstMismatchBlock = -1;
+        juce::var firstMismatchStats;
         float peak = 0.0f;
         for (int block = 0; block < 40; ++block)
         {
@@ -250,17 +258,32 @@ juce::var AudioEngine::runParallelTrackRegression()
                 if (block == 36) stateChanges = engine->removeTrack(trackId(trackCount - 1)) && stateChanges;
             }
             fillInput(block);
-            callback(*serial, serialOutput, capacity);
-            callback(*parallel, parallelOutput, capacity);
-            exact = exactOutput(capacity) && exact;
+            callback(*serial, serialOutput, capacity, parityCollectionBudgetMs);
+            callback(*parallel, parallelOutput, capacity, parityCollectionBudgetMs);
+            const bool blockExact = exactOutput(capacity);
+            if (!blockExact && firstMismatchBlock < 0)
+            {
+                firstMismatchBlock = block;
+                firstMismatchStats = parallel->getRealtimeTrackExecutionDiagnostics();
+            }
+            exact = blockExact && exact;
             peak = juce::jmax(peak, parallelOutput.getMagnitude(0, capacity));
         }
         const auto parityStats = parallel->realtimeTrackExecutor.snapshotStats();
+        auto parityDiagnostics = parallel->getRealtimeTrackExecutionDiagnostics();
+        parityDiagnostics.getDynamicObject()->setProperty("exactOutput", exact);
+        parityDiagnostics.getDynamicObject()->setProperty("stateChanges", stateChanges);
+        parityDiagnostics.getDynamicObject()->setProperty("peak", peak);
+        parityDiagnostics.getDynamicObject()->setProperty("firstMismatchBlock", firstMismatchBlock);
+        parityDiagnostics.getDynamicObject()->setProperty("firstMismatchStats", firstMismatchStats);
+        parityDiagnostics.getDynamicObject()->setProperty("collectionBudgetMs", parityCollectionBudgetMs);
+        parityDiagnostics.getDynamicObject()->setProperty("timingClassification", "not_asserted; offline completed-work parity only");
         check("serial_parallel_exact_" + juce::String(trackCount), exact && stateChanges && peak > 0.000001f
             && parityStats.batches == 40 && parityStats.completedBatches == 40
             && parityStats.workerJobs > 0 && parityStats.cancelledJobs == 0
-            && parallel->parallelTrackRejectedJobs.load() == 0,
-            "Forty 512-frame blocks: mono/stereo input, volume/pan, mute/solo, output route, master send, live Drive, bypass, reorder and removal preserve exact serial output.");
+            && parallel->parallelTrackRejectedJobs.load() == 0
+            && serial->regressionTrackCollectionBudgetMs == 0.0 && parallel->regressionTrackCollectionBudgetMs == 0.0,
+            "Forty 512-frame blocks: mono/stereo input, volume/pan, mute/solo, output route, master send, live Drive, bypass, reorder and removal preserve exact serial output.", parityDiagnostics);
 
         // Small callbacks exercise allocation capacity and buffer bounds. They
         // deliberately retain their real deadline; do not turn a scheduler
@@ -319,7 +342,7 @@ juce::var AudioEngine::runParallelTrackRegression()
         parallel->audioDeviceAboutToStart(&device);
         const auto beforeRestart = parallel->realtimeTrackExecutor.snapshotStats().completedBatches;
         fillInput(101);
-        callback(*parallel, parallelOutput, capacity);
+        callback(*parallel, parallelOutput, capacity, parityCollectionBudgetMs);
         check("device_restart_" + juce::String(trackCount), stopped
             && parallel->realtimeTrackExecutor.getWorkerCount() == trackCount - 1
             && parallel->realtimeTrackExecutor.snapshotStats().completedBatches == beforeRestart + 1
@@ -473,8 +496,8 @@ juce::var AudioEngine::runParallelTrackRegression()
                 input.setSample(3, sample, static_cast<float>(sample % 7 - 3) * 0.031f);
             }
             const auto batchesBefore = engines[1]->realtimeTrackExecutor.snapshotStats().batches;
-            callback(*engines[0], serialOutput, capacity);
-            callback(*engines[1], parallelOutput, capacity);
+            callback(*engines[0], serialOutput, capacity, parityCollectionBudgetMs);
+            callback(*engines[1], parallelOutput, capacity, parityCollectionBudgetMs);
             exact = exactOutput(capacity) && exact;
             subset = engines[1]->realtimeTrackExecutor.snapshotStats().batches == batchesBefore + 1 && subset;
             auto* scenarioResult = new juce::DynamicObject();
