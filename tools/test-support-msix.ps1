@@ -16,7 +16,7 @@ Set-Content -LiteralPath $fixture -Value 'class Fixture { static void Main() { S
 & "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe" /nologo /target:winexe "/out:$stage/OpenStudio.exe" $fixture
 if ($LASTEXITCODE -ne 0) { throw 'Failed to build isolated DAW placeholder' }
 [xml]$manifest = (Get-Content (Join-Path $repoRoot 'packaging/msix/AppxManifest.xml.in') -Raw).Replace('@VERSION@', '0.0.0.0')
-$identity = 'OpenStudioSupportQA' + [guid]::NewGuid().ToString('N')
+$identity = 'OpenStudioQA' + [guid]::NewGuid().ToString('N')
 $manifest.Package.Identity.Name = $identity
 # The main DAW is a placeholder; do not register a competing .osproj association.
 foreach ($app in $manifest.Package.Applications.Application) {
@@ -43,10 +43,10 @@ $sdk = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin" -Directory |
     ForEach-Object { Join-Path $_.FullName 'x64' } | Where-Object { Test-Path (Join-Path $_ 'makeappx.exe') } | Select-Object -First 1
 if (!$sdk) { throw 'Windows SDK MakeAppx is required' }
 $archive = Join-Path $work 'SupportQualification.msix'
-& "$sdk/makeappx.exe" pack /d $stage /p $archive /h SHA256 /o | Out-Null
+& "$sdk/makeappx.exe" pack /d $stage /p $archive /h SHA256 /o | Tee-Object -FilePath (Join-Path $work 'makeappx.log') -Append | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'MSIX validation/packing failed' }
 $expanded = Join-Path $work 'roundtrip'
-& "$sdk/makeappx.exe" unpack /p $archive /d $expanded /o | Out-Null
+& "$sdk/makeappx.exe" unpack /p $archive /d $expanded /o | Tee-Object -FilePath (Join-Path $work 'makeappx.log') -Append | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'MSIX unpack failed' }
 foreach ($file in Get-ChildItem $stage -Recurse -File) {
     $copy = Join-Path $expanded $file.FullName.Substring($stage.Length+1)

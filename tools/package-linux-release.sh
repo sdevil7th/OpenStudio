@@ -153,3 +153,8 @@ else
     echo "WARNING: Could not locate built AppImage. Check linuxdeploy output above."
     exit 1
 fi
+
+# A separate AppImage keeps support unreachable from ordinary DAW launch/recording.
+python3 "$TOOLS_DIR/package-support-appimage.py" --bundle "$RELEASE_ASSET_DIR" --output "$OUT_DIR" --version "$VERSION"
+tar -czf "$OUT_DIR/OpenStudio-${VERSION}-linux-x86_64-with-support.tar.gz" -C "$OUT_DIR" \
+  "OpenStudio-${VERSION}-linux-x86_64.AppImage" "OpenStudioSupport-${VERSION}-linux-x86_64.AppImage"

@@ -26,9 +26,12 @@ def main():
         environment.pop(key, None)
     def invoke(*arguments, expected=0):
         result = subprocess.run([str(executable), *map(str, arguments)], env=environment,
-                                timeout=60, **flags)
+                                timeout=60, capture_output=True, text=True, **flags)
         if result.returncode != expected:
-            raise AssertionError(f'Packaged operation {arguments[0]} exited {result.returncode}; expected {expected}')
+            detail = result.stdout + result.stderr
+            if arguments[0] == '--self-test' and Path(arguments[1]).is_file():
+                detail += Path(arguments[1]).read_text()
+            raise AssertionError(f'Packaged operation {arguments[0]} exited {result.returncode}; expected {expected}: {detail}')
     with tempfile.TemporaryDirectory(prefix='support-package-test-') as directory:
         root = Path(directory)
         invoke('--self-test', root / 'selftest.json')
