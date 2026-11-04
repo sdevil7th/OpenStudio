@@ -6,11 +6,21 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Unpublished candidate version to qualify
+        default: "0.1.09"
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  support-packages:
+    uses: ./.github/workflows/support-qualification.yml
+    with:
+      version: ${{ inputs.version || '0.1.09' }}
+
   verify-python-tools:
     name: Python tooling
     runs-on: ubuntu-24.04
@@ -211,13 +221,16 @@ jobs:
   verify-windows:
     runs-on: windows-latest
     env:
-      VERSION: 0.0.0
+      VERSION: ${{ inputs.version || '0.1.09' }}
       BUILD_DIR: build-verify-windows
       ASIO_SDK_DIR: thirdparty/asio
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_WIN_X64_SHA256: d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate candidate release notes
+        run: python tools/validate-release-notes.py --version "${{ env.VERSION }}"
 
       - name: Install Inno Setup for installer regression tests
         shell: pwsh
@@ -257,18 +270,6 @@ jobs:
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: '3.13'
-
-      - name: Qualify standalone offline support
-        shell: pwsh
-        run: |
-          python tools/build-support-tool.py --version 0.0.0
-          if ($LASTEXITCODE -ne 0) { throw 'Support build failed.' }
-          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support -q
-          if ($LASTEXITCODE -ne 0) { throw 'Support regression failed.' }
-          python tools/validate-support-tool.py --bundle output/support-package/OpenStudioSupport --version 0.0.0
-          if ($LASTEXITCODE -ne 0) { throw 'Support inventory failed.' }
-          python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport
-          if ($LASTEXITCODE -ne 0) { throw 'Packaged support qualification failed.' }
 
       - name: Install ASIO SDK
         shell: pwsh
@@ -332,6 +333,18 @@ jobs:
       - name: Build OpenStudio
         shell: pwsh
         run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
+
+      - name: Qualify standalone offline support
+        shell: pwsh
+        run: |
+          python tools/build-support-tool.py --version "$env:VERSION" --stage "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          if ($LASTEXITCODE -ne 0) { throw 'Support build failed.' }
+          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support -q
+          if ($LASTEXITCODE -ne 0) { throw 'Support regression failed.' }
+          python tools/validate-support-tool.py --bundle output/support-package/OpenStudioSupport --version "$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'Support inventory failed.' }
+          python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged support qualification failed.' }
 
       - name: Install Chromium for native-schema editor qualification
         shell: pwsh
@@ -574,18 +587,55 @@ jobs:
             -TimeoutSeconds 360 `
             -SkipBuild
 
+      - name: Package complete Windows candidate without publishing
+        shell: pwsh
+        run: |
+          ./tools/package-windows-release.ps1 -Version $env:VERSION -SourceDir "$env:BUILD_DIR/OpenStudio_artefacts/Release" -OutputDir dist/windows
+          ./tools/package-windows-store.ps1 -Version "$env:VERSION.0" -SourceDir "$env:BUILD_DIR/OpenStudio_artefacts/Release" -OutputDir dist/store
+
+      - name: Qualify installed Windows candidate
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'OpenStudio-installed-candidate'
+          $installer = (Resolve-Path 'dist/windows/OpenStudio-Setup-x64.exe').Path
+          $install = Start-Process -FilePath $installer -PassThru -Wait -WindowStyle Hidden -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="{0}"' -f $root))
+          if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+          try {
+            ./tools/run-window-lifecycle-smoke.ps1 -AppPath "$root/OpenStudio.exe" -ReportPath "$env:RUNNER_TEMP/candidate-installed.json" -TimeoutSeconds 300
+            python tools/test-packaged-support.py --bundle $root
+            if ($LASTEXITCODE -ne 0) { throw 'Installed support self-test failed.' }
+          } finally {
+            $uninstall = Start-Process -FilePath "$root/unins000.exe" -PassThru -Wait -WindowStyle Hidden -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+            if ($uninstall.ExitCode -ne 0) { throw 'Candidate uninstall failed.' }
+          }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-windows-x64
+          path: |
+            dist/windows/OpenStudio-Setup-x64.exe
+            dist/store/*.msix
+            dist/store/package-report.json
+            ${{ runner.temp }}/candidate-installed*
+          if-no-files-found: error
+
   verify-macos:
-    name: macOS native windows (${{ matrix.os }})
+    needs: support-packages
+    name: macOS native windows (${{ matrix.os }}; callback diagnostics ${{ matrix.os == 'macos-15-intel' && 'ON' || 'OFF' }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-14, macos-15-intel]
     env:
-      VERSION: 0.0.0
+      VERSION: ${{ inputs.version || '0.1.09' }}
       BUILD_DIR: build-verify-macos
+      CALLBACK_DIAGNOSTICS: ${{ matrix.os == 'macos-15-intel' && 'ON' || 'OFF' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate candidate release notes
+        run: python tools/validate-release-notes.py --version "${{ env.VERSION }}"
 
       - name: Test POSIX desktop ownership and lifecycle identity
         shell: bash
@@ -617,6 +667,7 @@ jobs:
         run: |
           cmake -S . -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DOPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS="$CALLBACK_DIAGNOSTICS" \
             -DOPENSTUDIO_APP_VERSION="$VERSION" \
             -DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF \
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
@@ -723,11 +774,38 @@ jobs:
             ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.startup.log
           if-no-files-found: warn
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: env.CALLBACK_DIAGNOSTICS == 'OFF'
+        with:
+          name: support-macos-universal
+          path: output/support-universal
+
+      - name: Package complete macOS candidate without notarization or publication
+        if: env.CALLBACK_DIAGNOSTICS == 'OFF'
+        shell: bash
+        run: |
+          tar -xzf output/support-universal/support-macos-universal.tgz -C output/support-universal
+          ditto output/support-universal/OpenStudioSupport.app "$APP_BUNDLE/Contents/Helpers/OpenStudioSupport.app"
+          ditto 'output/support-universal/OpenStudio Support.app' "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio Support.app"
+          bash tools/package-macos-release.sh "$APP_BUNDLE" "$VERSION" dist/macos
+
+      - name: Check callback diagnostic build contract
+        shell: pwsh
+        run: ./tools/run-render-export-headless-regression.ps1 -AppPath "$env:APP_BUNDLE/Contents/MacOS/OpenStudio" -Configuration Release -SkipBuild -OutputRoot "$env:RUNNER_TEMP/candidate-render" -TimeoutSeconds 300
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: env.CALLBACK_DIAGNOSTICS == 'OFF'
+        with:
+          name: candidate-macos-universal
+          path: dist/macos/*
+          if-no-files-found: error
+
   verify-linux:
+    needs: support-packages
     runs-on: ubuntu-22.04
     env:
       # AppImage verification exercises the real release-notes gate.
-      VERSION: 0.1.04
+      VERSION: ${{ inputs.version || '0.1.09' }}
       BUILD_DIR: build-verify-linux
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
@@ -846,6 +924,17 @@ jobs:
       - name: Test native package construction
         run: python3 -m unittest discover -s tests -p 'test_linux_*.py' -v
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: support-linux-x64
+          path: output/support-native
+
+      - name: Stage complete candidate support payload
+        run: |
+          tar -xzf output/support-native/support-linux-x64.tgz -C output/support-native
+          cp -a output/support-native/OpenStudioSupport/. "$BUILD_DIR/OpenStudio_artefacts/Release/"
+          python3 tools/validate-support-tool.py --bundle "$BUILD_DIR/OpenStudio_artefacts/Release" --version "$VERSION"
+
       - name: Build and install Ubuntu package
         shell: bash
         run: |
@@ -903,3 +992,36 @@ jobs:
             output/linux-native-safe
             output/linux-appimage
           if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-linux-x64
+          path: |
+            dist/linux/*.AppImage
+            dist/linux/*with-support.tar.gz
+            dist/linux/*.deb
+          if-no-files-found: error
+
+  certify-windows-package:
+    name: Windows App Certification Kit (unpublished candidate)
+    needs: verify-windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: candidate-windows-x64
+          path: candidate
+      - name: Run WACK without uploading or submitting to the Store
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath candidate -Filter '*.msix' -Recurse -File)
+          if ($packages.Count -ne 1) { throw 'Expected exactly one candidate MSIX.' }
+          ./tools/run-windows-certification.ps1 -PackagePath $packages[0].FullName -OutputDirectory "$env:RUNNER_TEMP/candidate-wack"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: candidate-windows-certification
+          path: ${{ runner.temp }}/candidate-wack/
+          if-no-files-found: error

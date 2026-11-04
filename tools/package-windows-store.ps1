@@ -105,7 +105,7 @@ if ([Diagnostics.FileVersionInfo]::GetVersionInfo($runtimeExe[0].FullName).Produ
 Copy-Item -LiteralPath $runtimeExe[0].DirectoryName -Destination (Join-Path $stage 'WebView2Runtime') -Recurse
 # A deliberate allowlist excludes PDBs, prerequisite installers, debug and AI
 # download caches. Optional AI runtimes are installed into writable user storage.
-foreach ($file in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'OpenStudioSupport.exe', 'ffmpeg.exe', 'OpenStudio.version', 'LICENSE', 'THIRD_PARTY_LICENSES.md')) {
+foreach ($file in @('OpenStudio.exe', 'OpenStudioCrashReporter.exe', 'OpenStudioSupport.exe', 'ffmpeg.exe', 'OpenStudio.version', 'OpenStudio.build-policy.json', 'LICENSE', 'THIRD_PARTY_LICENSES.md')) {
     Copy-Item -LiteralPath (Join-Path $source $file) -Destination $stage
 }
 foreach ($file in Get-ChildItem -LiteralPath $source -Filter '*.dll' -File) {
