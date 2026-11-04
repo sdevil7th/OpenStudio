@@ -20,6 +20,26 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _linux_executable(pid):
+    return Path(f'/proc/{pid}/exe').resolve(strict=True)
+
+
+def _is_own_appimage_runtime(pid):
+    # AppImage keeps an extraction/FUSE runtime alive beside the actual support
+    # process. Identify that exact image by executable path, never by process name.
+    # Other support instances' Python workers are still rejected by require_closed.
+    if sys.platform != 'linux' or not getattr(sys, 'frozen', False):
+        return False
+    try:
+        image = Path(os.environ['APPIMAGE']).resolve(strict=True)
+        appdir = Path(os.environ['APPDIR']).resolve(strict=True)
+        return (image.name.startswith('OpenStudioSupport-') and image.suffix == '.AppImage'
+                and Path(sys.executable).resolve(strict=True) == (appdir / 'usr/bin/OpenStudioSupport').resolve(strict=True)
+                and _linux_executable(pid) == image)
+    except (KeyError, OSError, RuntimeError):
+        return False
+
+
 def require_closed():
     """One-shot prerequisite, not a resident monitor. Fail closed if enumeration fails.
 
@@ -36,7 +56,9 @@ def require_closed():
         result = subprocess.run(["ps", "-A", "-o", "pid=,comm="], capture_output=True,
                                 text=True, timeout=15, check=True)
         names = [Path(parts[1]).name for line in result.stdout.splitlines()
-                 if len(parts := line.strip().split(None, 1)) == 2 and parts[0] != str(os.getpid())]
+                 if len(parts := line.strip().split(None, 1)) == 2 and parts[0] != str(os.getpid())
+                 and not (Path(parts[1]).name.lower().startswith('openstudio')
+                          and _is_own_appimage_runtime(parts[0]))]
     if not names:
         raise ValueError("Could not check running applications; no diagnostic work was started.")
     if any(name.lower().removesuffix(".exe").startswith("openstudio") for name in names):

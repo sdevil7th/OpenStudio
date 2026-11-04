@@ -1,11 +1,10 @@
 # Offline support and export inspection
 
-Unreleased development work added after app commit `f45637be`. Windows production
-builds now include a separate **OpenStudio Support** executable and Start menu entry.
-No published release containing it has been qualified here. macOS/Linux still use
-the source tools below; their standalone packaging is not yet integrated or qualified. They add no collectors, timers,
+Unreleased development work added after app commit `f45637be`. The support companion
+is packaged separately for Windows, macOS and Linux. It adds no collectors, timers,
 threads, buffers, callbacks, uploads, or logging to the running DAW. Existing app
 diagnostics remain unchanged; this is not a claim that those diagnostics cost zero.
+No release containing this work has been published here.
 
 **Close OpenStudio before running support tools. Keep it closed until the operation
 finishes, then close the support window before reopening the DAW.** The tools check
@@ -14,11 +13,18 @@ process enumeration fails. They cannot prevent another process from launching th
 DAW later, and cannot recognize a renamed executable. They do use CPU, memory and
 disk while explicitly running. They never silently start a diagnostic render.
 
-## Installed Windows app
+## Open the installed companion
 
-1. Close OpenStudio. Open **OpenStudio Support** from the Windows Start menu
-   (installer and Microsoft Store packages). For a portable folder, double-click
-   `OpenStudioSupport.exe` beside `OpenStudio.exe`; keep `support-runtime` beside it.
+Close OpenStudio first, then use the launcher for your platform:
+
+| Platform | Launcher |
+| --- | --- |
+| Windows installer / MSIX | **OpenStudio Support** in the Start menu. A portable folder also has `OpenStudioSupport.exe`. |
+| macOS | Drag both **OpenStudio.app** and **OpenStudio Support.app** from the DMG into the same Applications folder. Open **OpenStudio Support** in Finder. The small launcher uses the matching support runtime inside OpenStudio.app, so app updates replace that runtime too. Intel and Apple silicon runtimes are both included. |
+| Linux DEB / RPM | **OpenStudio Support** in the desktop application menu. No login item or service is installed. |
+| Linux AppImage | Extract the `with-support.tar.gz` download in a file manager. Open the separate **OpenStudioSupport-…AppImage** after closing the DAW AppImage. Both launchers are independent. |
+
+1. Open the companion explicitly.
 2. Leave **Collect existing evidence** selected, describe what happened, and click
    **Run selected operation**. You can instead inspect an existing audio/MIDI export.
 3. Click **Open output folder** and review its files. Dumps are excluded unless
@@ -197,7 +203,7 @@ Production crash analysis also requires symbols/source maps matching the origina
 build. Optional diagnostic re-exports and new runtime telemetry are outside this
 implementation; neither is enabled by installing or running these tools.
 
-## Windows packaging and qualification
+## Packaging and qualification
 
 After installing frontend dependencies, run:
 
@@ -210,7 +216,7 @@ and frontend dependencies are build/source-runner requirements only. The NativeB
 is replaced by an unavailable stub in this offline bundle; it cannot contact the DAW.
 
 `python build.py prod --version <version>` includes this build after its required
-release-notes gate. Windows release CI builds and qualifies the helper before signing.
+release-notes gate. Release CI builds and qualifies the native companions before signing.
 Installer and Store packaging fail if its version/inventory is missing or mismatched.
 The support executable is in the first-party signing allowlist; synchronize the
 hosted SignPath `windows-payload` configuration with the repository before release.
@@ -227,3 +233,21 @@ PATH, constructs its window hidden, decodes synthetic audio, compares synthetic 
 with a saved project and exercises collection, redaction, review and ZIP creation.
 This is not an installer, clean-VM, Store, macOS/Linux or subjective audio-quality
 qualification. No release or upload is performed by these checks.
+
+The reusable `support-qualification.yml` workflow builds on Windows, Ubuntu 22.04,
+Apple silicon and Intel macOS. macOS assembly retains two native runtimes behind
+one universal launcher, rather than requiring Rosetta. Release packaging signs
+nested code from the inside out and includes the Finder launcher in the DMG.
+Linux installers copy the private runtime and a separate desktop entry; RPM must
+preserve frozen runtime bytes while retaining dependency scanning. The AppImage
+bundle includes separate DAW and support AppImages without modifying the DAW launcher.
+
+Tests use disposable identities and a dummy DAW where necessary. Windows tests run
+production installer validation and the production support shortcut with the real
+support payload; MSIX tests pack/unpack, register, activate via the Start menu app ID,
+check package identity and unregister. Linux tests execute support after DEB/RPM
+round trips and inside its companion AppImage. macOS tests mount a read-only DMG
+and activate the Finder launcher. These are support-distribution tests; they do not
+claim Store certification, notarization, clean-machine full-DAW readiness, hardware
+recording performance or subjective audio quality. Source/audio execution paths in
+the DAW are unchanged. Existing release-note and signing gates remain mandatory.

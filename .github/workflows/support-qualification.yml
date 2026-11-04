@@ -63,6 +63,7 @@ jobs:
           xvfb-run -a .venv-support/bin/python -m unittest tools.test_openstudio_support -q
           xvfb-run -a python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport
           xvfb-run -a python tools/test-support-linux.py --bundle output/support-package/OpenStudioSupport --version "$SUPPORT_VERSION"
+          python tools/validate-linux-abi.py --root output/support-package/OpenStudioSupport --report output/support-distribution/abi.json --max-glibc 2.35 --require-os ubuntu:22.04
       - name: Archive native payload preserving executable modes and links
         shell: bash
         run: tar -czf support-${{ matrix.platform }}-${{ matrix.arch }}.tgz -C output/support-package .
@@ -72,9 +73,11 @@ jobs:
           path: |
             support-*.tgz
             output/support-distribution/*.AppImage
+            output/support-distribution/abi.json
           if-no-files-found: error
   universal-macos:
     needs: native
+    if: ${{ !cancelled() }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09

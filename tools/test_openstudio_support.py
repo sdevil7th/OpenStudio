@@ -146,6 +146,29 @@ class CollectionTests(TemporaryTest):
 
 
 class GuardTests(TemporaryTest):
+    def test_appimage_exception_requires_exact_image_and_contained_executable(self):
+        from openstudio_support.common import _is_own_appimage_runtime
+        image = self.root / 'OpenStudioSupport-0.0.0-linux-x86_64.AppImage'
+        image.touch()
+        executable = self.root / 'appdir/usr/bin/OpenStudioSupport'
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        import os
+        with patch('sys.platform', 'linux'), patch('sys.frozen', True, create=True), \
+                patch('sys.executable', str(executable)), \
+                patch.dict(os.environ, APPIMAGE=str(image), APPDIR=str(self.root / 'appdir')), \
+                patch('openstudio_support.common._linux_executable', return_value=image.resolve()) as process:
+            self.assertTrue(_is_own_appimage_runtime('123'))
+            process.return_value = executable.resolve()
+            self.assertFalse(_is_own_appimage_runtime('124'))  # another support worker
+            process.return_value = self.root / 'OpenStudio'
+            self.assertFalse(_is_own_appimage_runtime('125'))
+            process.return_value = image.resolve()
+            with patch('sys.executable', str(image)):
+                self.assertFalse(_is_own_appimage_runtime('123'))
+            process.side_effect = PermissionError()
+            self.assertFalse(_is_own_appimage_runtime('123'))
+
     def test_guard_rejects_running_app_and_workers(self):
         for name in ("OpenStudio.exe", "OpenStudioCrashReporter.exe", "openstudio"):
             output = f'"{name}","123","Console","1","20 K"\n' if sys.platform == "win32" else '123 ' + name + "\n"

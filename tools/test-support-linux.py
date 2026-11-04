@@ -63,7 +63,11 @@ def main():
                         str(rpm_root / 'usr/lib/openstudio')], check=True)
         image = appimage.package(bundle, ROOT / 'output/support-distribution', args.version)
         report = root / 'appimage-selftest.json'
-        subprocess.run([str(image), '--self-test', str(report)], env=dict(os.environ, APPIMAGE_EXTRACT_AND_RUN='1'), check=True)
+        tested = subprocess.run([str(image), '--self-test', str(report)], env=dict(os.environ, APPIMAGE_EXTRACT_AND_RUN='1'),
+                                capture_output=True, text=True)
+        if tested.returncode or not report.is_file():
+            raise AssertionError(f'AppImage failed: {tested.stdout}\n{tested.stderr}\n' +
+                                 (report.read_text() if report.is_file() else 'No self-test report'))
         assert json.loads(report.read_text())['status'] == 'pass'
     print('PASS real support payload in DEB, RPM, desktop entry and companion AppImage; DAW is a test stub.')
 

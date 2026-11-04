@@ -3105,15 +3105,16 @@ microphone permission for every application.
 
 ### 17.11 Render Produces Silence
 
-**Unreleased Windows support companion:** after closing OpenStudio, open
-**OpenStudio Support** from the Start menu, collect existing evidence or inspect
+**Unreleased support companion:** after closing OpenStudio, open
+**OpenStudio Support** from the Windows Start menu, macOS Finder (install both apps
+from the DMG), or Linux application menu/companion AppImage. Collect existing evidence or inspect
 an audio/MIDI export, and use **Open output folder** to review the report. Choose
 **Create reviewed ZIP** to prepare an attachment for support. No Python or terminal
-is needed in packaged Windows builds. Nothing is uploaded automatically.
+is needed in packaged builds. Nothing is uploaded automatically.
 Close the support window before reopening the DAW. This adds no work to normal
 recording, playback or exports; the explicitly opened tool uses CPU, RAM and disk.
 Dumps are optional and unredacted. See [Offline support and export inspection](offline-support.md)
-for source-tool setup on other platforms, comparisons and limits. A valid file or
+for platform launch instructions, source-tool setup, comparisons and limits. A valid file or
 matching duration alone does not prove that every track was rendered.
 
 **Symptoms**: Rendered file is silent or contains only silence.
