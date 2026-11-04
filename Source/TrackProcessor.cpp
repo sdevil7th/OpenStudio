@@ -508,8 +508,15 @@ static void logToDisk(const juce::String& msg)
     f.appendText(juce::Time::getCurrentTime().toString(true, true) + ": " + msg + "\n");
 }
 
-static int getSafeHostedPluginBlockSize(int requestedBlockSize)
+static int getSafeHostedPluginBlockSize(int requestedBlockSize,
+                                       const juce::AudioProcessor* processor = nullptr)
 {
+    // Native NAM supports the actual host block size. Preparing its zero-latency
+    // cabinet convolution for 512 while processing eight samples repeats a
+    // 1024-point head FFT every callback. Keep the compatibility reserve for
+    // other hosted processors; this choice runs only during preparation.
+    if (requestedBlockSize > 0 && dynamic_cast<const OpenStudioNAMRack*>(processor) != nullptr)
+        return requestedBlockSize;
     return juce::jmax(kMinimumHostedPluginBlockSize,
                       requestedBlockSize > 0 ? requestedBlockSize : kMinimumHostedPluginBlockSize);
 }
@@ -2232,7 +2239,7 @@ static void preparePluginPreservingLayout(juce::AudioProcessor* plugin, double s
                                           int routedInputChannels = 2)
 {
     const juce::ScopedLock pluginCallbackGuard(plugin->getCallbackLock());
-    const int safeMaxBlock = getSafeHostedPluginBlockSize(maxBlock);
+    const int safeMaxBlock = getSafeHostedPluginBlockSize(maxBlock, plugin);
 
     // NAM graph topology depends on the host route width. Publish it before
     // prepare/reset so a newly inserted mono guitar Rack cannot begin in its
@@ -2335,9 +2342,8 @@ void TrackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
                 pdcCurrentDelaySamples));
     }
 
-    // Prepare plugins with the actual device block size so realtime hosting
-    // matches the hardware callback configuration.
-    int pluginMaxBlock = getSafeHostedPluginBlockSize(samplesPerBlock);
+    // Preserve the actual device size until the per-processor policy is applied.
+    const int pluginMaxBlock = samplesPerBlock;
 
     // Propagate new sample rate and buffer size to all internal FX plugins,
     // preserving each plugin's bus layout (see preparePluginPreservingLayout).
@@ -3039,11 +3045,116 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
     const bool releasedRejected = rejectsUnchanged(parallel->getParallelNAMGraphGeneration());
     parallel->removeTrackFX(0);
     const bool emptyPublicationCleared = parallel->getParallelNAMGraphGeneration() == 0;
+    const auto nativePreparation = []
+    {
+        struct OtherProcessor final : OpenStudioEQ
+        {
+            // A matching display name must not select the native preparation policy.
+            const juce::String getName() const override { return "OpenStudio NAM Rack"; }
+            void prepareToPlay(double rate, int block) override
+            { lastPreparedBlock = block; OpenStudioEQ::prepareToPlay(rate, block); }
+            int lastPreparedBlock = 0;
+        };
+        auto track = std::make_unique<TrackProcessor>();
+        auto input = std::make_unique<OpenStudioNAMRack>();
+        auto output = std::make_unique<OpenStudioNAMRack>();
+        auto otherInput = std::make_unique<OtherProcessor>();
+        auto otherOutput = std::make_unique<OtherProcessor>();
+        auto* inputRack = input.get(); auto* outputRack = output.get();
+        auto* inputOther = otherInput.get(); auto* outputOther = otherOutput.get();
+        bool preparation = track->addInputFX(std::move(input), 48000.0, 8)
+            && track->addTrackFX(std::move(output), 48000.0, 8)
+            && track->addInputFX(std::move(otherInput), 48000.0, 8)
+            && track->addTrackFX(std::move(otherOutput), 48000.0, 8);
+        const auto matches = [&](int block)
+        {
+            return static_cast<int>(inputRack->getDiagnosticState()["preparedBlockSize"]) == block
+                && static_cast<int>(outputRack->getDiagnosticState()["preparedBlockSize"]) == block
+                && inputOther->lastPreparedBlock == juce::jmax(512, block)
+                && outputOther->lastPreparedBlock == juce::jmax(512, block);
+        };
+        preparation = preparation && matches(8);
+        for (int block : {8, 16, 64, 512, 1024, 8})
+        {
+            track->prepareToPlay(48000.0, block);
+            preparation = matches(block) && preparation;
+            track->setInputFXPrecisionOverride(0, true);
+            track->setTrackFXPrecisionOverride(0, true);
+            preparation = matches(block) && preparation;
+            track->setProcessingPrecisionMode(ProcessingPrecisionMode::Hybrid64);
+            preparation = matches(block) && preparation;
+            track->setProcessingPrecisionMode(ProcessingPrecisionMode::Float32);
+            preparation = matches(block) && preparation;
+        }
+        track->releaseResources();
+
+        float maximumDifference = 0.0f, referencePeak = 0.0f;
+        bool convolutionParity = true, zeroLatency = true;
+        int comparedSamples = 0;
+        // Same JUCE cabinet algorithm and IR normalization, changing only its
+        // prepared maximum block. Include mono/stereo IRs, dual-mono selection,
+        // source-rate conversion, an impulse, signal and the complete tail.
+        for (int mode : {0, 1, 2})
+            for (int block : {8, 16, 64})
+            {
+                juce::AudioBuffer<float> ir(mode == 0 ? 1 : 2, 1537);
+                for (int channel = 0; channel < ir.getNumChannels(); ++channel)
+                    for (int frame = 0; frame < ir.getNumSamples(); ++frame)
+                        ir.setSample(channel, frame, frame == 0 ? 0.8f
+                            : 0.06f * std::sin(static_cast<float>(frame) * (0.071f + channel * 0.019f))
+                                * std::exp(-static_cast<float>(frame) / 300.0f));
+                juce::dsp::Convolution reference {juce::dsp::Convolution::NonUniform {256}};
+                juce::dsp::Convolution candidate {juce::dsp::Convolution::NonUniform {256}};
+                const auto stereo = mode == 2 ? juce::dsp::Convolution::Stereo::no
+                                              : juce::dsp::Convolution::Stereo::yes;
+                for (auto* convolution : {&reference, &candidate})
+                    convolution->loadImpulseResponse(juce::AudioBuffer<float>(ir), 44100.0, stereo,
+                        juce::dsp::Convolution::Trim::yes, juce::dsp::Convolution::Normalise::yes);
+                reference.prepare({48000.0, 512, 2});
+                candidate.prepare({48000.0, static_cast<juce::uint32>(block), 2});
+                zeroLatency = reference.getLatency() == 0 && candidate.getLatency() == 0 && zeroLatency;
+                juce::AudioBuffer<float> expected(2, block), actual(2, block);
+                for (int offset = 0; offset < 6144; offset += block)
+                {
+                    for (int channel = 0; channel < 2; ++channel)
+                        for (int frame = 0; frame < block; ++frame)
+                        {
+                            const int absoluteFrame = offset + frame;
+                            const float value = absoluteFrame == 0 ? 0.2f
+                                : absoluteFrame < 2048 ? 0.1f * std::sin(absoluteFrame * (0.031f + channel * 0.007f)) : 0.0f;
+                            expected.setSample(channel, frame, value); actual.setSample(channel, frame, value);
+                        }
+                    auto expectedBlock = juce::dsp::AudioBlock<float>(expected);
+                    auto actualBlock = juce::dsp::AudioBlock<float>(actual);
+                    reference.process(juce::dsp::ProcessContextReplacing<float>(expectedBlock));
+                    candidate.process(juce::dsp::ProcessContextReplacing<float>(actualBlock));
+                    for (int channel = 0; channel < 2; ++channel)
+                        for (int frame = 0; frame < block; ++frame)
+                        {
+                            const float wanted = expected.getSample(channel, frame), got = actual.getSample(channel, frame);
+                            convolutionParity = std::isfinite(wanted) && std::isfinite(got) && convolutionParity;
+                            maximumDifference = juce::jmax(maximumDifference, std::abs(wanted - got));
+                            referencePeak = juce::jmax(referencePeak, std::abs(wanted));
+                            ++comparedSamples;
+                        }
+                }
+            }
+        auto* evidence = new juce::DynamicObject();
+        evidence->setProperty("pass", preparation && convolutionParity && zeroLatency
+            && referencePeak > 0.01f && maximumDifference < 0.00002f);
+        evidence->setProperty("nativeHostSizeAndOtherProcessorReserve", preparation);
+        evidence->setProperty("zeroAddedConvolutionLatency", zeroLatency);
+        evidence->setProperty("maximumPCMError", maximumDifference);
+        evidence->setProperty("comparedSamples", comparedSamples);
+        evidence->setProperty("scope", "Insertion, device/render-size reprepare and precision changes; native NAM gets actual capacity, other processors retain >=512. Cabinet impulse/signal/tail parity within 2e-5; no audition or hardware capacity claim.");
+        return juce::var(evidence);
+    }();
     auto* result = new juce::DynamicObject();
-    result->setProperty("pass", static_cast<bool>(tinyRegression["pass"]) && automationOrderParity && static_cast<bool>(probeRegression["pass"]) && emptyRejected && zeroRejected && parity && staleRejected && midiRejected
+    result->setProperty("pass", static_cast<bool>(nativePreparation["pass"]) && static_cast<bool>(tinyRegression["pass"]) && automationOrderParity && static_cast<bool>(probeRegression["pass"]) && emptyRejected && zeroRejected && parity && staleRejected && midiRejected
         && instrumentRejected && araRejected && busyRejected && nonNAMRejected && bypassedNonNAMRejected
         && eligibilityRecovered && releasedRejected && emptyPublicationCleared);
     result->setProperty("emptyAndZeroRejected", emptyRejected && zeroRejected);
+    result->setProperty("nativeNAMBlockPreparation", nativePreparation);
     result->setProperty("eightSampleDiscovery", probeRegression);
     result->setProperty("automationDataFirstExactParity", automationOrderParity);
     result->setProperty("automationEightSampleCases", automationCases);
@@ -5152,7 +5263,7 @@ bool TrackProcessor::addInputFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     // Prefer caller-supplied rate (from AudioEngine), fall back to our own,
     // then to 44100 as last resort. Use the realtime device block size when known.
     double sr = callerSampleRate > 0 ? callerSampleRate : getSampleRate();
-    int bs = getSafeHostedPluginBlockSize(callerBlockSize > 0 ? callerBlockSize : getBlockSize());
+    int bs = getSafeHostedPluginBlockSize(callerBlockSize > 0 ? callerBlockSize : getBlockSize(), plugin.get());
     if (sr <= 0) sr = 44100.0;
     if (bs <= 0) bs = kMinimumHostedPluginBlockSize;
 
@@ -5197,7 +5308,7 @@ bool TrackProcessor::addTrackFX(std::unique_ptr<juce::AudioProcessor> plugin, do
     // Prefer caller-supplied rate (from AudioEngine), fall back to our own,
     // then to 44100 as last resort. Use the realtime device block size when known.
     double sr = callerSampleRate > 0 ? callerSampleRate : getSampleRate();
-    int bs = getSafeHostedPluginBlockSize(callerBlockSize > 0 ? callerBlockSize : getBlockSize());
+    int bs = getSafeHostedPluginBlockSize(callerBlockSize > 0 ? callerBlockSize : getBlockSize(), plugin.get());
     if (sr <= 0) sr = 44100.0;
     if (bs <= 0) bs = kMinimumHostedPluginBlockSize;
 
@@ -7419,7 +7530,7 @@ void TrackProcessor::setInputFXPrecisionOverride(int index, bool forceFloat)
     if (auto* plugin = inputFXPlugins[static_cast<size_t>(index)].get())
     {
         double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
-        int bs = getSafeHostedPluginBlockSize(getBlockSize());
+        int bs = getSafeHostedPluginBlockSize(getBlockSize(), plugin);
         preparePluginPreservingLayout(plugin, sr, bs,
                                       resolvePluginPrecisionMode(processingPrecisionMode, forceFloat),
                                       inputChannelCount.load(std::memory_order_acquire));
@@ -7437,7 +7548,7 @@ void TrackProcessor::setTrackFXPrecisionOverride(int index, bool forceFloat)
     if (auto* plugin = trackFXPlugins[static_cast<size_t>(index)].get())
     {
         double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
-        int bs = getSafeHostedPluginBlockSize(getBlockSize());
+        int bs = getSafeHostedPluginBlockSize(getBlockSize(), plugin);
         preparePluginPreservingLayout(plugin, sr, bs,
                                       resolvePluginPrecisionMode(processingPrecisionMode, forceFloat),
                                       inputChannelCount.load(std::memory_order_acquire));
@@ -7491,7 +7602,7 @@ void TrackProcessor::setProcessingPrecisionMode(ProcessingPrecisionMode mode)
     processingPrecisionMode = mode;
 
     double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
-    int bs = getSafeHostedPluginBlockSize(getBlockSize());
+    const int bs = getBlockSize();
 
     for (int index = 0; index < static_cast<int>(inputFXPlugins.size()); ++index)
         if (auto* plugin = inputFXPlugins[static_cast<size_t>(index)].get())

@@ -56,6 +56,7 @@ public:
     {
         juce::uint64 cycles = 0;
         int processor = -1;
+        unsigned long threadId = 0;
         bool valid = false;
     };
     static ThreadSample sampleThread(bool requested) noexcept
@@ -67,6 +68,7 @@ public:
             ULONG64 cycles = 0;
             result.valid = QueryThreadCycleTime(GetCurrentThread(), &cycles) != FALSE;
             result.cycles = cycles;
+            result.threadId = GetCurrentThreadId();
             PROCESSOR_NUMBER processor {};
             GetCurrentProcessorNumberEx(&processor);
             result.processor = static_cast<int>(processor.Group) * 256 + processor.Number;
@@ -83,6 +85,8 @@ public:
         juce::uint64 cycles = 0;
         int processorStart = -1, processorEnd = -1;
         bool cyclesValid = false;
+        juce::int64 startTicks = 0;
+        unsigned long threadId = 0;
     };
     Callback(AudioEngine& owner, const Options& requested)
         : engine(owner), options(requested), cycleFrames(static_cast<int>(options.sampleRate * 2.0)),
@@ -154,7 +158,7 @@ public:
             const bool cyclesValid = threadStart.valid && threadEnd.valid && threadEnd.cycles >= threadStart.cycles;
             const Record record { frames, interval, duration, samples,
                 cyclesValid ? threadEnd.cycles - threadStart.cycles : 0,
-                threadStart.processor, threadEnd.processor, cyclesValid };
+                threadStart.processor, threadEnd.processor, cyclesValid, before, threadStart.threadId };
             if (measuredBlocks % traceStride == 0 && count < records.size()) records[count++] = record;
             ++measuredBlocks; measuredFrames += samples; totalTicks += duration; maximumTicks = juce::jmax(maximumTicks, duration);
             ++durationHistogram[histogramBin(duration)];
@@ -179,8 +183,11 @@ public:
     juce::var report(const juce::File& csv) const // Only after removeAudioCallback has joined callbacks.
     {
         auto* result = new juce::DynamicObject();
-        juce::String text("kind,frame,samples,engine_microseconds,arrival_interval_microseconds,thread_cycles,cycles_valid,processor_start,processor_end\n");
-        text.preallocateBytes(160 * (count + missedCount) + 256);
+        // String concatenation rescans the accumulated CSV on every append.
+        // Stream into a pre-sized buffer so large diagnostic reports finish in
+        // linear time after the audio callback has been removed.
+        juce::MemoryOutputStream text(208 * (count + missedCount) + 256);
+        text << "kind,frame,samples,engine_microseconds,arrival_interval_microseconds,thread_cycles,cycles_valid,processor_start,processor_end,start_ticks,end_ticks,thread_id\n";
         const double budget = requestedBlock * 1.0e6 / options.sampleRate;
         const auto append = [&](const Record& row, const char* kind)
         {
@@ -188,7 +195,9 @@ public:
             const double interval = juce::Time::highResolutionTicksToSeconds(row.arrival) * 1.0e6;
             text << kind << ',' << row.frame << ',' << row.samples << ',' << juce::String(elapsed, 3) << ',' << juce::String(interval, 3)
                  << ',' << juce::String(row.cycles) << ',' << (row.cyclesValid ? 1 : 0)
-                 << ',' << row.processorStart << ',' << row.processorEnd << '\n';
+                 << ',' << row.processorStart << ',' << row.processorEnd
+                 << ',' << row.startTicks << ',' << (row.startTicks + row.duration)
+                 << ',' << juce::String(static_cast<juce::int64>(row.threadId)) << '\n';
         };
         for (size_t index = 0; index < count; ++index) append(records[index], "uniform");
         for (size_t index = 0; index < missedCount; ++index) append(missedRecords[index], "deadline_miss");
@@ -205,13 +214,20 @@ public:
         result->setProperty("uniformTraceStride", traceStride); result->setProperty("uniformTraceRows", static_cast<int>(count)); result->setProperty("deadlineTraceRows", static_cast<int>(missedCount));
         result->setProperty("traceScope", "Bounded uniform sample plus first 4096 deadline misses; duplicate rows are intentional. Summary counts, extrema and histograms include every measured callback.");
         result->setProperty("threadCyclesRequested", options.threadCycles);
+        result->setProperty("clockTicksPerSecond", juce::Time::getHighResolutionTicksPerSecond());
+       #if JUCE_WINDOWS
+        result->setProperty("clockDomain", "Windows QueryPerformanceCounter; boundaries include requested diagnostic queries.");
+        result->setProperty("processId", static_cast<int>(GetCurrentProcessId()));
+       #else
+        result->setProperty("clockDomain", "JUCE high-resolution clock; Windows ETW correlation unavailable.");
+       #endif
         result->setProperty("threadCycleScope", "Diagnostic only: raw thread cycles, not CPU time. Processor endpoints do not exclude intermediate migration or interrupts. Optional queries are included in callback wall duration.");
         result->setProperty("arrivalIntervalsAbove150Percent", lateArrivals); result->setProperty("arrivalStatus", "diagnostic_only: driver batching and scheduling both affect arrival intervals");
         result->setProperty("outputPeak", peak); result->setProperty("outputSamplesAtOrAboveFullScale", clipped);
         result->setProperty("nonFiniteOutputSamples", nonFinite); result->setProperty("clippingStatus", "diagnostic_only: synthetic signal and unchanged preset gains");
         result->setProperty("capacityStatus", !valid ? "not_asserted" : deadlineMisses == 0 ? "pass" : "fail");
         result->setProperty("engineCapacityStatus", !valid ? "not_asserted" : deadlineMisses == 0 ? "pass" : "fail");
-        result->setProperty("traceWritten", !csv.exists() && csv.replaceWithText(text));
+        result->setProperty("traceWritten", !csv.exists() && csv.replaceWithData(text.getData(), text.getDataSize()));
         return juce::var(result);
     }
     std::atomic<bool> finished {false}, invalid {false};

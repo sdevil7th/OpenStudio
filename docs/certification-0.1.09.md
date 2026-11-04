@@ -6,6 +6,12 @@ The user requested certification checks and a release PR, with publication held.
 
 ## Current evidence
 
+The 5 November local investigation below changes native NAM preparation and the
+explicit diagnostic probe. Earlier package/WACK results remain valid for their
+listed artifacts, but do **not** certify this newer application binary. The
+remaining Linux browser check passed; the strict 8-sample hardware gate still
+fails. PR #36 remains a draft.
+
 - **Pass — complete Windows candidate, locally:** Release and Debug were rebuilt
   with callback profiling compiled out and no C++ warnings. The current frontend
   build and all 3,136 tests passed; the native render/export matrix passed all 422
@@ -210,6 +216,89 @@ the loaded NAM failure or the earlier 31-track UI/recording gate. **PR #36 remai
 a draft: the eight-sample failure has not been resolved.** Physical driver xruns
 are unsupported; monitoring continuity, loopback latency and audition remain
 **not_asserted**. Results under `output/eight-sample-investigation/` remain local.
+
+## Approved scheduling trace and NAM preparation — 5 November 2026 (IST)
+
+The user approved an explicit 75-second Windows scheduling trace with Dota 2
+running. Two captures were saved, without changing power mode, game settings,
+drivers or affinity. Both stopped automatically. The first exposed a diagnostic
+CSV writer that repeatedly scanned its accumulated string and timed out after
+recording. The probe now writes its report through a pre-sized stream, after the
+callback has been removed. The repeat completed normally. Absolute clock ticks
+and the explicitly requested thread ID permit correlation with Windows ETW;
+these additions exist only in the manually launched headless probe. Support and
+ordinary callback profiling remained off.
+
+The usable repeat started at 18:44:12 UTC on 4 November and saved at 18:46:09
+UTC, including trace stop/rundown. It has zero lost events, matching retained
+executable/PDB files, and 62,802 unique retained callback intervals with complete
+scheduling coverage. Of 7,768 retained misses, 508 overlap more than 10 µs of
+ordinary DPC/ISR activity on the callback's executing CPU; five include more
+than 10 µs off-CPU. The maximum unioned interrupt overlap is 294.4 µs, exceeding
+the 166.7 µs buffer budget. Graphics modules `dxgkrnl.sys` and `nvlddmkm.sys`
+appear in these overlaps. Threaded DPCs are excluded from interrupt subtraction,
+and nested interrupts are unioned rather than double-counted.
+
+This does not attribute every miss to a driver: 7,384 retained misses still
+exceed budget after subtracting observed interrupt/off-CPU intervals. The
+retained set combines uniform samples with the first 4,096 misses; it is not
+all 14,923 measured misses. Residual wall time includes app processing, worker
+waits, diagnostic queries, tracing and unobserved costs, not exclusive app CPU
+time. All trace findings are **diagnostic_only**, not a normal-use capacity pass
+or proof of a past unobserved glitch. Microsoft's [CPU analysis guidance](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis)
+and [threaded-DPC distinction](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/introduction-to-threaded-dpcs)
+describe the scheduling interpretation.
+
+Matching stack samples repeatedly identified NAM cabinet FFT work. Each track
+Rack was prepared for 512 samples while receiving eight. TrackProcessor now
+prepares native NAM input/track FX for the actual host block capacity, preserving
+the existing minimum-512 compatibility reserve for other processors. Selection
+uses the native type, not its display name, and runs only during preparation.
+This reduces repeated convolution work without buffering additional audio or
+changing the zero-latency cabinet algorithm. Master/bus preparation is unchanged.
+No worker-spin, work-dropping policy, extra recording monitor or Support hook was
+added.
+
+The focused regression checks insertion, device/render-size re-preparation and
+precision changes at 8/16/64/512/1,024 samples. It also compares 110,592 cabinet
+samples, including mono/stereo IRs, dual-mono selection, source-rate conversion,
+impulses, signal and tails. Maximum PCM difference is `1.490116119384766e-08`
+against a `2e-5` tolerance, with zero reported convolution latency. This is
+**pass** for those deterministic invariants; subjective sound is **not_asserted**.
+Windows Release and Debug builds completed without C++ compiler warnings, and
+the focused realtime safety regression passed in both configurations. The full
+NAM matrix passed 206 objective checks (18 diagnostic-only and eight not-asserted
+items retained); the render/export matrix passed all 422 checks. Debug's copied
+frontend is current. These local passes do not extend the earlier installer or
+WACK result to the modified executable.
+
+Three subsequent physical-interface runs used four loaded NAM tracks, normal
+workers, 4x oversampling, Audient ASIO / 48 kHz / 8 samples, three seconds of
+warmup and 30 measured seconds. ETW and optional thread-cycle queries were off;
+the explicit probe still measured each callback. Dota 2 remained running.
+
+| Run order | Preparation | Mean / p99 / max, µs | Measured misses / 180,000 | Worker misses, warmup + measurement |
+| --- | --- | --- | --- | --- |
+| 1 | Actual host block | 87.3 / 201.8 / 386.7 | 3,958 | 6,299 |
+| 2 | Saved previous 512-block build | 116.6 / 237.6 / 406.1 | 8,948 | 36,173 |
+| 3 | Actual host block, repeat | 85.5 / 197.9 / 343.2 | 3,955 | 6,183 |
+
+All three passed raw synthetic-recording checks and failed engine/worker
+capacity. Worker counts cover a different interval and must not be added to
+the measured outer misses. These runs support the direction of improvement
+under this test setup, not a universal percentage claim: game activity was not
+a controlled replay. They do not repeat or clear the earlier 31-track UI test.
+Unsupported physical driver xruns, processed-monitor continuity, loopback
+latency and audition remain **not_asserted**. **The zero-miss 8-sample gate fails.**
+
+Previous build / trace executable SHA-256:
+`663b9d97ac4d3a5f277b2c0f46315750a2fa0ca78e97c9b539fdb1ecb3870249`.
+Updated Release executable SHA-256:
+`bc404150f7494ae493a4ca3c7075bc93debc51c9fed99430a404e362a234b21a`.
+Local traces, matching binaries, analysis and reports remain under
+`output/eight-sample-investigation/`; private machine traces are not committed
+or uploaded. Trace artifacts are evidence of this explicit diagnostic session,
+not a background telemetry facility.
 
 ## Physical test matrix
 
