@@ -93,6 +93,9 @@ public:
     void reset() override;
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
 
+    // Device-free qualification of the embedded, fully dry channel-strip path.
+    static juce::var runEmbeddedDryRegression();
+
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
@@ -224,6 +227,8 @@ private:
     std::uint32_t midiProgramSerial=0;
     int midiProgramSampleOffset=0;
     void processEQAudioBlock(juce::AudioBuffer<float>& buffer);
+    void processEQAudioBlockGeneral(juce::AudioBuffer<float>& buffer);
+    juce::uint64 embeddedDryFastBlocks = 0; // Callback-owned; device-free qualification reads after processing.
     void publishMIDIPrograms(std::unique_ptr<MIDIProgramBank> next);
     void getEQStateInformationRaw(juce::MemoryBlock& destination, const std::array<float, MIDIProgramBank::valueCount>& snapshot, const std::array<float, MIDIProgramBank::configurationCount>& configuration);
     void saveMIDIPrograms(juce::ValueTree& state) const;

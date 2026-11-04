@@ -73,7 +73,7 @@ void AudioRecorder::maintainRecordingPreviews()
 
 AudioRecorder::AudioRecorder(const juce::File& recoveryRoot) : recoveryJournal(recoveryRoot)
 {
-    // Start the background I/O thread for ThreadedWriter
+    // Start the shared background I/O thread for prepared recording FIFOs.
     writerThread.startThread(juce::Thread::Priority::normal);
 }
 
@@ -124,7 +124,7 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
         + " file=" + file.getFullPathName()
         + " sampleRate=" + juce::String(sampleRate, 2)
         + " channels=" + juce::String(numChannels));
-    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> previousWriter;
+    std::unique_ptr<RecordingDiskWriter> previousWriter;
     std::shared_ptr<RecordingWriteStatus> previousWriteStatus;
     double previousSampleRate = sampleRate;
     // Construct the replacement completely before unpublishing any current
@@ -196,12 +196,11 @@ bool AudioRecorder::startRecordingInternal(const juce::String& trackId,
     checkedStream->flush();
     if (writeStatus->fault.load() != RecordingWriteStatus::none) return false;
 
-    // Wrap in ThreadedWriter - moves disk I/O to background thread
+    // Prepare all FIFO storage and register the disk client before publication.
     auto checkedWriter = std::make_unique<CheckedRecordingWriter>(std::move(writer), writeStatus, checkedStream);
-    auto threadedWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(
-        checkedWriter.release(), writerThread, 65536);
     // Periodic header publication and checked flush, exclusively on disk thread.
-    threadedWriter->setFlushInterval(static_cast<int>(sampleRate * 5.0));
+    auto threadedWriter = std::make_unique<RecordingDiskWriter>(
+        std::move(checkedWriter), writerThread, 65536, static_cast<int>(sampleRate * 5.0));
 
     auto preview = std::make_shared<RecordingPreview>(sampleRate, numChannels);
 
@@ -320,8 +319,7 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
     const float inputPeak = peakFromBuffer(buffer, numSamples);
 #endif
 
-    // ThreadedWriter::write() is audio-thread safe (lock-free ring buffer internally)
-    // It copies data immediately, so buffer pointers don't need to remain valid
+    // Copy and FIFO publication only: no background-thread wake event or mutex.
     if (!state.threadedWriter->write(buffer.getArrayOfReadPointers(), numSamples))
     {
         writerBufferOverflowCount.fetch_add(1, std::memory_order_relaxed);
@@ -398,7 +396,7 @@ void AudioRecorder::writeBlock(const juce::String& trackId,
 void AudioRecorder::stopRecording(const juce::String& trackId)
 {
     const juce::ScopedLock control(controlLock);
-    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writerToFlush;
+    std::unique_ptr<RecordingDiskWriter> writerToFlush;
     juce::File outputFile;
     {
         const juce::ScopedLock sl(writerLock);

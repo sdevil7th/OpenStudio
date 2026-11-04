@@ -6,6 +6,7 @@
 #include <JuceHeader.h>
 #include "ApplicationLaunchState.h"
 #include "AudioEngine.h"
+#include "RecordingQualification.h"
 #include "CrashDiagnostics.h"
 #include "RuntimeSafetyRegression.h"
 #include "RecordingRecoveryRegression.h"
@@ -83,6 +84,194 @@ juce::String getCommandLineOptionValue(const juce::String& commandLine, const ju
 
     return {};
 }
+
+// Opt-in qualification only. No timer or file work in ordinary application runs.
+class RealtimeQualificationReporter final : private juce::Timer
+{
+public:
+    RealtimeQualificationReporter(AudioEngine& engineToRead, juce::File reportToWrite,
+                                  juce::File callbackTraceToWrite = {}, bool threadCycles = false)
+        : engine(engineToRead), report(std::move(reportToWrite))
+    {
+        report.getParentDirectory().createDirectory();
+        if (callbackTraceToWrite != juce::File())
+        {
+            callbackTraceFile = std::move(callbackTraceToWrite);
+            if (callbackTraceFile == report
+                || (!callbackTraceFile.hasFileExtension("ndjson") && !callbackTraceFile.hasFileExtension("jsonl")))
+                juce::Logger::writeToLog("Paired callback trace ignored: use a separate .ndjson or .jsonl sidecar.");
+            else if (callbackTraceFile.getParentDirectory().createDirectory())
+            {
+                callbackTraceOutput = callbackTraceFile.createOutputStream();
+                if (callbackTraceOutput != nullptr && callbackTraceOutput->openedOk())
+                {
+                    callbackTraceSessionId = juce::Uuid().toString();
+                    callbackTraceCyclesRequested = threadCycles;
+                    callbackTraceBatch.resize(RealtimeCallbackTrace::capacity);
+                    auto* header = new juce::DynamicObject();
+                    header->setProperty("kind", "callback_trace_header");
+                    header->setProperty("schemaVersion", 1);
+                    header->setProperty("classification", "diagnostic_only");
+                    header->setProperty("traceSessionId", callbackTraceSessionId);
+                    header->setProperty("capturedAtMilliseconds", static_cast<double>(juce::Time::currentTimeMillis()));
+                    header->setProperty("startWallTimeMs", juce::Time::getMillisecondCounterHiRes());
+                    header->setProperty("sampleIntervalCallbacks", static_cast<juce::int64>(RealtimeCallbackTrace::sampleInterval));
+                    header->setProperty("capturesAllDeadlineMisses", true);
+                    header->setProperty("qpcTicksPerSecond", juce::Time::getHighResolutionTicksPerSecond());
+                    header->setProperty("timingScope", "AudioEngine entry through processing; excludes caller/ASIO wrapper and telemetry publication");
+                    header->setProperty("queueCapacity", static_cast<int>(RealtimeCallbackTrace::capacity));
+                    juce::Array<juce::var> names;
+                    for (const auto* name : { "playback", "tracksFXRouting", "masterMonitoring", "meteringSync", "callbackOverhead" }) names.add(name);
+                    header->setProperty("stageNames", names);
+                    header->setProperty("threadCyclesRequested", threadCycles);
+                    header->setProperty("wallTimingScope", "AudioEngine entry includes callback prelude and optional thread queries; caller/ASIO work and telemetry/queue publication after the end timestamp are excluded.");
+                    header->setProperty("threadCycleScope", "Raw QueryThreadCycleTime delta only. Do not convert to elapsed CPU time or assert descheduling: CPU frequency and processor migration affect interpretation.");
+                    header->setProperty("perturbation", "Opt-in diagnostic instrumentation; acceptance must be repeated with tracing disabled.");
+                    if (writeCallbackTraceObject(juce::var(header)))
+                    {
+                        callbackTraceOutput->flush();
+                        if (callbackTraceOutput->getStatus().wasOk())
+                            engine.setRealtimeCallbackTraceEnabled(true, threadCycles);
+                    }
+                    if (!engine.getRealtimeCallbackTraceStats().enabled)
+                        disableCallbackTraceAfterWriteFailure();
+                }
+                else juce::Logger::writeToLog("Paired callback trace could not open: " + callbackTraceFile.getFullPathName());
+            }
+        }
+        timerCallback();
+        startTimer(1000);
+    }
+    ~RealtimeQualificationReporter() override
+    {
+        stopTimer();
+        engine.setRealtimeCallbackTraceEnabled(false);
+        timerCallback();
+        if (callbackTraceOutput != nullptr) callbackTraceOutput->flush();
+    }
+private:
+    bool writeCallbackTraceObject(const juce::var& object)
+    {
+        if (callbackTraceOutput == nullptr) return false;
+        const auto json = juce::JSON::toString(object, true);
+        return callbackTraceOutput->write(json.toRawUTF8(), json.getNumBytesAsUTF8())
+            && callbackTraceOutput->write("\n", 1);
+    }
+    void disableCallbackTraceAfterWriteFailure()
+    {
+        engine.setRealtimeCallbackTraceEnabled(false);
+        ++callbackTraceWriteFailures;
+        juce::Logger::writeToLog("Paired callback trace disabled after output failure: " + callbackTraceFile.getFullPathName());
+        callbackTraceOutput.reset();
+    }
+    void drainCallbackTrace()
+    {
+        if (callbackTraceOutput == nullptr) return;
+        const auto count = engine.drainRealtimeCallbackTrace(callbackTraceBatch.data(), callbackTraceBatch.size());
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            const auto& event = callbackTraceBatch[index];
+            auto* object = new juce::DynamicObject();
+            object->setProperty("kind", "callback");
+            object->setProperty("classification", "diagnostic_only");
+            object->setProperty("traceSessionId", callbackTraceSessionId);
+            object->setProperty("callbackCounter", static_cast<juce::int64>(event.callbackCounter));
+            object->setProperty("startSamplePosition", static_cast<juce::int64>(event.startSamplePosition));
+            object->setProperty("startQpcTicks", static_cast<juce::int64>(event.startQpcTicks));
+            object->setProperty("endQpcTicks", static_cast<juce::int64>(event.endQpcTicks));
+            object->setProperty("startWallTimeMs", event.startWallTimeMs);
+            object->setProperty("measuredWallMs", event.measuredWallMs);
+            object->setProperty("budgetMs", event.budgetMs);
+            object->setProperty("sampleRate", event.sampleRate);
+            object->setProperty("blockSize", event.blockSize);
+            object->setProperty("playing", event.playing);
+            object->setProperty("recording", event.recording);
+            object->setProperty("deadlineMiss", event.budgetMs > 0.0 && event.measuredWallMs > event.budgetMs);
+            object->setProperty("stageTimingsAvailable", event.stageTimingsAvailable);
+            juce::Array<juce::var> stages;
+            for (const auto duration : event.stageMs) stages.add(duration);
+            object->setProperty("stageMs", stages);
+            object->setProperty("threadId", static_cast<juce::int64>(event.threadId));
+            object->setProperty("processorIdsAvailable", event.processorIdsAvailable);
+            object->setProperty("processorGroupStart", static_cast<int>(event.processorGroupStart));
+            object->setProperty("processorNumberStart", static_cast<int>(event.processorNumberStart));
+            object->setProperty("processorGroupEnd", static_cast<int>(event.processorGroupEnd));
+            object->setProperty("processorNumberEnd", static_cast<int>(event.processorNumberEnd));
+            object->setProperty("threadCyclesRequested", event.threadCyclesRequested);
+            object->setProperty("threadCyclesValid", event.threadCyclesValid);
+            object->setProperty("threadCycleDelta", static_cast<juce::int64>(event.threadCycleDelta));
+            if (!writeCallbackTraceObject(juce::var(object)))
+            {
+                // Earlier records in this drained batch can still be buffered
+                // when a later write fails; retain a conservative loss bound.
+                callbackTracePossiblyUnwritten += static_cast<juce::uint64>(count);
+                disableCallbackTraceAfterWriteFailure();
+                return;
+            }
+            ++callbackTraceWrittenSamples;
+        }
+        const auto stats = engine.getRealtimeCallbackTraceStats();
+        auto* batch = new juce::DynamicObject();
+        batch->setProperty("kind", "callback_trace_batch");
+        batch->setProperty("classification", "diagnostic_only");
+        batch->setProperty("traceSessionId", callbackTraceSessionId);
+        batch->setProperty("capturedAtMilliseconds", static_cast<double>(juce::Time::currentTimeMillis()));
+        batch->setProperty("startWallTimeMs", juce::Time::getMillisecondCounterHiRes());
+        batch->setProperty("batchSamples", static_cast<int>(count));
+        batch->setProperty("published", static_cast<juce::int64>(stats.published));
+        batch->setProperty("consumed", static_cast<juce::int64>(stats.consumed));
+        batch->setProperty("pending", static_cast<juce::int64>(stats.pending));
+        batch->setProperty("droppedFull", static_cast<juce::int64>(stats.droppedFull));
+        batch->setProperty("enabled", stats.enabled);
+        if (!writeCallbackTraceObject(juce::var(batch)))
+        {
+            callbackTracePossiblyUnwritten += static_cast<juce::uint64>(count);
+            disableCallbackTraceAfterWriteFailure();
+            return;
+        }
+        callbackTraceOutput->flush();
+        if (callbackTraceOutput->getStatus().failed())
+        {
+            callbackTracePossiblyUnwritten += static_cast<juce::uint64>(count);
+            disableCallbackTraceAfterWriteFailure();
+        }
+    }
+    void timerCallback() override
+    {
+        drainCallbackTrace();
+        auto* data = new juce::DynamicObject();
+        data->setProperty("capturedAtMilliseconds", static_cast<double>(juce::Time::currentTimeMillis()));
+        data->setProperty("telemetry", engine.getRealtimeAudioTelemetry());
+        data->setProperty("audioDebugSnapshot", engine.getAudioDebugSnapshot());
+        const auto trace = engine.getRealtimeCallbackTraceStats();
+        auto* traceStatus = new juce::DynamicObject();
+        traceStatus->setProperty("enabled", trace.enabled);
+        traceStatus->setProperty("classification", "diagnostic_only");
+        traceStatus->setProperty("filePath", callbackTraceFile.getFullPathName());
+        traceStatus->setProperty("threadCyclesRequested", callbackTraceCyclesRequested);
+        traceStatus->setProperty("published", static_cast<juce::int64>(trace.published));
+        traceStatus->setProperty("consumed", static_cast<juce::int64>(trace.consumed));
+        traceStatus->setProperty("pending", static_cast<juce::int64>(trace.pending));
+        traceStatus->setProperty("droppedFull", static_cast<juce::int64>(trace.droppedFull));
+        traceStatus->setProperty("writtenSamples", static_cast<juce::int64>(callbackTraceWrittenSamples));
+        traceStatus->setProperty("possiblyUnwrittenSamples", static_cast<juce::int64>(callbackTracePossiblyUnwritten));
+        traceStatus->setProperty("writeFailures", callbackTraceWriteFailures);
+        data->setProperty("callbackTrace", juce::var(traceStatus));
+        data->setProperty("subjectiveAudioQuality", "not_asserted");
+        juce::TemporaryFile temporary(report);
+        if (temporary.getFile().replaceWithText(juce::JSON::toString(juce::var(data))))
+            temporary.overwriteTargetFileWithTemporary();
+    }
+    AudioEngine& engine;
+    juce::File report;
+    juce::File callbackTraceFile;
+    juce::String callbackTraceSessionId;
+    std::unique_ptr<juce::FileOutputStream> callbackTraceOutput;
+    std::vector<RealtimeCallbackTraceEvent> callbackTraceBatch;
+    juce::uint64 callbackTraceWrittenSamples = 0, callbackTracePossiblyUnwritten = 0;
+    int callbackTraceWriteFailures = 0;
+    bool callbackTraceCyclesRequested = false;
+};
 
 juce::File getWritableStartupLogFile()
 {
@@ -1396,6 +1585,8 @@ public:
         const auto startupSelfTestMode = commandLineHasFlag(commandLine, "--startup-self-test");
         const auto automatedRegressionHeadlessMode = commandLineHasFlag(commandLine, "--automated-regression-headless");
         const auto renderExportRegressionHeadlessMode = commandLineHasFlag(commandLine, "--render-export-regression-headless");
+        const auto projectQualificationPath = getCommandLineOptionValue(commandLine, "--qualify-project-headless");
+        const auto recordingQualificationPath = getCommandLineOptionValue(commandLine, "--qualify-recording-headless");
         const auto startupSelfTestReportPath = getCommandLineOptionValue(commandLine, "--report");
         const auto pitchRegressionHeadlessJobPath = getCommandLineOptionValue(commandLine, "--pitch-regression-headless");
         const auto pitchRegressionJobPath = getCommandLineOptionValue(commandLine, "--pitch-regression");
@@ -1414,6 +1605,8 @@ public:
             && commandLineHasFlag(commandLine, "--window-lifecycle-offline");
         ScopedHeadlessRegressionMessages headlessMessages(
             automatedRegressionHeadlessMode || renderExportRegressionHeadlessMode
+            || projectQualificationPath.isNotEmpty()
+            || recordingQualificationPath.isNotEmpty()
             || pitchRegressionHeadlessJobPath.isNotEmpty()
             || cleanGuitarRegressionReportPath.isNotEmpty()
             || namRackRegressionReportPath.isNotEmpty()
@@ -1598,7 +1791,7 @@ public:
         const bool focusedNAMOffline = namRackRegressionReportPath.isNotEmpty()
             && (juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_FUZZ_ONLY", {}) == "1"
                 || juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_TWO_RACK_CPU_ONLY", {}) == "1");
-        audioEngine = std::make_unique<AudioEngine>(focusedNAMOffline || windowLifecycleOffline || renderExportRegressionHeadlessMode
+        audioEngine = std::make_unique<AudioEngine>(focusedNAMOffline || windowLifecycleOffline || renderExportRegressionHeadlessMode || projectQualificationPath.isNotEmpty() || recordingQualificationPath.isNotEmpty()
             ? AudioEngine::DeviceStartup::offline : AudioEngine::DeviceStartup::openHardware);
         audioEngine->onFXSlotsRemoved = [this](const juce::String& trackId,
                                               const juce::String& chain, int firstIndex)
@@ -1614,6 +1807,30 @@ public:
 
             const auto exitCode = runHeadlessAutomatedRegressionSuite(*audioEngine, reportFile);
             setApplicationReturnValue(exitCode);
+            quit();
+            return;
+        }
+
+        if (recordingQualificationPath.isNotEmpty())
+        {
+            const auto secondsOption = getCommandLineOptionValue(commandLine, "--seconds");
+            const auto result = runRecordingQualification(juce::File(recordingQualificationPath),
+                juce::File(headlessOutputDirectoryPath), secondsOption.isEmpty() ? 130.0 : secondsOption.getDoubleValue());
+            const bool written = startupSelfTestReportPath.isNotEmpty()
+                && writeHeadlessResult(juce::File(startupSelfTestReportPath), result);
+            setApplicationReturnValue(written && result["objectiveGateStatus"].toString() == "pass" ? 0 : 2);
+            quit();
+            return;
+        }
+        if (projectQualificationPath.isNotEmpty())
+        {
+            const auto outputDirectory = juce::File(headlessOutputDirectoryPath.trim().unquoted());
+            const auto payloadFile = juce::File(getCommandLineOptionValue(commandLine, "--project-qualification-payload").trim().unquoted());
+            const auto result = audioEngine->runProjectQualification(juce::File(projectQualificationPath.trim().unquoted()),
+                                                                      payloadFile, outputDirectory);
+            const bool written = startupSelfTestReportPath.isNotEmpty()
+                && writeHeadlessResult(juce::File(startupSelfTestReportPath.trim().unquoted()), result);
+            setApplicationReturnValue(written && result["objectiveGateStatus"].toString() == "pass" ? 0 : 2);
             quit();
             return;
         }
@@ -1728,6 +1945,15 @@ public:
 
         juce::Logger::writeToLog("MainWindow Created.");
 
+        const auto telemetryReport = getCommandLineOptionValue(commandLine, "--realtime-telemetry-report");
+        const auto callbackTracePath = getCommandLineOptionValue(commandLine, "--realtime-callback-trace");
+        if (telemetryReport.isNotEmpty())
+            qualificationReporter = std::make_unique<RealtimeQualificationReporter>(*audioEngine, juce::File(telemetryReport),
+                callbackTracePath.isEmpty() ? juce::File() : juce::File::getCurrentWorkingDirectory().getChildFile(callbackTracePath),
+                commandLineHasFlag(commandLine, "--realtime-thread-cycles"));
+        else if (callbackTracePath.isNotEmpty())
+            juce::Logger::writeToLog("Paired callback trace ignored: --realtime-telemetry-report is required for its sole consumer.");
+
         if (windowLifecycleHarnessMode)
         {
             const auto reportFile = startupSelfTestReportPath.isNotEmpty()
@@ -1745,6 +1971,7 @@ public:
 
     void shutdown() override
     {
+        qualificationReporter.reset();
         if (audioEngine != nullptr)
             OpenStudioCrashDiagnostics::beginFinalShutdown();
         juce::Logger::writeToLog("Application Check-out.");
@@ -3146,6 +3373,7 @@ private:
 
     std::unique_ptr<juce::FileLogger> startupLogger;
     std::unique_ptr<AudioEngine> audioEngine;
+    std::unique_ptr<RealtimeQualificationReporter> qualificationReporter;
     AppUpdater appUpdater;
     std::unique_ptr<juce::DocumentWindow> storeQueryWindow;
     MainComponent::StartupMode startupMode = MainComponent::StartupMode::normal;

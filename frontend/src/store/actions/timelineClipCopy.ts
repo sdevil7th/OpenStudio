@@ -1,6 +1,7 @@
 import type { AudioClip, MIDIClip, Track, DAWActions, DAWState } from "../useDAWStore";
 import type { AutomationClipMove } from "./clipEditing";
 import { commandManager } from "../commands";
+import { forkCopiedCrossfades } from "../../utils/clipCrossfades";
 import { isClipEditLocked } from "../../utils/clipEditLock";
 import { canTrackAcceptTimelineClip } from "../../utils/timelineClipboard";
 
@@ -91,6 +92,9 @@ export function createTimelineClipCopyAction(hooks: TimelineClipCopyHooks): DAWA
       additions.set(source.targetTrack.id, target);
     }
 
+    const copiedAudio = forkCopiedCrossfades([...additions.values()].flatMap(target => target.audio));
+    const copiedById = new Map(copiedAudio.map(clip => [clip.id, clip]));
+    for (const target of additions.values()) target.audio = target.audio.map(clip => copiedById.get(clip.id)!);
     let newTracks = oldTracks.map(track => {
       const target = additions.get(track.id);
       return target ? { ...track, clips: [...track.clips, ...target.audio], midiClips: [...track.midiClips, ...target.midi] } : track;

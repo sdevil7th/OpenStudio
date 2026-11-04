@@ -11,6 +11,7 @@ export interface MenuItem {
   swatchColor?: string;
   shortcut?: string;
   disabled?: boolean;
+  disabledReason?: string;
   divider?: boolean;
   submenu?: MenuItem[];
   onClick?: () => void;
@@ -93,6 +94,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
     <div
       ref={menuRef}
       data-context-menu="true"
+      role="menu"
       className="fixed z-[9999] min-w-[180px] py-1 bg-neutral-800 border border-neutral-600 rounded-md shadow-xl"
       style={{
         left: adjustedPos.x,
@@ -112,6 +114,9 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
         return (
           <div
             key={index}
+            role="menuitem"
+            aria-disabled={item.disabled || undefined}
+            title={item.disabled ? item.disabledReason : undefined}
             className={`
               relative px-3 py-1.5 flex items-center justify-between gap-4 cursor-pointer
               ${item.disabled ? "text-neutral-500 cursor-not-allowed" : "text-neutral-200 hover:bg-neutral-700"}
@@ -131,7 +136,9 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                   style={{ backgroundColor: item.swatchColor }}
                 />
               )}
-              <span className="text-sm">{item.label}</span>
+              <span className="flex flex-col text-sm">{item.label}
+                {item.disabled && item.disabledReason && <span className="max-w-64 text-xs text-daw-text-secondary">{item.disabledReason}</span>}
+              </span>
             </div>
             <div className="flex items-center gap-2">
               {item.shortcut && (

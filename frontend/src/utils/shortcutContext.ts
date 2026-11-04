@@ -201,6 +201,7 @@ const NON_TEXT_CONTROL_SHORTCUT_TARGET_SELECTOR = [
   "[role='menuitemcheckbox']",
   "[role='menuitemradio']",
   "[role='radio']",
+  "[role='separator'][tabindex]",
   "[role='slider']",
   "[role='spinbutton']",
   "[role='switch']",

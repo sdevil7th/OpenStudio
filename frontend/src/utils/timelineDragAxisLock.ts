@@ -50,6 +50,23 @@ export interface TimelineDropTrackHit {
   isInClipArea: boolean;
 }
 
+/** Divider targets share the same hit band for native imports and clip moves. */
+export function resolveTimelineInsertionIndex(
+  absoluteY: number,
+  rowYs: readonly number[],
+  contentHeight: number,
+  previousIndex?: number,
+  band = 8,
+): number | null {
+  if (rowYs.length === 0) return 0;
+  if (previousIndex !== undefined && previousIndex > 0 && previousIndex < rowYs.length
+    && Math.abs(absoluteY - rowYs[previousIndex]) <= band) return previousIndex;
+  for (let index = 1; index < rowYs.length; index++) {
+    if (Math.abs(absoluteY - rowYs[index]) <= band / 2) return index;
+  }
+  return absoluteY >= contentHeight - band / 2 ? rowYs.length : null;
+}
+
 /** Resolve a vertical clip drop while keeping above-timeline drags on track 0. */
 export function resolveTimelineDropTrackIndex(
   absoluteY: number,

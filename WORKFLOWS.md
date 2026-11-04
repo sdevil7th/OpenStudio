@@ -26,6 +26,13 @@ On Windows the Debug executable is
 `build/OpenStudio_artefacts/Debug/OpenStudio.exe`. Its packaged fallback is the
 copied `webui` directory beside the executable.
 
+The Windows MSVC Debug host uses optimized code with debug symbols, `_DEBUG`,
+the Debug CRT and assertions retained. This keeps shared inline audio helpers
+optimized even when their linked definition comes from a UI or test file.
+Stepping and local-variable inspection can be less direct than in unoptimized
+code. The WebView2 JUCE module retains its `/O1` exception, and Debug links are
+nonincremental so replaced helper definitions are selected afresh.
+
 ## Manual testing handoff
 
 The user-facing command remains `python build.py dev --run`. After frontend or

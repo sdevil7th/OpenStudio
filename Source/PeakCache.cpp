@@ -1,5 +1,6 @@
 #include "PeakCache.h"
 #include <cmath>
+#include <array>
 
 namespace { constexpr juce::int64 maxPeakDataBytes = 256 * 1024 * 1024; }
 
@@ -73,105 +74,176 @@ bool PeakCache::hasCachedPeaks(const juce::File& audioFile) const
 void PeakCache::invalidate(const juce::File& audioFile)
 {
     const auto key = audioFile.getFullPathName();
-
     {
-        const juce::ScopedLock sl(cacheLock);
-        memoryCache.erase(key);
+        const juce::ScopedLock publication(publicationLock);
+        {
+            const juce::ScopedLock sl(cacheLock);
+            ++sourceGenerations[key];
+            memoryCache.erase(key);
+        }
+        {
+            const juce::ScopedLock sl(pendingLock);
+            pendingGenerations.erase(key);
+        }
+        auto peakFile = getPeakFilePath(audioFile);
+        if (peakFile.existsAsFile()) peakFile.deleteFile();
     }
-
     {
-        const juce::ScopedLock sl(pendingLock);
-        pendingGenerations.erase(key);
+        const juce::ScopedLock sl(boundaryLock);
+        boundaryPeaks.clear();
     }
-
-    auto peakFile = getPeakFilePath(audioFile);
-    if (peakFile.existsAsFile())
-        peakFile.deleteFile();
 
 }
 
-juce::var PeakCache::getPeaks(const juce::File& audioFile,
-                               int samplesPerPixel,
-                               int startSample,
-                               int numPixels) const
+PeakCache::SourceVersion PeakCache::captureSourceVersion(const juce::File& audioFile) const
 {
-    if (samplesPerPixel < 1 || numPixels < 1 || numPixels > 32768)
-        return juce::var(juce::Array<juce::var>());
-    auto buildResult = [samplesPerPixel, startSample, numPixels](const CacheEntry& entry)
+    SourceVersion version;
+    version.key = audioFile.getFullPathName();
     {
-        juce::Array<juce::var> peakData;
-        if (entry.levels.empty())
-            return juce::var(peakData);
+        const juce::ScopedLock sl(cacheLock);
+        version.generation = sourceGenerations[version.key];
+    }
+    version.size = audioFile.getSize();
+    version.modified = audioFile.getLastModificationTime().toMilliseconds();
+    return version;
+}
 
-        // Find the best mipmap level (closest stride <= samplesPerPixel)
-        const MipmapLevel* bestLevel = &entry.levels[0];
-        for (const auto& level : entry.levels)
+bool PeakCache::isGenerationCurrent(const SourceVersion& version) const
+{
+    const juce::ScopedLock sl(cacheLock);
+    const auto found = sourceGenerations.find(version.key);
+    const auto generation = found == sourceGenerations.end() ? 0 : found->second;
+    return !stopping.load() && generation == version.generation;
+}
+
+bool PeakCache::sourceMatches(const juce::File& audioFile, const SourceVersion& version)
+{
+    return audioFile.existsAsFile() && audioFile.getSize() == version.size
+        && audioFile.getLastModificationTime().toMilliseconds() == version.modified;
+}
+
+std::shared_ptr<const PeakCache::CacheEntry> PeakCache::publishLoadedEntry(
+    const juce::File& audioFile, const SourceVersion& version,
+    std::shared_ptr<const CacheEntry> loaded) const
+{
+    const juce::ScopedLock publication(publicationLock);
+    if (!isGenerationCurrent(version) || !sourceMatches(audioFile, version)) return {};
+    const juce::ScopedLock sl(cacheLock);
+    // invalidate() uses publicationLock first, so generation cannot change
+    // between validation and insertion. Prefer a current entry already loaded.
+    auto& current = memoryCache[version.key];
+    if (!current) current = std::move(loaded);
+    return current;
+}
+
+juce::var PeakCache::getPeaks(const juce::File& audioFile,
+                               int samplesPerPixel, int startSample, int numPixels,
+                               juce::int64 sourceRangeStartSample,
+                               juce::int64 sourceRangeEndSample) const
+{
+    if (samplesPerPixel < 1 || startSample < 0 || numPixels < 1 || numPixels > 32768)
+        return juce::var(juce::Array<juce::var>());
+
+    std::shared_ptr<const CacheEntry> entry;
+    SourceVersion sourceVersion;
+    sourceVersion.key = audioFile.getFullPathName();
+    {
+        const juce::ScopedLock sl(cacheLock);
+        sourceVersion.generation = sourceGenerations[sourceVersion.key];
+        const auto found = memoryCache.find(sourceVersion.key);
+        if (found != memoryCache.end()) entry = found->second;
+    }
+    if (entry == nullptr)
+    {
+        auto loaded = std::make_shared<CacheEntry>();
+        sourceVersion.size = audioFile.getSize();
+        sourceVersion.modified = audioFile.getLastModificationTime().toMilliseconds();
+        if (!loadFromFile(getPeakFilePath(audioFile), audioFile, *loaded))
+            return juce::var(juce::Array<juce::var>());
+        entry = publishLoadedEntry(audioFile, sourceVersion, std::move(loaded));
+        if (!entry) return juce::var(juce::Array<juce::var>());
+    }
+    juce::Array<juce::var> peaks;
+    if (entry->levels.empty()) return juce::var(peaks);
+    const auto rangeStart = juce::jlimit<juce::int64>(0, entry->totalSamples, sourceRangeStartSample);
+    const auto rangeEnd = sourceRangeEndSample < 0 ? entry->totalSamples
+        : juce::jlimit<juce::int64>(rangeStart, entry->totalSamples, sourceRangeEndSample);
+    if (startSample >= rangeEnd || rangeStart >= rangeEnd) return juce::var(peaks);
+    const MipmapLevel* level = &entry->levels.front();
+    for (const auto& candidate : entry->levels)
+        if (candidate.stride <= samplesPerPixel) level = &candidate;
+    const auto pixelCount = juce::jmin<juce::int64>(numPixels,
+        (rangeEnd - startSample + samplesPerPixel - 1) / samplesPerPixel);
+    const int channels = entry->numChannels;
+    peaks.ensureStorageAllocated(1 + static_cast<int>(pixelCount) * channels * 2);
+    peaks.add(channels);
+
+    // A trim can bisect a cached bucket. Decode only that bounded bucket on
+    // the worker and cache its retained aggregate; never include removed audio.
+    const auto clippedBucket = [&](juce::int64 first, juce::int64 last)
+    {
+        const auto key = audioFile.getFullPathName() + ":" + juce::String(sourceVersion.generation)
+            + ":" + juce::String(audioFile.getLastModificationTime().toMilliseconds())
+            + ":" + juce::String(first) + ":" + juce::String(last);
         {
-            if (level.stride <= samplesPerPixel)
-                bestLevel = &level;
+            const juce::ScopedLock sl(boundaryLock);
+            const auto found = boundaryPeaks.find(key);
+            if (found != boundaryPeaks.end()) return found->second;
         }
-
-        int ratio = samplesPerPixel / bestLevel->stride;
-        if (ratio < 1) ratio = 1;
-
-        const int numChannels = bestLevel->numChannels;
-        const int startPeak = (startSample > 0) ? std::min(startSample / bestLevel->stride, bestLevel->numPeaks - 1) : 0;
-        const int remainingMipmapPeaks = std::max(0, bestLevel->numPeaks - startPeak);
-        const int actualPeaks = std::min(numPixels, remainingMipmapPeaks / std::max(1, ratio));
-
-        peakData.ensureStorageAllocated(1 + actualPeaks * numChannels * 2);
-        peakData.add(juce::var(numChannels));
-
-        const int stride2 = numChannels * 2;
-        for (int pixel = 0; pixel < actualPeaks; ++pixel)
+        std::vector<float> result(static_cast<size_t>(channels * 2), 0.0f);
+        juce::AudioFormatManager manager;
+        manager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(manager.createReaderFor(audioFile));
+        const int count = static_cast<int>(last - first); // at most one mip bucket
+        juce::AudioBuffer<float> samples(channels, count);
+        if (reader == nullptr || !reader->read(&samples, 0, count, first, true, true))
+            return std::vector<float>();
+        for (int channel = 0; channel < channels; ++channel)
         {
-            const int srcStart = startPeak + pixel * ratio;
-            const int srcEnd = std::min(srcStart + ratio, bestLevel->numPeaks);
-
-            for (int ch = 0; ch < numChannels; ++ch)
-            {
-                float minVal = 0.0f;
-                float maxVal = 0.0f;
-
-                for (int s = srcStart; s < srcEnd; ++s)
-                {
-                    const int dataIdx = s * stride2 + ch * 2;
-                    if (dataIdx + 1 < static_cast<int>(bestLevel->data.size()))
-                    {
-                        const float mn = bestLevel->data[static_cast<size_t>(dataIdx)];
-                        const float mx = bestLevel->data[static_cast<size_t>(dataIdx) + 1];
-                        if (s == srcStart || mn < minVal) minVal = mn;
-                        if (s == srcStart || mx > maxVal) maxVal = mx;
-                    }
-                }
-
-                peakData.add(juce::var(minVal));
-                peakData.add(juce::var(maxVal));
-            }
+            const auto extrema = samples.findMinMax(channel, 0, count);
+            result[static_cast<size_t>(channel * 2)] = extrema.getStart();
+            result[static_cast<size_t>(channel * 2 + 1)] = extrema.getEnd();
         }
-
-        return juce::var(peakData);
+        const juce::ScopedLock sl(boundaryLock);
+        if (boundaryPeaks.size() >= 256) boundaryPeaks.erase(boundaryPeaks.begin());
+        boundaryPeaks[key] = result;
+        return result;
     };
-
+    std::map<int, std::vector<float>> edges;
+    for (juce::int64 pixel = 0; pixel < pixelCount; ++pixel)
     {
-        const juce::ScopedLock sl(cacheLock);
-        auto it = memoryCache.find(audioFile.getFullPathName());
-        if (it != memoryCache.end())
-            return buildResult(it->second);
+        const auto pixelStart = static_cast<juce::int64>(startSample) + pixel * samplesPerPixel;
+        const auto first = juce::jmax(pixelStart, rangeStart);
+        const auto last = juce::jmin(pixelStart + samplesPerPixel, rangeEnd);
+        const int firstBucket = static_cast<int>(first / level->stride);
+        const int lastBucket = static_cast<int>((last + level->stride - 1) / level->stride);
+        std::array<float, 128> result {};
+        bool hasValues = false;
+        for (int bucket = firstBucket; first < last && bucket < lastBucket && bucket < level->numPeaks; ++bucket)
+        {
+            const auto bucketFirst = static_cast<juce::int64>(bucket) * level->stride;
+            const auto bucketLast = juce::jmin(bucketFirst + level->stride, entry->totalSamples);
+            const auto retainedFirst = juce::jmax(bucketFirst, rangeStart);
+            const auto retainedLast = juce::jmin(bucketLast, rangeEnd);
+            const float* values = level->data.data() + static_cast<size_t>(bucket) * channels * 2;
+            if (retainedFirst != bucketFirst || retainedLast != bucketLast)
+            {
+                auto found = edges.find(bucket);
+                if (found == edges.end()) found = edges.emplace(bucket, clippedBucket(retainedFirst, retainedLast)).first;
+                if (found->second.empty()) return juce::var(juce::Array<juce::var>());
+                values = found->second.data();
+            }
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                const auto index = static_cast<size_t>(channel * 2);
+                result[index] = hasValues ? juce::jmin(result[index], values[index]) : values[index];
+                result[index + 1] = hasValues ? juce::jmax(result[index + 1], values[index + 1]) : values[index + 1];
+            }
+            hasValues = true;
+        }
+        for (int value = 0; value < channels * 2; ++value) peaks.add(result[static_cast<size_t>(value)]);
     }
-
-    CacheEntry entry;
-    auto peakFile = getPeakFilePath(audioFile);
-
-    if (!peakFile.existsAsFile() || !loadFromFile(peakFile, audioFile, entry))
-        return juce::var(juce::Array<juce::var>());
-
-    auto result = buildResult(entry);
-    {
-        const juce::ScopedLock sl(cacheLock);
-        memoryCache[audioFile.getFullPathName()] = std::move(entry);
-    }
-    return result;
+    return juce::var(peaks);
 }
 
 bool PeakCache::loadFromFile(const juce::File& peakFile, const juce::File& audioFile, CacheEntry& entry) const
@@ -235,9 +307,14 @@ bool PeakCache::writeToFile(const juce::File& peakFile, const CacheEntry& entry,
                              int64_t sourceFileSize, int64_t sourceModTimeMs)
 {
     juce::TemporaryFile temporary(peakFile);
-    bool finalized = false;
-    {
-    juce::FileOutputStream fos(temporary.getFile());
+    return writeStagedFile(temporary.getFile(), entry, sourceFileSize, sourceModTimeMs)
+        && temporary.overwriteTargetFileWithTemporary();
+}
+
+bool PeakCache::writeStagedFile(const juce::File& stagingFile, const CacheEntry& entry,
+                                int64_t sourceFileSize, int64_t sourceModTimeMs)
+{
+    juce::FileOutputStream fos(stagingFile);
     if (!fos.openedOk())
         return false;
 
@@ -266,9 +343,7 @@ bool PeakCache::writeToFile(const juce::File& peakFile, const CacheEntry& entry,
     }
 
     fos.flush();
-    finalized = fos.getStatus().wasOk();
-    }
-    return finalized && temporary.overwriteTargetFileWithTemporary();
+    return fos.getStatus().wasOk();
 }
 
 bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
@@ -417,33 +492,66 @@ bool PeakCache::buildPeaks(const juce::File& audioFile, CacheEntry& entry)
 
 bool PeakCache::generateSync(const juce::File& audioFile)
 {
+    return generateSyncForVersion(audioFile, captureSourceVersion(audioFile));
+}
+
+bool PeakCache::generateSyncForVersion(const juce::File& audioFile, const SourceVersion& version)
+{
+    if (!isGenerationCurrent(version) || !sourceMatches(audioFile, version)) return false;
     CacheEntry entry;
     if (!buildPeaks(audioFile, entry) || stopping.load())
         return false;
-
-    // Write to disk
-    auto peakFile = getPeakFilePath(audioFile);
-    bool written = writeToFile(peakFile, entry,
-                                audioFile.getSize(),
-                                audioFile.getLastModificationTime().toMilliseconds());
-
-    // Store in memory cache
-    {
-        const juce::ScopedLock sl(cacheLock);
-        memoryCache[audioFile.getFullPathName()] = std::move(entry);
-    }
-
+    if (!isGenerationCurrent(version) || !sourceMatches(audioFile, version)) return false;
+    juce::TemporaryFile temporary(getPeakFilePath(audioFile));
+    const bool staged = writeStagedFile(temporary.getFile(), entry, version.size, version.modified);
+    const bool written = publishGeneratedEntry(audioFile, version,
+        std::make_shared<CacheEntry>(std::move(entry)), temporary, staged);
     if (written)
         juce::Logger::writeToLog("PeakCache: Generated peaks for " + audioFile.getFileName());
 
     return written;
 }
 
+bool PeakCache::publishGeneratedEntry(const juce::File& audioFile, const SourceVersion& version,
+    std::shared_ptr<const CacheEntry> entry, juce::TemporaryFile& temporary, bool stagedReady)
+{
+    const juce::ScopedLock publication(publicationLock);
+    if (!isGenerationCurrent(version) || !sourceMatches(audioFile, version)) return false;
+    const bool written = stagedReady && temporary.overwriteTargetFileWithTemporary();
+    {
+        const juce::ScopedLock sl(cacheLock);
+        memoryCache[version.key] = std::move(entry);
+    }
+    return written;
+}
+
+bool PeakCache::claimPendingGeneration(const SourceVersion& version)
+{
+    // Validate and claim as one publication transaction. An old request that
+    // paused before enqueue must not replace a newer generation's ownership.
+    const juce::ScopedLock publication(publicationLock);
+    if (!isGenerationCurrent(version)) return false;
+    const juce::ScopedLock sl(pendingLock);
+    const auto found = pendingGenerations.find(version.key);
+    if (found != pendingGenerations.end() && found->second == version.generation) return false;
+    pendingGenerations[version.key] = version.generation;
+    return true;
+}
+
+void PeakCache::finishPendingGeneration(const SourceVersion& version)
+{
+    const juce::ScopedLock sl(pendingLock);
+    const auto found = pendingGenerations.find(version.key);
+    if (found != pendingGenerations.end() && found->second == version.generation)
+        pendingGenerations.erase(found);
+}
+
 void PeakCache::generateAsync(const juce::File& audioFile, std::function<void()> onComplete)
 {
     if (stopping.load()) return;
-    const auto complete = [alive = completions.token(), onComplete] {
-        if (MessageThreadLifetime::accepts(alive) && onComplete) onComplete();
+    const auto version = captureSourceVersion(audioFile);
+    const auto complete = [this, alive = completions.token(), version, onComplete] {
+        if (MessageThreadLifetime::accepts(alive) && isGenerationCurrent(version) && onComplete) onComplete();
     };
     // If already cached, call completion immediately
     if (hasCachedPeaks(audioFile))
@@ -453,24 +561,14 @@ void PeakCache::generateAsync(const juce::File& audioFile, std::function<void()>
         return;
     }
 
-    // Guard: don't queue duplicate generation jobs for the same file
-    {
-        const juce::ScopedLock sl (pendingLock);
-        auto key = audioFile.getFullPathName();
-        if (pendingGenerations.count(key) > 0)
-            return;  // Already being generated
-        pendingGenerations.insert(key);
-    }
+    if (!claimPendingGeneration(version)) return;
 
     // Queue background generation
-    backgroundPool.addJob([this, audioFile, complete]()
+    backgroundPool.addJob([this, audioFile, version, complete]()
     {
-        generateSync(audioFile);
+        generateSyncForVersion(audioFile, version);
 
-        {
-            const juce::ScopedLock sl (pendingLock);
-            pendingGenerations.erase(audioFile.getFullPathName());
-        }
+        finishPendingGeneration(version);
 
         juce::MessageManager::callAsync(complete);
     });

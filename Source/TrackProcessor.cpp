@@ -1,3 +1,4 @@
+#include "MixerGain.h"
 #include "PluginAutomationDelivery.h"
 #include "PreparedMIDINoteLifetimes.h"
 #include "MIDIParameterChase.h"
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <thread>
 
@@ -786,6 +788,8 @@ TrackProcessor::TrackProcessor()
 TrackProcessor::~TrackProcessor()
 {
     stopTimer();
+    parallelNAMGraphCandidateGeneration.store(0, std::memory_order_release);
+    hasEmptyRealtimeGraphForAudio.store(false, std::memory_order_release);
     hasScheduledMIDIClipsForAudio.store(
         false, std::memory_order_release);
     scheduledMIDIClipsForAudio.store(
@@ -1762,6 +1766,16 @@ void TrackProcessor::publishRealtimeStateSnapshots()
         realtimeGraphSnapshotForAudio.store(
             published.get(),
             std::memory_order_seq_cst);
+        // Publish after the graph. A discovery racing a newer publication can
+        // return an older candidate, which the worker's exact generation check
+        // rejects before touching DSP. Empty/hosted graphs need no reader epoch.
+        hasEmptyRealtimeGraphForAudio.store(
+            published->inputFX.empty() && published->trackFX.empty() && published->instrument == nullptr
+                && published->sends.empty() && published->sidechainSources.empty(),
+            std::memory_order_release);
+        parallelNAMGraphCandidateGeneration.store(
+            published->containsOnlyNativeNAM ? published->generation : 0,
+            std::memory_order_release);
     }
 }
 
@@ -2152,7 +2166,7 @@ void TrackProcessor::recomputePanGains()
 {
     const float currentVolumeDb = trackVolumeDB.load(std::memory_order_relaxed);
     const float currentPan = trackPan.load(std::memory_order_relaxed);
-    const float volumeGain = juce::Decibels::decibelsToGain(currentVolumeDb);
+    const float volumeGain = MixerGain::fromDecibels(currentVolumeDb);
     float lGain = 1.0f;
     float rGain = 1.0f;
     computePanLawGains(
@@ -2578,7 +2592,8 @@ bool TrackProcessor::tryProcessBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             OpenStudioCrashDiagnostics::RealtimeFault::trackBufferContract);
         return false;
     }
-    processBlockInternal(buffer, midiMessages);
+    if (!tryProcessTinyEmptyGraph(buffer, midiMessages))
+        processBlockInternal(buffer, midiMessages);
     return true;
 }
 
@@ -2591,9 +2606,11 @@ bool TrackProcessor::isParallelNAMGraphEligible(const RealtimeGraphSnapshot* gra
 
 uint64 TrackProcessor::getParallelNAMGraphGeneration() const noexcept
 {
-    const ScopedTrackRealtimeReader graphReadGuard(realtimeGraphAudioReaders);
-    const auto* const graph = realtimeGraphSnapshotForAudio.load(std::memory_order_seq_cst);
-    return isParallelNAMGraphEligible(graph) ? graph->generation : 0;
+    const auto candidate = parallelNAMGraphCandidateGeneration.load(std::memory_order_acquire);
+    return candidate != 0
+        && trackType.load(std::memory_order_acquire) == TrackType::Audio
+        && araFXIndexForRealtime.load(std::memory_order_acquire) < 0
+            ? candidate : 0;
 }
 
 bool TrackProcessor::tryProcessBlockParallel(juce::AudioBuffer<float>& buffer,
@@ -2632,6 +2649,257 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
     auto serial = std::make_unique<TrackProcessor>();
     auto parallel = std::make_unique<TrackProcessor>();
     const bool emptyRejected = parallel->getParallelNAMGraphGeneration() == 0;
+    const auto probeRegression = []
+    {
+        // Model the eligibility-discovery work of 31 tracks at 48 kHz / 8
+        // samples. This has no device or DSP timing claim: actual callback
+        // deadlines remain a separate hardware qualification.
+        constexpr int trackCount = 31;
+        constexpr int callbackBatches = 6000;
+        std::vector<std::unique_ptr<TrackProcessor>> probes;
+        probes.reserve(trackCount);
+        for (int track = 0; track < trackCount; ++track) probes.push_back(std::make_unique<TrackProcessor>());
+        std::vector<double> guardedTimes, cachedTimes;
+        guardedTimes.reserve(callbackBatches); cachedTimes.reserve(callbackBatches);
+        juce::uint64 guardedSum = 0, cachedSum = 0;
+        juce::int64 guardedEpochEntries = 0, cachedQueries = 0;
+        const auto toMicroseconds = 1000000.0 / static_cast<double>(juce::Time::getHighResolutionTicksPerSecond());
+        for (int batch = 0; batch < callbackBatches; ++batch)
+        {
+            const auto guarded = [&]
+            {
+                const auto start = juce::Time::getHighResolutionTicks();
+                for (const auto& probe : probes)
+                {
+                    // Previous discovery path, retained only as a fixture
+                    // reference. The worker still uses this ownership guard.
+                    const ScopedTrackRealtimeReader guard(probe->realtimeGraphAudioReaders);
+                    const auto* graph = probe->realtimeGraphSnapshotForAudio.load(std::memory_order_seq_cst);
+                    guardedSum += probe->isParallelNAMGraphEligible(graph) ? graph->generation : 0;
+                    ++guardedEpochEntries;
+                }
+                guardedTimes.push_back(static_cast<double>(juce::Time::getHighResolutionTicks() - start) * toMicroseconds);
+            };
+            const auto cached = [&]
+            {
+                const auto start = juce::Time::getHighResolutionTicks();
+                for (const auto& probe : probes)
+                {
+                    cachedSum += probe->getParallelNAMGraphGeneration();
+                    ++cachedQueries;
+                }
+                cachedTimes.push_back(static_cast<double>(juce::Time::getHighResolutionTicks() - start) * toMicroseconds);
+            };
+            if ((batch & 1) == 0) { guarded(); cached(); }
+            else { cached(); guarded(); }
+        }
+        bool readersRetired = true, cachesEmpty = true;
+        for (const auto& probe : probes)
+        {
+            readersRetired = readersRetired && probe->realtimeGraphAudioReaders.load(std::memory_order_seq_cst) == 0;
+            cachesEmpty = cachesEmpty && probe->parallelNAMGraphCandidateGeneration.load(std::memory_order_acquire) == 0;
+        }
+        const auto statistics = [] (std::vector<double> samples)
+        {
+            std::sort(samples.begin(), samples.end());
+            auto* values = new juce::DynamicObject();
+            const auto percentile = [&] (double fraction)
+            {
+                return samples[static_cast<size_t>(fraction * static_cast<double>(samples.size() - 1))];
+            };
+            values->setProperty("p50Microseconds", percentile(0.5));
+            values->setProperty("p95Microseconds", percentile(0.95));
+            values->setProperty("p99Microseconds", percentile(0.99));
+            return juce::var(values);
+        };
+        const auto expectedQueries = static_cast<juce::int64>(trackCount) * callbackBatches;
+        std::vector<std::unique_ptr<juce::AudioBuffer<float>>> blocks;
+        for (auto& probe : probes)
+        {
+            probe->prepareToPlay(48000.0, 8);
+            auto block = std::make_unique<juce::AudioBuffer<float>>(2, 8); block->clear();
+            blocks.push_back(std::move(block));
+        }
+        std::vector<double> generalDSPTimes, tinyDSPTimes;
+        generalDSPTimes.reserve(callbackBatches); tinyDSPTimes.reserve(callbackBatches);
+        juce::MidiBuffer emptyMIDI;
+        bool finiteDSP = true;
+        for (int batch = 0; batch < callbackBatches; ++batch)
+        {
+            const auto general = [&]
+            {
+                const auto start = juce::Time::getHighResolutionTicks();
+                for (size_t track = 0; track < probes.size(); ++track)
+                {
+                    finiteDSP = ProcessorSafety::isFinite(*blocks[track]) && finiteDSP;
+                    probes[track]->processBlockInternal(*blocks[track], emptyMIDI);
+                }
+                generalDSPTimes.push_back(static_cast<double>(juce::Time::getHighResolutionTicks() - start) * toMicroseconds);
+            };
+            const auto tiny = [&]
+            {
+                const auto start = juce::Time::getHighResolutionTicks();
+                for (size_t track = 0; track < probes.size(); ++track)
+                    finiteDSP = probes[track]->tryProcessBlock(*blocks[track], emptyMIDI) && finiteDSP;
+                tinyDSPTimes.push_back(static_cast<double>(juce::Time::getHighResolutionTicks() - start) * toMicroseconds);
+            };
+            if ((batch & 1) == 0) { general(); tiny(); }
+            else { tiny(); general(); }
+        }
+        juce::uint64 tinyBlocks = 0;
+        for (auto& probe : probes) { tinyBlocks += probe->tinyEmptyGraphProcessedBlocks; probe->releaseResources(); }
+        auto* evidence = new juce::DynamicObject();
+        evidence->setProperty("pass", guardedSum == 0 && cachedSum == 0 && cachesEmpty && readersRetired
+            && guardedEpochEntries == expectedQueries && cachedQueries == expectedQueries && finiteDSP
+            && tinyBlocks == static_cast<juce::uint64>(expectedQueries));
+        evidence->setProperty("trackCount", trackCount);
+        evidence->setProperty("blockSize", 8); evidence->setProperty("sampleRate", 48000);
+        evidence->setProperty("callbackBatches", callbackBatches);
+        evidence->setProperty("referenceReaderEpochEntries", guardedEpochEntries);
+        evidence->setProperty("cachedDiscoveryQueries", cachedQueries);
+        evidence->setProperty("emptyGraphResultParity", guardedSum == cachedSum);
+        evidence->setProperty("allReaderEpochsRetired", readersRetired);
+        evidence->setProperty("guardedReferenceBatch", statistics(std::move(guardedTimes)));
+        evidence->setProperty("cachedDiscoveryBatch", statistics(std::move(cachedTimes)));
+        evidence->setProperty("generalTrackDSPBatch", statistics(std::move(generalDSPTimes)));
+        evidence->setProperty("tinyEmptyTrackDSPBatch", statistics(std::move(tinyDSPTimes)));
+        evidence->setProperty("tinyTrackDSPBlocks", static_cast<juce::int64>(tinyBlocks));
+        evidence->setProperty("timingClassification", "diagnostic_only; discovery microbenchmark, not hardware callback timing");
+        return juce::var(evidence);
+    }();
+    bool automationOrderParity = true;
+    int automationCases = 0;
+    for (const auto mode : { AutomationMode::Off, AutomationMode::Read, AutomationMode::Write, AutomationMode::Touch, AutomationMode::Latch })
+        for (int touchState = 0; touchState < 3; ++touchState)
+            for (int dataState = 0; dataState < 5; ++dataState)
+                for (bool forceRead : { false, true })
+                    for (const auto interpolation : { AutomationInterpolation::Discrete, AutomationInterpolation::Linear, AutomationInterpolation::Exponential })
+                    {
+                        AutomationList lane;
+                        lane.setDefaultValue(0.3f); lane.setMode(mode); lane.setInterpolation(interpolation);
+                        if (touchState > 0) lane.beginTouch();
+                        if (touchState > 1) lane.endTouch();
+                        if (dataState == 1 || dataState == 4) lane.setPoints({ { 0.0, 0.2f }, { 1.0, 0.7f } });
+                        if (dataState == 2 || dataState == 4) lane.setPreviewValue(0.4f);
+                        if (dataState == 3 || dataState == 4) lane.setWrittenValue(0.6f);
+                        serial->setForceAutomationReadForProcessing(forceRead);
+                        const bool before = serial->shouldApplyAutomation(lane) && lane.hasPlaybackData();
+                        const bool after = lane.hasPlaybackData() && serial->shouldApplyAutomation(lane);
+                        const bool expectedMode = forceRead ? mode != AutomationMode::Off
+                            : mode == AutomationMode::Read || (mode == AutomationMode::Touch && touchState != 1)
+                                || (mode == AutomationMode::Latch && touchState == 0);
+                        const bool expected = dataState >= 2 || (dataState == 1 && expectedMode);
+                        std::array<float, 8> reference, candidate;
+                        reference.fill(0.5f); candidate.fill(0.5f);
+                        if (before) lane.evalBlock(0.75, sampleRate, 8, reference.data());
+                        if (after) lane.evalBlock(0.75, sampleRate, 8, candidate.data());
+                        automationOrderParity = before == after && after == expected && reference == candidate && automationOrderParity;
+                        ++automationCases;
+                    }
+    serial->setForceAutomationReadForProcessing(false);
+    const auto tinyRegression = []
+    {
+        bool exact = true, dispatch = true;
+        int blocks = 0;
+        juce::uint64 fastBlocks = 0;
+        const auto equalBuffer = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+        {
+            if (a.getNumChannels() != b.getNumChannels() || a.getNumSamples() != b.getNumSamples()) return false;
+            for (int channel = 0; channel < a.getNumChannels(); ++channel)
+                for (int sample = 0; sample < a.getNumSamples(); ++sample)
+                    if (a.getSample(channel, sample) != b.getSample(channel, sample)) return false;
+            return true;
+        };
+        for (int scenario = 0; scenario < 10; ++scenario)
+        {
+            auto reference = std::make_unique<TrackProcessor>(), candidate = std::make_unique<TrackProcessor>();
+            const auto configure = [scenario] (TrackProcessor& track)
+            {
+                track.setRecordArmed(true); track.setInputMonitoring(true);
+                track.setVolume(-4.0f); track.setPan(0.37f); track.setTrimVolume(-2.0f);
+                track.setStereoWidth(143.0f); track.setPhaseInvert(true); track.setDCOffsetRemoval(true);
+                track.setPanLaw(PanLaw::Minus4_5dB);
+                if (scenario == 1 || scenario == 9)
+                {
+                    for (auto* lane : { &track.volumeAutomation, &track.panAutomation, &track.widthAutomation,
+                                       &track.trimVolumeAutomation, &track.muteAutomation })
+                    {
+                        lane->setMode(scenario == 9 ? AutomationMode::Write : AutomationMode::Read);
+                        lane->setPoints({ {0.0, 0.0f}, {0.004, 0.5f}, {0.012, 0.0f} });
+                    }
+                    track.setForceAutomationReadForProcessing(scenario == 9);
+                }
+                if (scenario == 2)
+                {
+                    track.volumeAutomation.setPreviewValue(-3.0f);
+                    track.panAutomation.setWrittenValue(-0.25f);
+                    track.trimVolumeAutomation.setWrittenValue(1.5f);
+                }
+                if (scenario == 3) track.setChannelStripEQParam(1, 3.0f);
+                if (scenario == 4)
+                {
+                    track.preFXVolumeAutomation.setMode(AutomationMode::Read);
+                    track.preFXVolumeAutomation.setPoints({ {0, -3.0f}, {1, -1.0f} });
+                }
+                if (scenario == 5) track.addSend("tiny-parity-destination");
+                if (scenario == 6) track.setTrackType(TrackType::MIDI);
+                if (scenario == 7) track.setTrackType(TrackType::Instrument);
+                if (scenario == 8) track.araFXIndexForRealtime.store(0, std::memory_order_release);
+                track.prepareToPlay(48000.0, 16);
+            };
+            configure(*reference); configure(*candidate);
+            for (int block = 0; block < 192; ++block)
+            {
+                const int samples = block % 3 == 0 ? 1 : block % 3 == 1 ? 8 : 16;
+                juce::AudioBuffer<float> expected(2, samples), actual(2, samples);
+                for (int channel = 0; channel < 2; ++channel)
+                    for (int sample = 0; sample < samples; ++sample)
+                        expected.setSample(channel, sample, 0.04f * static_cast<float>((block + sample * 3 + channel * 7) % 17 - 8));
+                actual.makeCopyOf(expected);
+                juce::MidiBuffer expectedMIDI, actualMIDI;
+                expectedMIDI.addEvent(juce::MidiMessage::controllerEvent(2, 7, 99), 0);
+                if (block == 0) expectedMIDI.addEvent(juce::MidiMessage::noteOn(2, 64, juce::uint8{80}), 0);
+                if (block == 48) expectedMIDI.addEvent(juce::MidiMessage::noteOff(2, 64), 0);
+                actualMIDI = expectedMIDI;
+                for (auto* track : { reference.get(), candidate.get() })
+                {
+                    track->setCurrentBlockPosition(static_cast<double>(block * 8) / 48000.0);
+                    track->setMute((block % 32) >= 28);
+                    if (block % 48 == 0) track->setPDCDelay((block / 48) % 2 == 0 ? 0 : 13);
+                    if (scenario == 3 && (block == 16 || block == 64)) track->setChannelStripEQEnabled(block == 16);
+                }
+                reference->processBlockInternal(expected, expectedMIDI);
+                exact = candidate->tryProcessBlock(actual, actualMIDI) && equalBuffer(expected, actual)
+                    && reference->currentRMS.load() == candidate->currentRMS.load()
+                    && reference->meterPeakAccum == candidate->meterPeakAccum
+                    && reference->meterSampleCount == candidate->meterSampleCount
+                    && reference->clipLatched.load() == candidate->clipLatched.load()
+                    && equalBuffer(reference->preFaderBuffer, candidate->preFaderBuffer) && exact;
+                auto actualEvent = actualMIDI.begin();
+                exact = expectedMIDI.getNumEvents() == actualMIDI.getNumEvents() && exact;
+                for (const auto expectedEvent : expectedMIDI)
+                {
+                    if (actualEvent == actualMIDI.end()) { exact = false; break; }
+                    const auto value = *actualEvent++;
+                    exact = expectedEvent.samplePosition == value.samplePosition && expectedEvent.numBytes == value.numBytes
+                        && std::memcmp(expectedEvent.data, value.data, static_cast<size_t>(expectedEvent.numBytes)) == 0 && exact;
+                }
+                ++blocks;
+            }
+            const bool expectedFast = scenario <= 3 || scenario == 9;
+            dispatch = (candidate->tinyEmptyGraphProcessedBlocks > 0) == expectedFast && dispatch;
+            fastBlocks += candidate->tinyEmptyGraphProcessedBlocks;
+            reference->releaseResources(); candidate->releaseResources();
+        }
+        auto* evidence = new juce::DynamicObject();
+        evidence->setProperty("pass", exact && dispatch);
+        evidence->setProperty("exactAudioMidiMeterAndPreFaderParity", exact);
+        evidence->setProperty("eligibilityAndFallbackDispatch", dispatch);
+        evidence->setProperty("blocks", blocks);
+        evidence->setProperty("fastBlocks", static_cast<juce::int64>(fastBlocks));
+        evidence->setProperty("scope", "1/8/16-sample stereo input; static/automated/preview/written/forced gains, spatial controls, mute, PDC changes, strip EQ power ramps; pre-FX/send/MIDI/instrument/ARA fallbacks. No hardware timing or listening claim.");
+        return juce::var(evidence);
+    }();
     bool configured = serial->addTrackFX(std::make_unique<OpenStudioNAMRack>(), sampleRate, capacity)
         && parallel->addTrackFX(std::make_unique<OpenStudioNAMRack>(), sampleRate, capacity);
     serial->prepareToPlay(sampleRate, capacity);
@@ -2735,11 +3003,17 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
     const bool eligibilityRecovered = parallel->getParallelNAMGraphGeneration() != 0;
     parallel->releaseResources();
     const bool releasedRejected = rejectsUnchanged(parallel->getParallelNAMGraphGeneration());
+    parallel->removeTrackFX(0);
+    const bool emptyPublicationCleared = parallel->getParallelNAMGraphGeneration() == 0;
     auto* result = new juce::DynamicObject();
-    result->setProperty("pass", emptyRejected && zeroRejected && parity && staleRejected && midiRejected
+    result->setProperty("pass", static_cast<bool>(tinyRegression["pass"]) && automationOrderParity && static_cast<bool>(probeRegression["pass"]) && emptyRejected && zeroRejected && parity && staleRejected && midiRejected
         && instrumentRejected && araRejected && busyRejected && nonNAMRejected && bypassedNonNAMRejected
-        && eligibilityRecovered && releasedRejected);
+        && eligibilityRecovered && releasedRejected && emptyPublicationCleared);
     result->setProperty("emptyAndZeroRejected", emptyRejected && zeroRejected);
+    result->setProperty("eightSampleDiscovery", probeRegression);
+    result->setProperty("automationDataFirstExactParity", automationOrderParity);
+    result->setProperty("automationEightSampleCases", automationCases);
+    result->setProperty("tinyEmptyGraph", tinyRegression);
     result->setProperty("serialWorkerExactParity", parity);
     result->setProperty("parityBlocks", blockCount);
     result->setProperty("staleGenerationRejectedWithoutProcessing", staleRejected);
@@ -2748,8 +3022,470 @@ juce::var TrackProcessor::runParallelNAMEligibilityRegression()
     result->setProperty("nonNAMIdentityAndBypassRejected", nonNAMRejected && bypassedNonNAMRejected);
     result->setProperty("eligibilityRecovered", eligibilityRecovered);
     result->setProperty("releasedCapacityRejected", releasedRejected);
+    result->setProperty("emptyPublicationClearsCandidate", emptyPublicationCleared);
     result->setProperty("scope", "Device-free graph eligibility and single-owner entrypoint contracts; scheduler timing and concurrent lifecycle qualification are separate.");
     return juce::var(result);
+}
+
+void TrackProcessor::resetEmptyGraphTailState() noexcept
+{
+    realtimeFXTailActive.store(false, std::memory_order_release);
+    realtimeFXTailResetPending.store(false, std::memory_order_release);
+    realtimeFXTailHardSamplesRemaining = 0;
+    realtimeFXTailMinimumSamplesRemaining = 0;
+    realtimeFXTailQuietSamples = 0;
+    realtimeFXTailLastPublishedBudgetSamples = 0;
+    realtimeFXPreviousBlockHadInput = false;
+}
+
+void TrackProcessor::processTrackPDC(juce::AudioBuffer<float>& buffer)
+{
+    const int bufferChannels = buffer.getNumChannels();
+    // Apply Plugin Delay Compensation (PDC) before FX chains. A model-rate
+    // change can alter another track's compensation by tens of samples. A
+    // hard DelayLine::setDelay() repeats or drops that history at one sample
+    // and sounds like a click, so crossfade the two already-warm integer taps.
+    if (pdcDelayDirty.exchange(false, std::memory_order_acq_rel))
+    {
+        pdcPendingDelaySamples =
+            juce::jlimit(
+                0,
+                pdcDelayLine
+                    .getMaximumDelayInSamples(),
+                pdcDelaySamples.load(
+                    std::memory_order_relaxed));
+    }
+
+    // Process even at zero delay so the ring buffer always contains current
+    // audio. A later 0 -> positive PDC change then cannot replay stale samples.
+    const auto beginPendingPDCTransition =
+        [this] () noexcept
+    {
+        if (pdcTransitionSamplesRemaining <= 0
+            && pdcPendingDelaySamples
+                   != pdcCurrentDelaySamples)
+        {
+            pdcTargetDelaySamples =
+                pdcPendingDelaySamples;
+            pdcTransitionSamplesRemaining =
+                pdcTransitionSamplesTotal;
+        }
+    };
+    beginPendingPDCTransition();
+    if (pdcTransitionSamplesRemaining <= 0)
+    {
+        for (int channel = 0; channel < juce::jmin(2, bufferChannels); ++channel)
+            pdcDelayLine.processChannel(channel, buffer.getWritePointer(channel), buffer.getNumSamples());
+        return;
+    }
+    auto* const* channels = buffer.getArrayOfWritePointers();
+    for (int sample = 0;
+         sample < buffer.getNumSamples();
+         ++sample)
+    {
+        float transitionMix = 0.0f;
+        const bool transitioning =
+            pdcTransitionSamplesRemaining > 0;
+        if (transitioning)
+        {
+            const float linearProgress =
+                1.0f
+                - static_cast<float>(
+                      pdcTransitionSamplesRemaining
+                      - 1)
+                    / static_cast<float>(
+                          pdcTransitionSamplesTotal);
+            transitionMix =
+                linearProgress
+                * linearProgress
+                * (3.0f
+                   - 2.0f
+                       * linearProgress);
+        }
+
+        for (int channel = 0;
+             channel < juce::jmin(2, bufferChannels);
+             ++channel)
+        {
+            const float input = channels[channel][sample];
+            pdcDelayLine.pushSample(
+                channel, input);
+            if (transitioning)
+            {
+                const float previousTap =
+                    pdcDelayLine.popSample(
+                        channel,
+                        static_cast<float>(
+                            pdcCurrentDelaySamples),
+                        false);
+                const float nextTap =
+                    pdcDelayLine.popSample(
+                        channel,
+                        static_cast<float>(
+                            pdcTargetDelaySamples),
+                        true);
+                channels[channel][sample] = previousTap
+                        + (nextTap - previousTap)
+                            * transitionMix;
+            }
+            else
+            {
+                channels[channel][sample] = pdcDelayLine.popSample(channel);
+            }
+        }
+
+        if (transitioning)
+        {
+            --pdcTransitionSamplesRemaining;
+            if (pdcTransitionSamplesRemaining
+                <= 0)
+            {
+                pdcCurrentDelaySamples =
+                    pdcTargetDelaySamples;
+                pdcDelayLine.setDelay(
+                    static_cast<float>(
+                        pdcCurrentDelaySamples));
+                beginPendingPDCTransition();
+            }
+        }
+    }
+
+}
+
+juce::var TrackProcessor::runPreparedPDCRegression()
+{
+    // Exercise the production helper/prepare/reset paths against the previous
+    // JUCE-backed implementation. This fixture never enters plugin/device I/O.
+    struct ReferencePDC
+    {
+        juce::dsp::DelayLine<float> line { 96000 };
+        int requested = 0, current = 0, target = 0, pending = 0, remaining = 0, total = 1;
+        bool dirty = false;
+        void prepare(double rate)
+        {
+            line.prepare({ rate, 512, 2 }); current = target = pending = requested;
+            remaining = 0; total = juce::jmax(1, juce::roundToInt(rate * 0.020));
+            line.setDelay(static_cast<float>(current));
+        }
+        void request(int delay) { if (delay != requested) { requested = delay; dirty = true; } }
+        void reset()
+        {
+            line.reset(); current = target = pending = requested; remaining = 0;
+            line.setDelay(static_cast<float>(current)); dirty = false;
+        }
+        void process(juce::AudioBuffer<float>& buffer)
+        {
+            if (dirty) { pending = juce::jlimit(0, line.getMaximumDelayInSamples(), requested); dirty = false; }
+            const auto begin = [&] { if (remaining <= 0 && pending != current) { target = pending; remaining = total; } };
+            begin();
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            {
+                const bool transitioning = remaining > 0;
+                const float progress = transitioning ? 1.0f - static_cast<float>(remaining - 1) / static_cast<float>(total) : 0.0f;
+                const float mix = progress * progress * (3.0f - 2.0f * progress);
+                for (int channel = 0; channel < juce::jmin(2, buffer.getNumChannels()); ++channel)
+                {
+                    line.pushSample(channel, buffer.getSample(channel, sample));
+                    if (transitioning)
+                    {
+                        const float before = line.popSample(channel, static_cast<float>(current), false);
+                        const float after = line.popSample(channel, static_cast<float>(target), true);
+                        buffer.setSample(channel, sample, before + (after - before) * mix);
+                    }
+                    else buffer.setSample(channel, sample, line.popSample(channel));
+                }
+                if (transitioning && --remaining <= 0)
+                {
+                    current = target; line.setDelay(static_cast<float>(current)); begin();
+                }
+            }
+        }
+    } reference;
+    auto actual = std::make_unique<TrackProcessor>();
+    juce::AudioBuffer<float> actualBlock(2, 512), referenceBlock(2, 512);
+    constexpr int lengths[] { 1, 8, 16, 512 };
+    constexpr int requestedTaps[] { 1, 6, 128, 96000, 0, 6, 128, 0 };
+    constexpr int requestFrames[] { 16000, 32000, 48000, 112000, 144000, 160000, 176000, 192000 };
+    bool exact = true, states = true;
+    int comparedBlocks = 0; juce::int64 comparedSamples = 0;
+    for (const double rate : { 48000.0, 44100.0 })
+    {
+        actual->setPDCDelay(0); reference.request(0);
+        actual->prepareToPlay(rate, 512); reference.prepare(rate);
+        int frame = 0, requestIndex = 0;
+        while (frame < 200123)
+        {
+            if (requestIndex < static_cast<int>(std::size(requestedTaps)) && frame >= requestFrames[requestIndex])
+            {
+                actual->setPDCDelay(requestedTaps[requestIndex]); reference.request(requestedTaps[requestIndex]); ++requestIndex;
+            }
+            // Queue another target before a ramp finishes; the production
+            // helper must finish its existing ramp and consume the latest one.
+            if (requestIndex == 3 && actual->pdcTransitionSamplesRemaining > 0 && (comparedBlocks % 7) == 0)
+            { actual->setPDCDelay(6); reference.request(6); }
+            const int count = juce::jmin(lengths[comparedBlocks % 4], 200123 - frame);
+            const int channels = (comparedBlocks % 11) == 0 ? 1 : 2;
+            actualBlock.setSize(channels, count, false, false, true);
+            referenceBlock.setSize(channels, count, false, false, true);
+            for (int channel = 0; channel < channels; ++channel)
+                for (int sample = 0; sample < count; ++sample)
+                {
+                    const float input = static_cast<float>(((frame + sample + channel * 11) % 127) - 63) / 256.0f;
+                    actualBlock.setSample(channel, sample, input); referenceBlock.setSample(channel, sample, input);
+                }
+            actual->processTrackPDC(actualBlock); reference.process(referenceBlock);
+            for (int channel = 0; channel < channels; ++channel)
+                exact = std::memcmp(actualBlock.getReadPointer(channel), referenceBlock.getReadPointer(channel),
+                    static_cast<size_t>(count) * sizeof(float)) == 0 && exact;
+            states = actual->pdcCurrentDelaySamples == reference.current && actual->pdcTargetDelaySamples == reference.target
+                && actual->pdcPendingDelaySamples == reference.pending && actual->pdcTransitionSamplesRemaining == reference.remaining && states;
+            frame += count; ++comparedBlocks; comparedSamples += static_cast<juce::int64>(count) * channels;
+            if (frame >= 144000 && frame - count < 144000) { actual->resetPDCDelayState(); reference.reset(); }
+        }
+        actual->releaseResources();
+    }
+    auto* result = new juce::DynamicObject();
+    result->setProperty("pass", exact && states);
+    result->setProperty("exactPCMParity", exact); result->setProperty("transitionStateParity", states);
+    result->setProperty("comparedBlocks", comparedBlocks); result->setProperty("comparedChannelSamples", comparedSamples);
+    result->setProperty("scope", "Production TrackProcessor PDC helper and prepare/reset paths versus prior JUCE Linear reference; 1/8/16/512 blocks, mono/stereo, tap changes, warm history and 48/44.1 kHz reprepare. No hardware or audible-quality acceptance.");
+    return juce::var(result);
+}
+
+float TrackProcessor::processTrackOutput(juce::AudioBuffer<float>& buffer, bool capturePreFader,
+                                        double blockTimeSeconds, double processingSampleRate, PanLaw blockPanLaw)
+{
+    const int bufferChannels = buffer.getNumChannels(), numSamps = buffer.getNumSamples();
+    // ===== DC OFFSET REMOVAL (after FX, before gain) =====
+    if (dcOffsetRemoval.load(std::memory_order_acquire)
+        && bufferChannels >= 1)
+    {
+        double sr = getSampleRate();
+        if (sr <= 0) sr = 44100.0;
+        float alpha = 1.0f - (2.0f * juce::MathConstants<float>::pi * 5.0f / static_cast<float>(sr));
+
+        // Left channel
+        {
+            float prevIn = dcPrevInputL;
+            float prevOut = dcFilterStateL;
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                float input = buffer.getSample(0, i);
+                float output = input - prevIn + alpha * prevOut;
+                prevIn = input;
+                prevOut = output;
+                buffer.setSample(0, i, output);
+            }
+            dcPrevInputL = prevIn;
+            dcFilterStateL = prevOut;
+        }
+
+        // Right channel
+        if (bufferChannels >= 2)
+        {
+            float prevIn = dcPrevInputR;
+            float prevOut = dcFilterStateR;
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                float input = buffer.getSample(1, i);
+                float output = input - prevIn + alpha * prevOut;
+                prevIn = input;
+                prevOut = output;
+                buffer.setSample(1, i, output);
+            }
+            dcPrevInputR = prevIn;
+            dcFilterStateR = prevOut;
+        }
+    }
+
+    // ===== PHASE INVERT (polarity flip) =====
+    if (phaseInverted.load(std::memory_order_relaxed))
+    {
+        for (int ch = 0; ch < bufferChannels; ++ch)
+            juce::FloatVectorOperations::negate(
+                buffer.getWritePointer(ch),
+                buffer.getReadPointer(ch),
+                buffer.getNumSamples());
+    }
+
+    // ===== POST-FX WIDTH =====
+    const bool widthAutoActive = widthAutomation.hasPlaybackData() && shouldApplyAutomation(widthAutomation);
+    if (bufferChannels >= 2)
+    {
+        if (widthAutoActive)
+        {
+            auto* widthValues = automationGainBuffer.getWritePointer(3);
+            widthAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, widthValues);
+            float* left = buffer.getWritePointer(0);
+            float* right = buffer.getWritePointer(1);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const float widthPercent = backendWidthToPercent(widthValues[i]);
+                const float widthFactor = widthPercent / 100.0f;
+                const float mid = (left[i] + right[i]) * 0.5f;
+                const float side = (left[i] - right[i]) * 0.5f;
+                left[i] = mid + side * widthFactor;
+                right[i] = mid - side * widthFactor;
+            }
+        }
+        else
+        {
+            applyStereoWidthToBuffer(buffer, bufferChannels, buffer.getNumSamples(),
+                                     stereoWidth.load(std::memory_order_relaxed));
+        }
+    }
+
+    // Preserve stereo channel identity at the send taps. A silent channel is valid
+    // stereo content; mono expansion belongs to the declared source/plugin layout.
+
+    // ===== CAPTURE PRE-FADER BUFFER (for pre-fader sends) =====
+    if (capturePreFader)
+    {
+        int pfSamples = buffer.getNumSamples();
+        preFaderBuffer.clear();
+        for (int ch = 0; ch < bufferChannels; ++ch)
+            preFaderBuffer.copyFrom(ch, 0, buffer, ch, 0, pfSamples);
+    }
+
+    // ===== AUTOMATION-AWARE FADER/TAIL APPLICATION =====
+    bool volAutoActive = volumeAutomation.hasPlaybackData() && shouldApplyAutomation(volumeAutomation);
+    bool panAutoActive = panAutomation.hasPlaybackData() && shouldApplyAutomation(panAutomation);
+    bool trimAutoActive = trimVolumeAutomation.hasPlaybackData() && shouldApplyAutomation(trimVolumeAutomation);
+    bool muteAutoActive = muteAutomation.hasPlaybackData() && shouldApplyAutomation(muteAutomation);
+
+    if (volAutoActive || panAutoActive)
+    {
+        float staticVolDB = trackVolumeDB.load(std::memory_order_relaxed);
+        float staticPan = trackPan.load(std::memory_order_relaxed);
+        auto* volumeValues = automationGainBuffer.getWritePointer(4);
+        auto* panValues = automationGainBuffer.getWritePointer(5);
+        if (volAutoActive)
+            volumeAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, volumeValues);
+        if (panAutoActive)
+            panAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, panValues);
+
+        for (int i = 0; i < numSamps; ++i)
+        {
+            float volDB = volAutoActive ? volumeValues[i] : staticVolDB;
+            float pan   = panAutoActive ? panValues[i]   : staticPan;
+
+            volDB = juce::jlimit(-60.0f, 12.0f, volDB);
+            pan   = juce::jlimit(-1.0f, 1.0f, pan);
+
+            float volumeGain = MixerGain::fromDecibels(volDB);
+            float lGain = 1.0f;
+            float rGain = 1.0f;
+            computePanLawGains(
+                blockPanLaw,
+                pan,
+                volumeGain,
+                lGain,
+                rGain);
+
+            // Apply per-sample gain
+            if (bufferChannels >= 1)
+                buffer.setSample(0, i, buffer.getSample(0, i) * lGain);
+            if (bufferChannels >= 2)
+                buffer.setSample(1, i, buffer.getSample(1, i) * rGain);
+            for (int ch = 2; ch < bufferChannels; ++ch)
+                buffer.setSample(ch, i, buffer.getSample(ch, i) * (ch % 2 == 0 ? lGain : rGain));
+        }
+    }
+    else
+    {
+        float leftGain  = cachedPanL.load(std::memory_order_relaxed);
+        float rightGain = cachedPanR.load(std::memory_order_relaxed);
+
+        if (bufferChannels >= 1)
+            buffer.applyGain(0, 0, numSamps, leftGain);
+        if (bufferChannels >= 2)
+            buffer.applyGain(1, 0, numSamps, rightGain);
+        for (int ch = 2; ch < bufferChannels; ++ch)
+            buffer.applyGain(ch, 0, numSamps, ch % 2 == 0 ? leftGain : rightGain);
+    }
+
+    if (trimAutoActive)
+    {
+        auto* trimValues = automationGainBuffer.getWritePointer(6);
+        trimVolumeAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, trimValues);
+        for (int i = 0; i < numSamps; ++i)
+        {
+            const float trimGain = juce::Decibels::decibelsToGain(juce::jlimit(-60.0f, 12.0f, trimValues[i]));
+            for (int channel = 0; channel < bufferChannels; ++channel)
+                buffer.setSample(channel, i, buffer.getSample(channel, i) * trimGain);
+        }
+    }
+    else if (const auto trimGain = trackTrimGain.load(std::memory_order_relaxed); trimGain != 1.0f)
+        buffer.applyGain(trimGain);
+
+    if (muteAutoActive)
+    {
+        auto* muteValues = automationGainBuffer.getWritePointer(7);
+        muteAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, muteValues);
+        for (int i = 0; i < numSamps; ++i)
+        {
+            const bool muted = muteValues[i] > 0.5f;
+            if (!muted)
+                continue;
+            for (int ch = 0; ch < bufferChannels; ++ch)
+                buffer.setSample(ch, i, 0.0f);
+        }
+    }
+
+    // ---- REAPER-style peak metering with decimation ----
+    // getMagnitude() uses FloatVectorOperations::findMinAndMax (SIMD, no sqrt),
+    // which is much cheaper than getRMSLevel() (which computes sqrt per channel).
+    // We accumulate the running peak over METER_UPDATE_SAMPLES then commit it
+    // to currentRMS. At 32-sample ASIO blocks this fires ~86 times/sec instead
+    // of 1378 times/sec — a 16× reduction in per-track metering overhead.
+    float peak = 0.0f;
+    for (int ch = 0; ch < bufferChannels; ++ch)
+        peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, buffer.getNumSamples()));
+
+    if (peak > 1.0f)
+        clipLatched.store(true, std::memory_order_relaxed);
+
+    meterPeakAccum   = juce::jmax (meterPeakAccum, peak);
+    meterSampleCount += buffer.getNumSamples();
+    if (meterSampleCount >= METER_UPDATE_SAMPLES)
+    {
+        currentRMS.store (meterPeakAccum, std::memory_order_relaxed);
+        meterPeakAccum   = 0.0f;
+        meterSampleCount = 0;
+    }
+
+    return peak;
+}
+
+bool TrackProcessor::tryProcessTinyEmptyGraph(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
+    // No graph resources are borrowed here. The control-side publication is
+    // the linearization point for this scalar eligibility classification.
+    if (buffer.getNumSamples() > 16 || buffer.getNumChannels() != 2
+        || !hasEmptyRealtimeGraphForAudio.load(std::memory_order_acquire)
+        || trackType.load(std::memory_order_acquire) != TrackType::Audio
+        || araFXIndexForRealtime.load(std::memory_order_acquire) >= 0
+        || getTotalNumInputChannels() != 2 || getTotalNumOutputChannels() != 2
+        || hasPublishedPluginAutomationRoutes.load(std::memory_order_acquire)
+        || preFXVolumeAutomation.hasPlaybackData() || preFXPanAutomation.hasPlaybackData()
+        || preFXWidthAutomation.hasPlaybackData()) return false;
+
+    juce::ScopedNoDenormals noDenormals;
+    ++tinyEmptyGraphProcessedBlocks;
+    resetEmptyGraphTailState();
+    const bool muteCanUnmute = muteAutomation.hasPlaybackData() && shouldApplyAutomation(muteAutomation);
+    if (isMuted.load() && !ignoreStaticMuteDuringProcessing.load(std::memory_order_relaxed) && !muteCanUnmute)
+    {
+        buffer.clear(); preFaderBuffer.clear(); currentRMS = 0.0f;
+        return true;
+    }
+    processTrackPDC(buffer);
+    const double rate = juce::jmax(1.0, getSampleRate());
+    const auto law = panLaw.load(std::memory_order_acquire);
+    juce::AudioBuffer<float> stripBuffer(buffer.getArrayOfWritePointers(), 2, buffer.getNumSamples());
+    channelStripEQ.processBlock(stripBuffer, midi);
+    (void) processTrackOutput(buffer, false, blockStartTimeSeconds, rate, law);
+    return true;
 }
 
 void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages,
@@ -2889,13 +3625,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
 
     if (! hasEnabledRealtimeFX)
     {
-        realtimeFXTailActive.store(false, std::memory_order_release);
-        realtimeFXTailResetPending.store(false, std::memory_order_release);
-        realtimeFXTailHardSamplesRemaining = 0;
-        realtimeFXTailMinimumSamplesRemaining = 0;
-        realtimeFXTailQuietSamples = 0;
-        realtimeFXTailLastPublishedBudgetSamples = 0;
-        realtimeFXPreviousBlockHadInput = false;
+        resetEmptyGraphTailState();
     }
     else if (hasExternalAudioInput)
     {
@@ -3013,7 +3743,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     for (auto i = totalNumInputChannels; i < juce::jmin(totalNumOutputChannels, bufferChannels); ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    const bool muteAutomationCanUnmute = shouldApplyAutomation(muteAutomation) && muteAutomation.hasPlaybackData();
+    const bool muteAutomationCanUnmute = muteAutomation.hasPlaybackData() && shouldApplyAutomation(muteAutomation);
     // Static mute may only short-circuit if no mute automation can unmute this block.
     if (isMuted.load()
         && !ignoreStaticMuteDuringProcessing.load(std::memory_order_relaxed)
@@ -3026,116 +3756,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         return;
     }
 
-    // Apply Plugin Delay Compensation (PDC) before FX chains. A model-rate
-    // change can alter another track's compensation by tens of samples. A
-    // hard DelayLine::setDelay() repeats or drops that history at one sample
-    // and sounds like a click, so crossfade the two already-warm integer taps.
-    if (pdcDelayDirty.exchange(false, std::memory_order_acq_rel))
-    {
-        pdcPendingDelaySamples =
-            juce::jlimit(
-                0,
-                pdcDelayLine
-                    .getMaximumDelayInSamples(),
-                pdcDelaySamples.load(
-                    std::memory_order_relaxed));
-    }
-
-    // Process even at zero delay so the ring buffer always contains current
-    // audio. A later 0 -> positive PDC change then cannot replay stale samples.
-    const auto beginPendingPDCTransition =
-        [this] () noexcept
-    {
-        if (pdcTransitionSamplesRemaining <= 0
-            && pdcPendingDelaySamples
-                   != pdcCurrentDelaySamples)
-        {
-            pdcTargetDelaySamples =
-                pdcPendingDelaySamples;
-            pdcTransitionSamplesRemaining =
-                pdcTransitionSamplesTotal;
-        }
-    };
-    beginPendingPDCTransition();
-    for (int sample = 0;
-         sample < buffer.getNumSamples();
-         ++sample)
-    {
-        float transitionMix = 0.0f;
-        const bool transitioning =
-            pdcTransitionSamplesRemaining > 0;
-        if (transitioning)
-        {
-            const float linearProgress =
-                1.0f
-                - static_cast<float>(
-                      pdcTransitionSamplesRemaining
-                      - 1)
-                    / static_cast<float>(
-                          pdcTransitionSamplesTotal);
-            transitionMix =
-                linearProgress
-                * linearProgress
-                * (3.0f
-                   - 2.0f
-                       * linearProgress);
-        }
-
-        for (int channel = 0;
-             channel < juce::jmin(2, bufferChannels);
-             ++channel)
-        {
-            const float input =
-                buffer.getSample(
-                    channel, sample);
-            pdcDelayLine.pushSample(
-                channel, input);
-            if (transitioning)
-            {
-                const float previousTap =
-                    pdcDelayLine.popSample(
-                        channel,
-                        static_cast<float>(
-                            pdcCurrentDelaySamples),
-                        false);
-                const float nextTap =
-                    pdcDelayLine.popSample(
-                        channel,
-                        static_cast<float>(
-                            pdcTargetDelaySamples),
-                        true);
-                buffer.setSample(
-                    channel,
-                    sample,
-                    previousTap
-                        + (nextTap - previousTap)
-                            * transitionMix);
-            }
-            else
-            {
-                buffer.setSample(
-                    channel,
-                    sample,
-                    pdcDelayLine.popSample(
-                        channel));
-            }
-        }
-
-        if (transitioning)
-        {
-            --pdcTransitionSamplesRemaining;
-            if (pdcTransitionSamplesRemaining
-                <= 0)
-            {
-                pdcCurrentDelaySamples =
-                    pdcTargetDelaySamples;
-                pdcDelayLine.setDelay(
-                    static_cast<float>(
-                        pdcCurrentDelaySamples));
-                beginPendingPDCTransition();
-            }
-        }
-    }
+    processTrackPDC(buffer);
 
     bool hasAnyFX = (inputFXSnapshot && !inputFXSnapshot->empty())
                  || (trackFXSnapshot && !trackFXSnapshot->empty());
@@ -3956,9 +4577,9 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     const float staticPreFXVolDb = 0.0f;
     const float staticPreFXPan = 0.0f;
     const float staticPreFXWidth = 100.0f;
-    const bool preFXVolAutoActive = shouldApplyAutomation(preFXVolumeAutomation) && preFXVolumeAutomation.hasPlaybackData();
-    const bool preFXPanAutoActive = shouldApplyAutomation(preFXPanAutomation) && preFXPanAutomation.hasPlaybackData();
-    const bool preFXWidthAutoActive = shouldApplyAutomation(preFXWidthAutomation) && preFXWidthAutomation.hasPlaybackData();
+    const bool preFXVolAutoActive = preFXVolumeAutomation.hasPlaybackData() && shouldApplyAutomation(preFXVolumeAutomation);
+    const bool preFXPanAutoActive = preFXPanAutomation.hasPlaybackData() && shouldApplyAutomation(preFXPanAutomation);
+    const bool preFXWidthAutoActive = preFXWidthAutomation.hasPlaybackData() && shouldApplyAutomation(preFXWidthAutomation);
 
     if (preFXVolAutoActive || preFXPanAutoActive)
     {
@@ -3981,7 +4602,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             computePanLawGains(
                 blockPanLaw,
                 pan,
-                juce::Decibels::decibelsToGain(volDb),
+                MixerGain::fromDecibels(volDb),
                 leftGain,
                 rightGain);
 
@@ -4375,204 +4996,8 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             + " numSamples=" + juce::String(buffer.getNumSamples()));
     }
 
-    // ===== DC OFFSET REMOVAL (after FX, before gain) =====
-    if (dcOffsetRemoval.load(std::memory_order_acquire)
-        && bufferChannels >= 1)
-    {
-        double sr = getSampleRate();
-        if (sr <= 0) sr = 44100.0;
-        float alpha = 1.0f - (2.0f * juce::MathConstants<float>::pi * 5.0f / static_cast<float>(sr));
-
-        // Left channel
-        {
-            float prevIn = dcPrevInputL;
-            float prevOut = dcFilterStateL;
-            for (int i = 0; i < buffer.getNumSamples(); ++i)
-            {
-                float input = buffer.getSample(0, i);
-                float output = input - prevIn + alpha * prevOut;
-                prevIn = input;
-                prevOut = output;
-                buffer.setSample(0, i, output);
-            }
-            dcPrevInputL = prevIn;
-            dcFilterStateL = prevOut;
-        }
-
-        // Right channel
-        if (bufferChannels >= 2)
-        {
-            float prevIn = dcPrevInputR;
-            float prevOut = dcFilterStateR;
-            for (int i = 0; i < buffer.getNumSamples(); ++i)
-            {
-                float input = buffer.getSample(1, i);
-                float output = input - prevIn + alpha * prevOut;
-                prevIn = input;
-                prevOut = output;
-                buffer.setSample(1, i, output);
-            }
-            dcPrevInputR = prevIn;
-            dcFilterStateR = prevOut;
-        }
-    }
-
-    // ===== PHASE INVERT (polarity flip) =====
-    if (phaseInverted.load(std::memory_order_relaxed))
-    {
-        for (int ch = 0; ch < bufferChannels; ++ch)
-            juce::FloatVectorOperations::negate(
-                buffer.getWritePointer(ch),
-                buffer.getReadPointer(ch),
-                buffer.getNumSamples());
-    }
-
-    // ===== POST-FX WIDTH =====
-    const bool widthAutoActive = shouldApplyAutomation(widthAutomation) && widthAutomation.hasPlaybackData();
-    if (bufferChannels >= 2)
-    {
-        if (widthAutoActive)
-        {
-            auto* widthValues = automationGainBuffer.getWritePointer(3);
-            widthAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, widthValues);
-            float* left = buffer.getWritePointer(0);
-            float* right = buffer.getWritePointer(1);
-            for (int i = 0; i < buffer.getNumSamples(); ++i)
-            {
-                const float widthPercent = backendWidthToPercent(widthValues[i]);
-                const float widthFactor = widthPercent / 100.0f;
-                const float mid = (left[i] + right[i]) * 0.5f;
-                const float side = (left[i] - right[i]) * 0.5f;
-                left[i] = mid + side * widthFactor;
-                right[i] = mid - side * widthFactor;
-            }
-        }
-        else
-        {
-            applyStereoWidthToBuffer(buffer, bufferChannels, buffer.getNumSamples(),
-                                     stereoWidth.load(std::memory_order_relaxed));
-        }
-    }
-
-    // Preserve stereo channel identity at the send taps. A silent channel is valid
-    // stereo content; mono expansion belongs to the declared source/plugin layout.
-
-    // ===== CAPTURE PRE-FADER BUFFER (for pre-fader sends) =====
-    if (sendSnapshot && !sendSnapshot->empty())
-    {
-        int pfSamples = buffer.getNumSamples();
-        preFaderBuffer.clear();
-        for (int ch = 0; ch < bufferChannels; ++ch)
-            preFaderBuffer.copyFrom(ch, 0, buffer, ch, 0, pfSamples);
-    }
-
-    // ===== AUTOMATION-AWARE FADER/TAIL APPLICATION =====
-    bool volAutoActive = shouldApplyAutomation(volumeAutomation) && volumeAutomation.hasPlaybackData();
-    bool panAutoActive = shouldApplyAutomation(panAutomation) && panAutomation.hasPlaybackData();
-    bool trimAutoActive = shouldApplyAutomation(trimVolumeAutomation) && trimVolumeAutomation.hasPlaybackData();
-    bool muteAutoActive = shouldApplyAutomation(muteAutomation) && muteAutomation.hasPlaybackData();
-
-    if (volAutoActive || panAutoActive)
-    {
-        float staticVolDB = trackVolumeDB.load(std::memory_order_relaxed);
-        float staticPan = trackPan.load(std::memory_order_relaxed);
-        auto* volumeValues = automationGainBuffer.getWritePointer(4);
-        auto* panValues = automationGainBuffer.getWritePointer(5);
-        if (volAutoActive)
-            volumeAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, volumeValues);
-        if (panAutoActive)
-            panAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, panValues);
-
-        for (int i = 0; i < numSamps; ++i)
-        {
-            float volDB = volAutoActive ? volumeValues[i] : staticVolDB;
-            float pan   = panAutoActive ? panValues[i]   : staticPan;
-
-            volDB = juce::jlimit(-60.0f, 12.0f, volDB);
-            pan   = juce::jlimit(-1.0f, 1.0f, pan);
-
-            float volumeGain = juce::Decibels::decibelsToGain(volDB);
-            float lGain = 1.0f;
-            float rGain = 1.0f;
-            computePanLawGains(
-                blockPanLaw,
-                pan,
-                volumeGain,
-                lGain,
-                rGain);
-
-            // Apply per-sample gain
-            if (bufferChannels >= 1)
-                buffer.setSample(0, i, buffer.getSample(0, i) * lGain);
-            if (bufferChannels >= 2)
-                buffer.setSample(1, i, buffer.getSample(1, i) * rGain);
-            for (int ch = 2; ch < bufferChannels; ++ch)
-                buffer.setSample(ch, i, buffer.getSample(ch, i) * (ch % 2 == 0 ? lGain : rGain));
-        }
-    }
-    else
-    {
-        float leftGain  = cachedPanL.load(std::memory_order_relaxed);
-        float rightGain = cachedPanR.load(std::memory_order_relaxed);
-
-        if (bufferChannels >= 1)
-            buffer.applyGain(0, 0, numSamps, leftGain);
-        if (bufferChannels >= 2)
-            buffer.applyGain(1, 0, numSamps, rightGain);
-        for (int ch = 2; ch < bufferChannels; ++ch)
-            buffer.applyGain(ch, 0, numSamps, ch % 2 == 0 ? leftGain : rightGain);
-    }
-
-    if (trimAutoActive)
-    {
-        auto* trimValues = automationGainBuffer.getWritePointer(6);
-        trimVolumeAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, trimValues);
-        for (int i = 0; i < numSamps; ++i)
-        {
-            const float trimGain = juce::Decibels::decibelsToGain(juce::jlimit(-60.0f, 12.0f, trimValues[i]));
-            for (int channel = 0; channel < bufferChannels; ++channel)
-                buffer.setSample(channel, i, buffer.getSample(channel, i) * trimGain);
-        }
-    }
-    else if (const auto trimGain = trackTrimGain.load(std::memory_order_relaxed); trimGain != 1.0f)
-        buffer.applyGain(trimGain);
-
-    if (muteAutoActive)
-    {
-        auto* muteValues = automationGainBuffer.getWritePointer(7);
-        muteAutomation.evalBlock(blockTimeSeconds, processingSampleRate, numSamps, muteValues);
-        for (int i = 0; i < numSamps; ++i)
-        {
-            const bool muted = muteValues[i] > 0.5f;
-            if (!muted)
-                continue;
-            for (int ch = 0; ch < bufferChannels; ++ch)
-                buffer.setSample(ch, i, 0.0f);
-        }
-    }
-
-    // ---- REAPER-style peak metering with decimation ----
-    // getMagnitude() uses FloatVectorOperations::findMinAndMax (SIMD, no sqrt),
-    // which is much cheaper than getRMSLevel() (which computes sqrt per channel).
-    // We accumulate the running peak over METER_UPDATE_SAMPLES then commit it
-    // to currentRMS. At 32-sample ASIO blocks this fires ~86 times/sec instead
-    // of 1378 times/sec — a 16× reduction in per-track metering overhead.
-    float peak = 0.0f;
-    for (int ch = 0; ch < bufferChannels; ++ch)
-        peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, buffer.getNumSamples()));
-
-    if (peak > 1.0f)
-        clipLatched.store(true, std::memory_order_relaxed);
-
-    meterPeakAccum   = juce::jmax (meterPeakAccum, peak);
-    meterSampleCount += buffer.getNumSamples();
-    if (meterSampleCount >= METER_UPDATE_SAMPLES)
-    {
-        currentRMS.store (meterPeakAccum, std::memory_order_relaxed);
-        meterPeakAccum   = 0.0f;
-        meterSampleCount = 0;
-    }
-
+    const float peak = processTrackOutput(buffer, sendSnapshot && !sendSnapshot->empty(),
+        blockTimeSeconds, processingSampleRate, blockPanLaw);
     finishRealtimeFXTailDrain(peak);
 
 }
@@ -6558,12 +6983,12 @@ void TrackProcessor::applyMIDIAutomationToBuffer(juce::MidiBuffer& destination, 
     if (numSamples <= 0 || sampleRate <= 0.0)
         return;
 
-    const bool velocityActive = shouldApplyAutomation(midiVelocityScaleAutomation)
-                             && midiVelocityScaleAutomation.hasPlaybackData();
-    const bool pitchBendActive = shouldApplyAutomation(midiPitchBendAutomation)
-                              && midiPitchBendAutomation.hasPlaybackData();
-    const bool channelPressureActive = shouldApplyAutomation(midiChannelPressureAutomation)
-                                    && midiChannelPressureAutomation.hasPlaybackData();
+    const bool velocityActive = midiVelocityScaleAutomation.hasPlaybackData()
+                             && shouldApplyAutomation(midiVelocityScaleAutomation);
+    const bool pitchBendActive = midiPitchBendAutomation.hasPlaybackData()
+                              && shouldApplyAutomation(midiPitchBendAutomation);
+    const bool channelPressureActive = midiChannelPressureAutomation.hasPlaybackData()
+                                    && shouldApplyAutomation(midiChannelPressureAutomation);
     const bool hasCCRoutedAutomation =
         ccRoutes != nullptr
         && ! ccRoutes->empty();

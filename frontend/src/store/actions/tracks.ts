@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { forkCopiedCrossfades } from "../../utils/clipCrossfades";
 import { nativeBridge } from "../../services/NativeBridge";
 import { commandManager } from "../commands";
 import { logBridgeError, toastBridgeError } from "../../utils/bridgeErrorHandler";
@@ -10,6 +11,7 @@ import { insertTrackCopies, trackCopySourceIds } from "../../utils/trackCopyPlan
 import { notifyInstrumentChanged } from "../../utils/fxChain";
 import { isClipEditLocked } from "../../utils/clipEditLock";
 import { markTrackMonitorUserMutation } from "../../utils/trackMonitorOwnership";
+import { getClipPlaybackGainEnvelope } from "../../utils/clipCrossfades";
 import {
   getLinkedTrackIds,
   _linkingInProgress,
@@ -429,9 +431,9 @@ function cloneTrackForDuplication(track: any, newTrackId: string) {
     suspendedAutomationState: null,
     vcaGroupId: undefined,
     isVCALeader: false,
-    clips: track.clips.map((clip: any) => cloneAudioClip(clip)),
-    frozenOriginalClips: track.frozenOriginalClips?.map((clip: any) => cloneAudioClip(clip)),
-    takes: track.takes?.map((lane: any[]) => lane.map((clip: any) => cloneAudioClip(clip))) ?? [],
+    clips: forkCopiedCrossfades(track.clips.map((clip: any) => cloneAudioClip(clip))),
+    frozenOriginalClips: track.frozenOriginalClips ? forkCopiedCrossfades(track.frozenOriginalClips.map((clip: any) => cloneAudioClip(clip))) : undefined,
+    takes: track.takes?.map((lane: any[]) => forkCopiedCrossfades(lane.map((clip: any) => cloneAudioClip(clip)))) ?? [],
     midiClips: track.midiClips.map((clip: any) => cloneMidiClip(clip)),
   };
 }
@@ -482,8 +484,7 @@ async function clearTrackBoundUiBeforeRemoval(state: any, trackId: string, track
     state.closeDynamicSplit();
 
   if (state.showCrossfadeEditor && state.crossfadeEditorClipIds) {
-    const [clipA, clipB] = state.crossfadeEditorClipIds;
-    if ((clipA && clipIds.has(clipA)) || (clipB && clipIds.has(clipB)))
+    if (state.crossfadeEditorClipIds.some((clipId: string) => clipIds.has(clipId)))
       state.closeCrossfadeEditor();
   }
 
@@ -634,7 +635,11 @@ async function syncDuplicatedTrackToBackend(sourceTrack: any, newTrack: any, ins
       clip.id,
       clip.pitchCorrectionSourceFilePath,
       clip.pitchCorrectionSourceOffset,
+      clip.fadeInShape ?? 0,
+      clip.fadeOutShape ?? 0,
     ).catch(() => false);
+    const envelope = getClipPlaybackGainEnvelope(clip);
+    if (envelope.length) await nativeBridge.setClipGainEnvelope(newTrack.id, clip.id, envelope);
   }
 
   if (newTrack.midiClips.length > 0) {
@@ -784,7 +789,11 @@ async function restoreRemovedTrackToBackend(
       clip.id,
       clip.pitchCorrectionSourceFilePath,
       clip.pitchCorrectionSourceOffset,
+      clip.fadeInShape ?? 0,
+      clip.fadeOutShape ?? 0,
     ).catch(() => false);
+    const envelope = getClipPlaybackGainEnvelope(clip);
+    if (envelope.length) await nativeBridge.setClipGainEnvelope(track.id, clip.id, envelope);
   }
   if (track.midiClips.length > 0) {
     await syncTrackMIDIClipsToBackend(track.id, track.midiClips, track.midiEffects || []);
@@ -1866,6 +1875,8 @@ export const trackActions = (set: SetFn, get: GetFn) => ({
                 id, clip.filePath, clip.startTime, clip.duration,
                 clip.offset || 0, clip.volumeDB || 0, clip.fadeIn || 0, clip.fadeOut || 0,
                 clip.id,
+                clip.pitchCorrectionSourceFilePath, clip.pitchCorrectionSourceOffset,
+                clip.fadeInShape ?? 0, clip.fadeOutShape ?? 0,
               ).catch(() => {});
             }
           }

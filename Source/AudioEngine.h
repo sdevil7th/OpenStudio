@@ -1,6 +1,7 @@
 #include "BuiltInIRPreparation.h"
 #pragma once
 #include "RealtimeTrackExecutor.h"
+#include "RealtimeCallbackTrace.h"
 
 #include <JuceHeader.h>
 #include "TrackProcessor.h"
@@ -128,6 +129,8 @@ public:
     // Transport control (Phase 2)
     void setTransportPlaying(bool playing);
     void setTransportRecordingAsync(bool recording, std::function<void(bool)> completion);
+    void startPreparedRecordingAsync(std::function<void(bool)> completion,
+                                     std::function<bool()> isCurrentRequest = {});
     void setTransportRecording(bool recording);
     bool recordingRequiresAudioInput() const;
     bool trackRequiresAudioInput(const juce::String& trackId) const;
@@ -214,7 +217,7 @@ public:
                          double offset = 0.0, double volumeDB = 0.0, double fadeIn = 0.0, double fadeOut = 0.0,
                          const juce::String& clipId = juce::String(),
                          const juce::String& pitchCorrectionSourceFilePath = juce::String(),
-                         double pitchCorrectionSourceOffset = -1.0);
+                         double pitchCorrectionSourceOffset = -1.0, int fadeInCurve = 0, int fadeOutCurve = 0);
     /** Batch-add multiple clips from a JSON array. Each element: {trackId, filePath, startTime, duration, offset, volumeDB, fadeIn, fadeOut, clipId, pitchCorrectionSourceFilePath?, pitchCorrectionSourceOffset?}. */
     void addPlaybackClipsBatch(const juce::String& clipsJSON);
     void removePlaybackClip(const juce::String& trackId, const juce::String& filePath);
@@ -319,6 +322,8 @@ public:
     juce::var runReleaseGuardrails();
     juce::var runAutomatedRegressionSuite();
     juce::var runRenderExportRegression(const juce::File& outputDirectory, bool requireOffline = false);
+    juce::var runProjectQualification(const juce::File& projectFile, const juce::File& frontendPayload,
+                                      const juce::File& outputDirectory);
     juce::var runCleanGuitarPitchBendRegression();
     juce::var runNAMRackRegression();
     juce::var runNAMRackDIRegression(const juce::File& inputFile,
@@ -398,6 +403,14 @@ public:
     // Compact atomics-only status for always-visible rack/tuner UI. The full
     // debug snapshot remains an explicit diagnostic operation.
     juce::var getRealtimeAudioTelemetry() const;
+    // Explicit CLI diagnostics only. Reporter is the sole queue consumer;
+    // ordinary UI/debug snapshots never drain or enable paired tracing.
+    void setRealtimeCallbackTraceEnabled(bool enabled, bool threadCycles = false) noexcept
+    { realtimeCallbackTrace.setEnabled(enabled, threadCycles); }
+    std::size_t drainRealtimeCallbackTrace(RealtimeCallbackTraceEvent* destination, std::size_t maximum) noexcept
+    { return realtimeCallbackTrace.drain(destination, maximum); }
+    RealtimeCallbackTraceStats getRealtimeCallbackTraceStats() const noexcept
+    { return realtimeCallbackTrace.getStats(); }
     
     // Plugin State Serialization (F2 - Project Save/Load)
     juce::String getPluginState(const juce::String& trackId, int fxIndex, bool isInputFX);
@@ -415,7 +428,13 @@ public:
         const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
     
     // Waveform Visualization
-    juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels);
+    juce::var analyzeClipTempo(const juce::String& trackId, const juce::String& clipId,
+                               double rangeStartSeconds = 0.0, double rangeDurationSeconds = -1.0,
+                               const juce::var& source = {}, const std::atomic<bool>* cancelled = nullptr) const;
+    juce::var getClipTempoPreviewData(const juce::String& trackId, const juce::String& clipId,
+                                     double rangeStartSeconds, double durationSeconds, const juce::var& source = {}) const;
+    juce::var getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels,
+                              juce::int64 sourceRangeStartSample = 0, juce::int64 sourceRangeEndSample = -1);
     double getAudioPeakAmplitude(const juce::String& filePath,
                                  double offsetSeconds,
                                  double durationSeconds) const;
@@ -605,7 +624,8 @@ public:
 
     // MIDI Import/Export (Phase 19.9)
     juce::var importMIDIFile(const juce::String& filePath);
-    bool exportProjectMIDI(const juce::String& outputPath, const juce::var& midiTracks, double bpm = 120.0);
+    bool exportProjectMIDI(const juce::String& outputPath, const juce::var& midiTracks, double bpm = 120.0,
+                           const juce::var& timingOptions = juce::var());
     bool exportMIDIFile(const juce::String& trackId, const juce::String& clipId,
                         const juce::String& eventsJSON, const juce::String& outputPath, double clipTempo);
 
@@ -760,6 +780,7 @@ private:
     struct RealtimeTrackEntry
     {
         juce::String id;
+        juce::int64 playbackContinuityKey = 0;
         juce::AudioProcessorGraph::Node::Ptr node;
         TrackProcessor* processor = nullptr;
         std::shared_ptr<juce::AudioBuffer<float>> sidechainOutputBuffer;
@@ -906,7 +927,7 @@ private:
     };
     static void runParallelTrackJob(void* context) noexcept;
     void drainRealtimeTrackExecution(); // Caller has stopped callback dispatch.
-    void recordQuarantinedTrackInput(const RealtimeTrackEntry& entry,
+    void recordTrackHardwareInput(const RealtimeTrackEntry& entry,
                                      const float* const* inputs, int inputCount,
                                      int samples, juce::int64 blockPosition);
     struct PublishedBuiltInProcessorOwner
@@ -983,6 +1004,7 @@ private:
                            const std::function<bool()>& keepRunning) const;
     // Device settings persistence
     uint64 recordingRequestGeneration = 0;
+    static juce::var runPreparedRecordingStartRegression(const juce::File& outputDirectory);
     std::map<juce::String, uint64> monitorRequestGenerations;
     std::unique_ptr<juce::XmlElement> inputPermissionSavedSettings;
     void saveDeviceSettings();
@@ -1079,6 +1101,8 @@ private:
     std::atomic<bool> isRecordMode { false };
     std::atomic<bool> recordingDeviceInterrupted { false };
     std::atomic<bool> isRendering { false };  // Blocks audio callback during offline render
+    std::atomic<int> lastOfflineRenderSourceReadMisses { 0 };
+    std::atomic<bool> lastOfflineRenderSourceReadFailed { false };
     juce::CriticalSection offlineRenderTransactionLock;
     std::atomic<bool> isLooping { false };
     // The callback advances this integral sample cursor. Control-thread seeks
@@ -1122,7 +1146,7 @@ private:
     static constexpr int audioCallbackHistogramCellCount =
         audioCallbackWindowSeconds * audioCallbackHistogramBins;
     static constexpr int audioCallbackStageCount = 5;
-    static constexpr uint64 audioCallbackStageSampleInterval = 16;
+    static constexpr uint64 audioCallbackStageSampleInterval = RealtimeCallbackTrace::sampleInterval;
     enum AudioCallbackStageIndex
     {
         audioCallbackStagePlayback = 0,
@@ -1150,6 +1174,7 @@ private:
         audioCallbackWindowMaxNanoseconds {};
     std::array<AudioCallbackStageWindow, audioCallbackStageCount>
         audioCallbackStageWindows {};
+    RealtimeCallbackTrace realtimeCallbackTrace;
     std::atomic<double> firstAudioCallbackTelemetryWallTimeMs { 0.0 };
     std::atomic<bool> windowsAudioCallbackMMCSSRequested { false };
     std::atomic<bool> windowsAudioCallbackMMCSSActive { false };

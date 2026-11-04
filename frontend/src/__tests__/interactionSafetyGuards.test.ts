@@ -122,7 +122,7 @@ describe("interaction safety guards", () => {
       "isTimelineClipCopyAction(modifierAction)",
     );
     expect(timelineSource).toContain("shouldStartTimelineCopyDrag(true, dragType, clipEditLocked)");
-    expect(timelineSource).toContain("if (!copyOnDrag && !isAlreadyInMultiSelection)");
+    // Selection preservation is exercised by actual body/edge Ctrl+clicks in midi-join-export.spec.ts.
     expect(timelineSource).toContain("selectClip(clip.id, { ctrl: true });");
     expect(timelineSource).toContain("previewStartTime: clip.startTime");
   });

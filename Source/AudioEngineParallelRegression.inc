@@ -852,13 +852,7 @@ juce::var AudioEngine::runParallelTrackRegression()
             quarantinePass = reader->read(&take, 0, frames, 0, true, false) && quarantinePass;
             for (int frame = 0; frame < frames; ++frame)
             {
-                float expected = fixtureSample(index, frame);
-                if (mixedGraph && index == 5)
-                    expected += fixtureSample(4, frame - sourceDelay)
-                        * (std::cos(juce::MathConstants<float>::pi / 4.0f) * 0.5f);
-                if (addIncomingWhilePending && index == 1)
-                    expected += fixtureSample(4, frame - sourceDelay)
-                        * (std::cos(juce::MathConstants<float>::pi / 4.0f) * 0.25f);
+                const float expected = fixtureSample(index, frame);
                 const float actual = take.getSample(0, frame);
                 const double error = std::abs(static_cast<double>(actual) - expected);
                 maximumRecordingError = juce::jmax(maximumRecordingError, error);
@@ -876,9 +870,9 @@ juce::var AudioEngine::runParallelTrackRegression()
         check(addIncomingWhilePending ? "pending_worker_new_incoming_send_recording"
                 : mixedGraph ? "pending_worker_mixed_send_recording" : "pending_worker_quarantine_preserves_raw_recording", quarantinePass,
             addIncomingWhilePending
-                ? "A new snapshot adds an unowned source send into an old queued processor. Identity quarantine retains all old owned scratch while that raw take includes the current incoming send; unrelated send monitoring/recording follows an explicit zero-padded PDC delay oracle without new dispatch."
+                ? "A new snapshot adds an unowned source send into an old queued processor. Identity quarantine retains all old owned scratch; monitoring follows the explicit send/PDC oracle while each take contains only its selected hardware input."
                 : mixedGraph
-                ? "Four retained native owners remain untouched while an unrelated source/send/destination graph processes on callback. Three blocks match an explicit zero-padded PDC delay oracle for monitoring and raw send-destination PCM, and no new worker batch is dispatched."
+                ? "Four retained native owners remain untouched while an unrelated source/send/destination graph processes on callback. Monitoring matches the zero-padded send/PDC oracle; raw takes independently match selected hardware PCM, and no new worker batch is dispatched."
                 : "A deliberately held helper retains a track lock and snapshot pin across three real host callbacks; monitoring is silent, DSP counters/scratch remain untouched and all four raw recordings preserve exact frame counts and 16-bit input parity.", quarantineDiagnosticValue);
     }
     check("device_stop_waits_for_pending_worker", controlDrainPass,

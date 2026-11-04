@@ -16,6 +16,7 @@ import { advanceProjectEpoch, getProjectEpoch, getRecoveryDocumentId, getProject
 import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { restoreProjectRouting } from "../../utils/projectRoutingRestore";
 import { resetSyncCache } from "./clips";
+import { getClipPlaybackGainEnvelope } from "../../utils/clipCrossfades";
 import { createDefaultTrack, createFreshProjectDocumentState } from "../useDAWStore";
 import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeHelpers";
 import { parseSendAutomationParamId } from "../automationParams";
@@ -242,7 +243,7 @@ async function collectRestoredMissingNAMAssets(data: any) {
 
 const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "meterLevels", "midiInputLevels", "peakLevels", "masterLevel", "automatedParamValues",
-  "recordingClips", "recordingMIDIPreviews", "playStartPosition",
+  "recordingClips", "recordingMIDIPreviews", "playStartPosition", "isPreparingToRecord",
   "selectedTrackId", "selectedTrackIds", "lastSelectedTrackId",
   "selectedClipId", "selectedClipIds", "clipboard", "midiNoteClipboard",
   "selectedAutomationTarget",
@@ -260,6 +261,7 @@ const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "showRegionRenderMatrix", "showMasterTrackInTCP", "showCrosshair", "showProjectCompare",
   "projectCompareData",
   "pianoRollTrackId", "pianoRollClipId", "dynamicSplitClipId", "crossfadeEditorClipIds",
+  "tempoDetectionTarget", "audioConversionJobs", "mixerHeight",
   "stepInputEnabled", "stepInputSize", "stepInputPosition",
   "audioDeviceSetup", "canUndo", "canRedo",
   "isProjectLoading", "projectLoadingMessage",
@@ -456,6 +458,8 @@ function buildProjectResetState() {
     showDynamicSplit: false,
     dynamicSplitClipId: null,
     showCrossfadeEditor: false,
+    tempoDetectionTarget: null,
+    audioConversionJobs: {},
     crossfadeEditorClipIds: null,
     showClipLauncher: false,
     showStemSeparation: false,
@@ -496,6 +500,7 @@ function buildSerializedProjectData(
     projectPersistentId: state.projectPersistentId,
     projectNotes: state.projectNotes,
     projectSampleRate: state.projectSampleRate,
+    projectAudioImportPolicy: state.projectAudioImportPolicy,
     projectBitDepth: state.projectBitDepth,
     processingPrecision: state.processingPrecision,
     tempo: state.transport.tempo,
@@ -1359,6 +1364,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             ? data.projectPersistentId : freshProjectState.projectPersistentId,
           projectNotes: data.projectNotes || "",
           projectSampleRate: data.projectSampleRate || 44100,
+          projectAudioImportPolicy: data.projectAudioImportPolicy === "project-rate-copy" ? "project-rate-copy" : "preserve",
           projectBitDepth: data.projectBitDepth || 24,
           processingPrecision: loadedProcessingPrecision,
           projectAuthor: data.projectAuthor || "",
@@ -1427,6 +1433,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
         const restoredMIDILearnMappings = [];
         const savedMIDILearnMappings = normalizeSavedMIDILearnMappings(data.midiLearnMappings);
         const totalTracks = data.tracks.length;
+        let lastTrackLoadYield = performance.now();
         for (let ti = 0; ti < totalTracks; ti++) {
           const trackData = prepareUnavailableFXForLoad(data.tracks[ti]);
           const plannedMIDILearnMappings = savedMIDILearnMappings.filter(mapping => mapping.trackId === trackData.id).flatMap(mapping => {
@@ -1556,7 +1563,11 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
                     clip.id,
                     clip.pitchCorrectionSourceFilePath,
                     clip.pitchCorrectionSourceOffset,
+                    clip.fadeInShape ?? 0,
+                    clip.fadeOutShape ?? 0,
                   );
+                  const envelope = getClipPlaybackGainEnvelope(clip);
+                  if (envelope.length) await nativeBridge.setClipGainEnvelope(trackData.id, clip.id, envelope);
                 }
               }
             }
@@ -1974,6 +1985,14 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
             notifyInstrumentChanged({ trackId: frontendTrack.id });
             for (const lane of frontendTrack.automationLanes) {
               if (!parseSendAutomationParamId(lane.param)) syncAutomationLaneToBackend(frontendTrack.id, lane);
+            }
+            // A cached/mock bridge can resolve every await in the same task.
+            // Give input, progress paint and React's external-store updates a
+            // turn during large restores instead of chaining all tracks in
+            // microtasks; the yield does not alter restoration order.
+            if (performance.now() - lastTrackLoadYield >= 8 || (ti + 1) % 8 === 0) {
+              await new Promise<void>(resolve => setTimeout(resolve, 0));
+              lastTrackLoadYield = performance.now();
             }
           } catch (trackError) {
             console.error(`[DEBUG LOAD] Failed to load track "${trackData.name}"`, trackError);
@@ -2415,6 +2434,7 @@ export const projectActions = (set: SetFn, get: GetFn) => ({
           if (Math.abs((sc.duration || 0) - (cur.duration || 0)) > 0.001) changes.push(`duration: ${sc.duration?.toFixed(3)}s -> ${cur.duration?.toFixed(3)}s`);
           if ((sc.volumeDB || 0) !== (cur.volumeDB || 0)) changes.push(`volume: ${sc.volumeDB || 0}dB -> ${cur.volumeDB || 0}dB`);
           if (sc.muted !== cur.muted) changes.push(`muted: ${sc.muted} -> ${cur.muted}`);
+          if (JSON.stringify(sc.crossfadeLayers ?? []) !== JSON.stringify(cur.crossfadeLayers ?? [])) changes.push("crossfade handoffs changed");
           if (changes.length > 0) {
             clipsDiff.push({ type: "modified", id, name: cur.name || cur.filePath?.split(/[/\\]/).pop() || id, trackName, details: changes.join(", ") });
           }

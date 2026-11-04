@@ -6,7 +6,7 @@ import { projectNativeQueue } from "../utils/projectNativeQueue";
 import { sourceClipIdentity } from "../utils/sourceClipIdentity";
 import { graphProblem } from "../utils/projectValidation";
 import { subscribeWithSelector } from "zustand/middleware";
-import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse, type InstallAiToolsOptions, type MissingMediaEntry, type NAMProjectAssetTarget } from "../services/NativeBridge";
+import { nativeBridge, type AiFeatureId, type AiToolsStatus, type InstallAiToolsResponse, type InstallAiToolsOptions, type MissingMediaEntry, type NAMProjectAssetTarget, type MIDIExportOptions, type ClipTempoAnalysis } from "../services/NativeBridge";
 import { Command, commandManager } from "./commands";
 import {
   FACTORY_QUANTIZE_PRESETS,
@@ -23,6 +23,8 @@ import { transportActions } from "./actions/transport";
 import { metronomePracticeActions } from "./actions/metronomePractice";
 import { clipActions } from "./actions/clips";
 import { clipEditingActions } from "./actions/clipEditing";
+import { timelineEnhancementActions, type ClipCrossfadeOptions, type NewTimelineTrackRequest } from "./actions/timelineEnhancements";
+import type { ClipCrossfadeLayer } from "../utils/clipCrossfades";
 import type { TimelineClipCopyOptions, TimelineClipCopyPlacement } from "./actions/timelineClipCopy";
 import { mixerActions } from "./actions/mixer";
 import { timelineActions } from "./actions/timeline";
@@ -34,6 +36,7 @@ import { renderingActions } from "./actions/rendering";
 import { projectActions } from "./actions/project";
 import { midiActions } from "./actions/midi";
 import { audioToMidiActions } from "./actions/audioToMidi";
+import { audioConversionActions, type AudioConversionJob } from "./actions/audioConversion";
 import { routingActions } from "./actions/routing";
 import { clipLauncherActions } from "./actions/clipLauncher";
 import { markerActions } from "./actions/markers";
@@ -362,6 +365,7 @@ export interface MidiEditorSession {
 
 // MIDI Event structure
 export interface MIDIEvent {
+  notePairId?: string; // Optional editor identity linking a note's onset and release; never a MIDI wire field.
   timestamp: number; // Time in seconds from clip start
   type: "noteOn" | "noteOff" | "cc" | "pitchBend" | "programChange" | "channelPressure" | "polyPressure";
   channel?: number; // 1-16 for serialized/scheduled MIDI, undefined = track/default channel
@@ -415,6 +419,7 @@ export interface MIDIClip {
   groupId?: string; // Timeline item group shared with audio or MIDI clips
   muted?: boolean;
   locked?: boolean;
+  sourceTempoInfo?: MIDIExportOptions; // Original imported musical map; optional for recorded/legacy clips
 }
 
 // Type guards for clip discrimination
@@ -772,6 +777,7 @@ export interface AudioClip {
   activeTakeIndex?: number; // Which take is active (undefined = main clip)
   sourceLength?: number; // Full duration of source audio file (for resize clamping after split)
   gainEnvelope?: Array<{ time: number; gain: number }>; // Per-clip gain envelope (time relative to clip start, gain 0.0-2.0)
+  crossfadeLayers?: ClipCrossfadeLayer[]; // Independent multiplicative handoffs; manual envelope/fades remain intact
   importStatus?: "probing" | "preparingPlayback" | "ready" | "failed";
   waveformStatus?: "preview" | "building" | "ready";
 }
@@ -1365,6 +1371,7 @@ export interface DAWState {
   // Transport
   transport: TransportState;
   recordingClips: RecordingClip[]; // Tracks currently being recorded (for live visualization)
+  isPreparingToRecord: boolean;
   recordSession: RecordSession | null; // Runtime-only snapshot used to finalize recording if backend transport updates race
   recordingMIDIPreviews: Record<string, RecordingMIDIPreview>; // Runtime-only MIDI note preview data for in-progress recording
   playStartPosition: number; // Position where play/record was started (for stop behavior)
@@ -1605,6 +1612,7 @@ export interface DAWState {
   projectPersistentId: string;
   projectNotes: string;
   projectSampleRate: 44100 | 48000 | 88200 | 96000 | 192000;
+  projectAudioImportPolicy: "preserve" | "project-rate-copy";
   projectBitDepth: 16 | 24 | 32;
   processingPrecision: "float32" | "hybrid64";
 
@@ -1722,7 +1730,7 @@ export interface DAWState {
 
   // Phase 13: Advanced Editing
   showCrossfadeEditor: boolean;
-  crossfadeEditorClipIds: [string, string] | null; // Two overlapping clip IDs
+  crossfadeEditorClipIds: string[] | null; // Selected overlapping audio clips
   freePositioning: boolean;
 
   // Phase 14: Theming & Customization
@@ -1742,6 +1750,9 @@ export interface DAWState {
   pitchEditorClipId: string | null;
   pitchEditorFxIndex: number;
   lowerZoneHeight: number; // pitch editor lower zone height in px
+  mixerHeight: number; // Preferred docked mixer height; local UI preference
+  tempoDetectionTarget: { trackId: string; clipId: string } | null;
+  audioConversionJobs: Record<string, AudioConversionJob>;
   scriptConsoleOutput: string[];
   userScripts: Array<{ id: string; name: string; code: string; filePath?: string }>;
   projectTabs: Array<{ id: string; name: string; isActive: boolean }>;
@@ -2205,6 +2216,7 @@ export interface DAWActions {
     insertIndex?: number;
     startTime: number;
     parsedTracks?: Array<{ name?: string; channel?: number; events: any[] }>;
+    sourceTempoInfo?: MIDIExportOptions;
   }) => Promise<void>;
   syncClipsWithBackend: () => Promise<void>;
   importMedia: (
@@ -2489,6 +2501,9 @@ export interface DAWActions {
   setProjectName: (name: string) => void;
   setProjectNotes: (notes: string) => void;
   setProjectSampleRate: (sampleRate: 44100 | 48000 | 88200 | 96000 | 192000) => void;
+  setProjectAudioImportPolicy: (policy: "preserve" | "project-rate-copy") => void;
+  createProjectRateCopy: (trackId: string, clipId: string) => Promise<void>;
+  cancelProjectRateCopy: (clipId: string) => void;
   setProjectBitDepth: (bitDepth: 16 | 24 | 32) => void;
   setProcessingPrecision: (mode: "float32" | "hybrid64") => Promise<void>;
 
@@ -2605,6 +2620,17 @@ export interface DAWActions {
   toggleCleanProject: () => void;
   toggleBatchConverter: () => void;
   exportProjectMIDI: () => Promise<boolean>;
+  joinSelectedMIDIClips: () => boolean;
+  crossfadeSelectedClips: () => boolean;
+  editSelectedCrossfade: () => boolean;
+  applyClipCrossfade: (clipId1: string, clipId2: string, options?: ClipCrossfadeOptions) => boolean;
+  applyClipCrossfades: (clipIds: string[], options?: ClipCrossfadeOptions) => boolean;
+  clearClipCrossfades: (clipIds: string[]) => boolean;
+  moveTimelineClipsToNewTrack: (request: NewTimelineTrackRequest) => Promise<string | null>;
+  openTempoDetection: (trackId: string, clipId: string) => void;
+  closeTempoDetection: () => void;
+  analyzeTempoDetectionTarget: (rangeStartSeconds?: number, rangeDurationSeconds?: number, requestId?: string) => Promise<ClipTempoAnalysis>;
+  applyDetectedTempo: (bpm: number) => boolean;
   consolidateTrack: (trackId: string) => Promise<string | null>;
   renderClipInPlace: (clipId: string) => Promise<void>;
   renderTrackInPlace: (trackId: string) => Promise<void>;
@@ -2641,6 +2667,7 @@ export interface DAWActions {
   openPitchEditor: (trackId: string, clipId: string, fxIndex: number) => void;
   closePitchEditor: () => void;
   setLowerZoneHeight: (h: number) => void;
+  setMixerHeight: (h: number, persist?: boolean) => void;
   executeScript: (code: string) => Promise<void>;
   addUserScript: (name: string, code: string) => void;
   removeUserScript: (scriptId: string) => void;
@@ -3125,6 +3152,7 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     },
     transport: { ...initialTransport },
     recordingClips: [],
+    isPreparingToRecord: false,
     recordSession: null,
     recordingMIDIPreviews: {},
     isTimelineRulerZooming: false,
@@ -3186,6 +3214,7 @@ export function createFreshProjectDocumentState(): Partial<DAWState> {
     projectPersistentId: crypto.randomUUID(),
     projectNotes: "",
     projectSampleRate: 44100,
+    projectAudioImportPolicy: "preserve",
     projectBitDepth: 24,
     processingPrecision: "float32",
     mixerSnapshots: [],
@@ -3244,6 +3273,7 @@ export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
 
   // Transport runtime (position is reset on load; tempo/loop are saved explicitly)
   "recordingClips",
+  "isPreparingToRecord",
   "recordSession",
   "playStartPosition",
   "isTimelineRulerZooming",
@@ -3322,6 +3352,9 @@ export const TRANSIENT_STATE_KEYS: ReadonlySet<string> = new Set([
   "pianoRollClipId",
   "dynamicSplitClipId",
   "crossfadeEditorClipIds",
+  "tempoDetectionTarget",
+  "audioConversionJobs",
+  "mixerHeight",
   "aiClipGenerationTrackId",
   "aiClipGenerationClipId",
   "aiClipGenerationWorkflowId",
@@ -3381,6 +3414,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     lastSelectedTrackId: null,
     transport: initialTransport,
     recordingClips: [],
+    isPreparingToRecord: false,
     recordSession: null,
     recordingMIDIPreviews: {},
     playStartPosition: 0,
@@ -3573,6 +3607,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     projectPersistentId: crypto.randomUUID(),
     projectNotes: "",
     projectSampleRate: 44100,
+    projectAudioImportPolicy: "preserve",
     projectBitDepth: 24,
     processingPrecision: "float32",
 
@@ -3685,6 +3720,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     pitchEditorClipId: null,
     pitchEditorFxIndex: 0,
     lowerZoneHeight: 280,
+    mixerHeight: (() => { const height = getStoredJSON<number>("openstudio_mixerHeight", 340); return Number.isFinite(height) ? Math.max(96, Math.min(1200, height)) : 340; })(),
+    tempoDetectionTarget: null,
     scriptConsoleOutput: [],
     userScripts: [],
     projectTabs: [{ id: "default", name: "Untitled Project", isActive: true }],
@@ -4445,6 +4482,14 @@ export const useDAWStore = create<DAWState & DAWActions>()(
 
     setProjectSampleRate: (sampleRate) => {
       set({ projectSampleRate: sampleRate, isModified: true });
+    },
+    setProjectAudioImportPolicy: (policy) => {
+      const old = get().projectAudioImportPolicy;
+      if (policy === old || !["preserve", "project-rate-copy"].includes(policy)) return;
+      const apply = (value: "preserve" | "project-rate-copy") => set({ projectAudioImportPolicy: value, isModified: true });
+      commandManager.execute({ type: "SET_AUDIO_IMPORT_POLICY", description: "Set audio import conversion policy", timestamp: Date.now(),
+        execute: () => apply(policy), undo: () => apply(old) });
+      set({ canUndo: commandManager.canUndo(), canRedo: commandManager.canRedo() });
     },
 
     setProjectBitDepth: (bitDepth) => {
@@ -5764,6 +5809,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             newClip.id,
             newClip.pitchCorrectionSourceFilePath,
             newClip.pitchCorrectionSourceOffset,
+            newClip.fadeInShape ?? 0,
+            newClip.fadeOutShape ?? 0,
           ));
         },
         undo: () => {
@@ -6076,6 +6123,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     ...metronomePracticeActions(set, get),
     ...clipActions(set, get),
     ...clipEditingActions(set, get),
+    ...timelineEnhancementActions(set, get),
     ...mixerActions(set, get),
     ...timelineActions(set, get),
     ...trackActions(set, get),
@@ -6088,6 +6136,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     ...clipLauncherActions(set, get),
     ...midiActions(set, get),
     ...audioToMidiActions(set, get),
+    ...audioConversionActions(set, get),
     ...markerActions(set, get),
     ...screensetActions(set, get),
     ...macroActions(set, get),

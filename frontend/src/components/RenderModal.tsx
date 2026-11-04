@@ -1001,22 +1001,6 @@ export function RenderModal({ isOpen, onClose }: RenderModalProps) {
               </div>
             </div>
 
-            {/* Resample Quality */}
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-daw-text-muted w-28">Resample Quality:</span>
-              <Select
-                options={[
-                  { value: "fast", label: "Fast" },
-                  { value: "good", label: "Good" },
-                  { value: "best", label: "Best" },
-                ]}
-                value={useDAWStore.getState().resampleQuality}
-                onChange={(v) => useDAWStore.getState().setResampleQuality(v as "fast" | "good" | "best")}
-                size="xs"
-                disabled
-              />
-              <span className="text-[10px] text-daw-text-dim">Backend support pending</span>
-            </div>
           </div>
 
           {/* Secondary Output Format */}

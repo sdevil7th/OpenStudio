@@ -189,6 +189,16 @@ async function holdNextRequest(page: Page) {
   return page.evaluate(() => window.__recordingZoomIntegration.requests.length);
 }
 
+async function expectBoundedPreviewProgress(page: Page, before: number, since: number) {
+  await expect.poll(() => page.evaluate(() => window.__recordingZoomIntegration.requests.length)).toBeGreaterThan(before);
+  const current = await page.evaluate(() => ({
+    count: window.__recordingZoomIntegration.requests.length,
+    maxPending: window.__recordingZoomIntegration.maxPending, now: performance.now(),
+  }));
+  expect(current.count - before).toBeLessThanOrEqual(Math.ceil((current.now - since) / 250) * 2 + 4);
+  expect(current.maxPending).toBe(1);
+}
+
 async function dragRuler(page: Page, dy: number, dx = 0) {
   const bounds = await page.locator(".workspace-sticky-ruler canvas").first().boundingBox();
   if (!bounds) throw new Error("Visible workspace ruler is missing");
@@ -211,6 +221,119 @@ async function dragRuler(page: Page, dy: number, dx = 0) {
 
 test.afterEach(async ({ page }) => {
   await page.evaluate(() => window.__recordingZoomIntegration?.cleanup());
+});
+
+test("live waveforms keep updating during sustained scrolling and modifier zoom", async ({ page }) => {
+  test.setTimeout(45000);
+  await ready(page);
+  await page.evaluate(() => {
+    const { store, createDefaultTrack } = window.__recordingZoomModules;
+    store.setState({ autoScrollDuringPlayback: false,
+      tracks: [...store.getState().tracks, ...Array.from({ length: 12 }, (_, i) =>
+        createDefaultTrack(`live-scroll-${i}`, `Scroll ${i}`, "#4361ee", "audio", []))] });
+  });
+  await paint(page);
+  for (const modifier of [null, "Control", "Shift", "Alt"]) {
+    await page.evaluate(() => {
+      const store = window.__recordingZoomIntegration.store;
+      store.setState({ pixelsPerSecond: 80, scrollX: (store.getState().transport.currentTime - 2) * 80 });
+    });
+    await paint(page);
+    await page.mouse.move(850, 240);
+    const before = await page.evaluate(() => ({ count: window.__recordingZoomIntegration.requests.length, time: performance.now() }));
+    if (modifier) await page.keyboard.down(modifier);
+    try {
+      for (let n = 0; n < 32; n++) {
+        await page.mouse.wheel(0, n % 2 ? 20 : -20);
+        await page.evaluate(() => {
+          const store = window.__recordingZoomIntegration.store;
+          store.getState().setCurrentTime(store.getState().transport.currentTime + 0.05);
+        });
+        await page.waitForTimeout(45);
+      }
+      // Inspect before releasing the gesture or its 200 ms idle debounce.
+      const during = await page.evaluate(start => {
+        const f = window.__recordingZoomIntegration;
+        return { requests: f.requests.slice(start.count), elapsed: performance.now()-start.time,
+          maxPending: f.maxPending, recording: f.store.getState().transport.isRecording };
+      }, before);
+      for (const trackId of ["record-zoom-a", "record-zoom-b"])
+        expect(during.requests.filter(request => request.trackId === trackId && request.completed).length,
+          `${modifier ?? "plain"} live data for ${trackId}`).toBeGreaterThan(1);
+      expect(during.requests.length).toBeLessThanOrEqual(Math.ceil(during.elapsed / 250) * 2 + 4);
+      expect(during.maxPending).toBe(1);
+      expect(during.recording).toBe(true);
+    } finally {
+      if (modifier) await page.keyboard.up(modifier);
+    }
+  }
+});
+
+test("native vertical scrolling shares the queued zoom publication and preserves the latest horizontal view", async ({ page }) => {
+  await ready(page);
+  await page.evaluate(() => {
+    const { store, createDefaultTrack } = window.__recordingZoomModules;
+    store.setState({ autoScrollDuringPlayback: false,
+      tracks: [...store.getState().tracks, ...Array.from({ length: 12 }, (_, i) =>
+        createDefaultTrack(`scroll-${i}`, `Scroll ${i}`, "#4361ee", "audio", []))] });
+  });
+  await paint(page);
+  const before = await geometry(page);
+  const anchorX = 300;
+  const immediate = await page.locator(".timeline-container canvas").first().evaluate((element, anchor) => {
+    const store = window.__recordingZoomIntegration.store;
+    const workspace = element.closest(".workspace") as HTMLElement;
+    const bounds = element.getBoundingClientRect();
+    // A view command may publish after React's last commit, immediately before
+    // native scrolling arrives. The scroll listener must read that newer view.
+    const latestX = store.getState().scrollX + 137;
+    store.setState({ scrollX: latestX });
+    element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true,
+      ctrlKey: true, deltaY: -80, clientX: bounds.left + anchor, clientY: bounds.top + 20 }));
+    workspace.scrollTop = 120;
+    workspace.dispatchEvent(new Event("scroll"));
+    workspace.scrollTop = 180;
+    workspace.dispatchEvent(new Event("scroll"));
+    return { latestX, scrollX: store.getState().scrollX, scrollY: store.getState().scrollY,
+      nativeY: workspace.scrollTop };
+  }, anchorX);
+  expect(immediate.nativeY).toBe(180);
+  expect(immediate.scrollX).toBe(immediate.latestX);
+  expect(immediate.scrollY).toBe(0);
+  await paint(page);
+  const after = await geometry(page);
+  expect(after.zoom).toBeGreaterThan(before.zoom);
+  expect((after.scrollX + anchorX) / after.zoom)
+    .toBeCloseTo((immediate.latestX + anchorX) / before.zoom, 6);
+  expect(await page.evaluate(() => window.__recordingZoomIntegration.store.getState().scrollY)).toBe(180);
+});
+
+test("View menu fits the full project after track controls and modifier zoom during recording", async ({ page }) => {
+  await ready(page);
+  const before = await geometry(page);
+  const trackControls = page.getByRole("region", { name: "Track control panel", exact: true });
+  await trackControls.getByRole("combobox").first().focus();
+  await page.mouse.move(850, 240);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, -60);
+  await page.keyboard.up("Control");
+  await paint(page);
+  await page.getByRole("menuitem", { name: "View menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Zoom to Full Project", exact: true }).click();
+  await expect.poll(() => geometry(page).then(value => value.zoom)).toBeLessThan(3);
+  await paint(page);
+  const after = await geometry(page);
+  expect(after.zoom).toBeLessThan(before.zoom);
+  expect(after.scrollX).toBe(0);
+  expect(after.recording).toBe(true);
+  expect(after.lines).toHaveLength(2);
+  expect(after.lines.every(line => line.pointCount >= 4)).toBe(true);
+  // Following is allowed to resume once the normal manual-navigation grace
+  // period ends; it must keep the requested project scale.
+  await page.waitForTimeout(300);
+  const resumed = await geometry(page);
+  expect(resumed.zoom).toBe(after.zoom);
+  expect(resumed.scrollX).toBeLessThan(resumed.width);
 });
 
 test("long two-track recording keeps ruler zoom bounded, anchored and sample-aligned", async ({ page }, testInfo) => {
@@ -362,10 +485,11 @@ for (const termination of ["vertical zoom", "mouseup", "pointercancel", "blur"] 
     const pressed = await geometry(page);
     const press = await page.evaluate(() => window.__recordingZoomIntegration.press!);
     expect(pressed.time * press.zoom - press.scrollX).toBeGreaterThan(pressed.width);
-    await page.evaluate(() => {
+    const releasedAt = await page.evaluate(() => {
       const fixture = window.__recordingZoomIntegration;
       fixture.hold = false;
       fixture.release();
+      return performance.now();
     });
     await expect.poll(() => page.evaluate(() => window.__recordingZoomIntegration.pending)).toBe(0);
     // Wait for advancing transport, past the ordinary 200ms zoom idle period.
@@ -373,7 +497,7 @@ for (const termination of ["vertical zoom", "mouseup", "pointercancel", "blur"] 
     const pending = await geometry(page);
     expect(pending.zoom).toBe(press.zoom);
     expect(pending.scrollX).toBeCloseTo(press.scrollX, 6);
-    expect(await page.evaluate(() => window.__recordingZoomIntegration.requests.length)).toBe(callsAtHold);
+    await expectBoundedPreviewProgress(page, callsAtHold, releasedAt);
 
     if (termination === "vertical zoom") {
       await page.mouse.move(bounds.x + anchorX, bounds.y + 108);
@@ -405,8 +529,41 @@ for (const termination of ["vertical zoom", "mouseup", "pointercancel", "blur"] 
   });
 }
 
+test("long recording views keep ruler text separated and displayed grid work bounded", async ({ page }) => {
+  await ready(page);
+  for (const scenario of [
+    { tempo: 154, numerator: 4, denominator: 4, scrollX: 0 },
+    { tempo: 220, numerator: 7, denominator: 8, scrollX: 400000 },
+    { tempo: 40, numerator: 3, denominator: 2, scrollX: 10000 },
+  ]) {
+    await page.evaluate(scenario => {
+      const { store } = window.__recordingZoomIntegration;
+      store.setState({ pixelsPerSecond: 1, scrollX: scenario.scrollX, autoScrollDuringPlayback: false,
+        snapEnabled: true, gridSize: "1/16", timeSignature: { numerator: scenario.numerator, denominator: scenario.denominator },
+        transport: { ...store.getState().transport, tempo: scenario.tempo } });
+    }, scenario);
+    await paint(page);
+    const geometry = await page.evaluate(() => {
+      const ruler = window.Konva.stages.find(stage => stage.container().closest(".workspace-sticky-ruler"));
+      const timeline = window.Konva.stages.find(stage => stage.height() > 50 && stage.container().closest(".workspace"));
+      if (!ruler || !timeline) throw new Error("Timeline surfaces unavailable");
+      const labels = ruler.find("Text").map(node => ({ text: node.getAttr("text") as string,
+        ...node.getClientRect({ relativeTo: ruler }) })).filter(box => /^\d+$/.test(box.text) && box.x >= 0 && box.x + box.width <= ruler.width()).sort((a, b) => a.x - b.x);
+      const gridLines = timeline.find("Line").filter(node => node instanceof window.Konva.Line
+        && !node.closed() && (node.stroke() === "#ffffff" || node.stroke() === "#10b981")).length;
+      return { labels, gridLines, width: timeline.width(), rulerTicks: ruler.find("Line").length };
+    });
+    expect(geometry.labels.length).toBeGreaterThan(3);
+    for (let index = 1; index < geometry.labels.length; index++)
+      expect(geometry.labels[index].x - (geometry.labels[index - 1].x + geometry.labels[index - 1].width)).toBeGreaterThanOrEqual(4);
+    expect(geometry.rulerTicks).toBeLessThanOrEqual(Math.ceil(geometry.width / 8) + 6);
+    expect(geometry.gridLines).toBeLessThanOrEqual(Math.ceil(geometry.width / 8 + geometry.width / 18) + 12);
+    expect(await page.evaluate(() => window.__recordingZoomIntegration.store.getState().transport.isRecording)).toBe(true);
+  }
+});
+
 for (const termination of ["mouseup", "pointercancel", "blur"] as const) {
-  test(`held ruler zoom pauses follow and preview polling until ${termination}`, async ({ page }) => {
+  test(`held ruler zoom preserves its anchor and bounded live previews until ${termination}`, async ({ page }) => {
     await ready(page);
     const callsAtHold = await holdNextRequest(page);
     const bounds = await page.locator(".workspace-sticky-ruler canvas").first().boundingBox();
@@ -422,10 +579,11 @@ for (const termination of ["mouseup", "pointercancel", "blur"] as const) {
     expect(held.zoom).toBeGreaterThan(before.zoom);
     // Ensure follow would actually trigger if the held gesture were forgotten.
     expect(held.time * held.zoom - held.scrollX).toBeGreaterThan(held.width);
-    await page.evaluate(() => {
+    const releasedAt = await page.evaluate(() => {
       const fixture = window.__recordingZoomIntegration;
       fixture.hold = false;
       fixture.release();
+      return performance.now();
     });
     await expect.poll(() => page.evaluate(() => window.__recordingZoomIntegration.pending)).toBe(0);
     await expect.poll(() => geometry(page).then(value => value.time)).toBeGreaterThan(held.time + 0.45);
@@ -434,7 +592,7 @@ for (const termination of ["mouseup", "pointercancel", "blur"] as const) {
     expect(paused.scrollX).toBeCloseTo(held.scrollX, 6);
     expect((paused.scrollX + anchorX) / paused.zoom)
       .toBeCloseTo((before.scrollX + anchorX) / before.zoom, 6);
-    expect(await page.evaluate(() => window.__recordingZoomIntegration.requests.length)).toBe(callsAtHold);
+    await expectBoundedPreviewProgress(page, callsAtHold, releasedAt);
 
     if (termination === "mouseup") await page.mouse.up();
     else {

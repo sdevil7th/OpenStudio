@@ -24,19 +24,21 @@ function deferred<T>() {
 async function settle() { for (let index = 0; index < 8; index++) await Promise.resolve(); }
 function fixture() {
   let current: RecordingPreviewView | null = view();
-  let suspended = false;
+  let interacting = false;
+  let now = 0;
   let cache: RecordingWaveformCache = new Map();
   const request = vi.fn(async (_track: string, _spp: number, count: number, _start: number) => peaks(count));
   const publish = vi.fn((next: RecordingWaveformCache) => { cache = next; });
   const onError = vi.fn();
   const scheduler = new RecordingPreviewScheduler({
-    readView: () => current, isSuspended: () => suspended, request, publish, onError,
+    readView: () => current, isInteracting: () => interacting, now: () => now, request, publish, onError,
   });
   return {
     scheduler, request, publish, onError,
     get cache() { return cache; },
     setView(next: RecordingPreviewView | null) { current = next; },
-    suspend(value: boolean) { suspended = value; },
+    interact(value: boolean) { interacting = value; },
+    advanceTime(milliseconds: number) { now += milliseconds; },
   };
 }
 
@@ -95,8 +97,8 @@ describe("live recording request lifecycle", () => {
     await running;
     await settle();
     expect(f.request).toHaveBeenCalledTimes(3);
-    expect(f.request.mock.calls.map(call => call[0])).toEqual(["a", "a", "b"]);
-    expect(f.publish).toHaveBeenCalledTimes(2);
+    expect(f.request.mock.calls.map(call => call[0])).toEqual(["a", "b", "a"]);
+    expect(f.publish).toHaveBeenCalledTimes(3);
     const final = planRecordingPreviewWindow({ ...view(), pixelsPerSecond: 39, scrollX: 550 * 39 }, view().clips[0])!;
     expect(f.cache.get("a")?.samplesPerPixel).toBe(final.samplesPerPixel);
   });
@@ -159,18 +161,61 @@ describe("live recording request lifecycle", () => {
     }
   });
 
-  it("suspends fetching during a gesture and retires removed or newly recorded tracks", async () => {
+  it("updates growing previews during sustained gestures at a bounded cadence", async () => {
     const f = fixture();
-    f.suspend(true);
+    f.interact(true);
     await f.scheduler.poll();
-    expect(f.request).not.toHaveBeenCalled();
-    f.suspend(false);
+    expect(f.request).toHaveBeenCalledTimes(2);
+    const before = f.cache.get("a")!.peaks.length;
+    f.setView({ ...view(), currentTime: 557 });
+    for (let n = 0; n < 10; n++) {
+      f.advanceTime(20);
+      await f.scheduler.poll();
+    }
+    expect(f.request).toHaveBeenCalledTimes(2);
+    f.advanceTime(50);
     await f.scheduler.poll();
+    expect(f.request).toHaveBeenCalledTimes(4);
+    expect(f.cache.get("a")!.peaks.length).toBeGreaterThan(before);
+    f.interact(false);
     f.setView({ ...view(), clips: [{ trackId: "a", startTime: 555 }] });
     f.scheduler.invalidate();
     await f.scheduler.poll();
     expect([...f.cache.keys()]).toEqual(["a"]);
     expect(f.cache.get("a")?.recordingStartTime).toBe(555);
     expect(f.cache.get("a")?.startSample).toBe(0);
+  });
+
+  it("retains source-correct delayed data during navigation without spinning or crossing a take boundary", async () => {
+    const f = fixture();
+    f.interact(true);
+    const pending = deferred<WaveformPeak[]>();
+    f.request.mockImplementationOnce(() => pending.promise);
+    const running = f.scheduler.poll();
+    f.setView({ ...view(), pixelsPerSecond: 50, scrollX: 27500 });
+    f.scheduler.invalidate();
+    pending.resolve(peaks(10));
+    await running;
+    await settle();
+    expect(f.request).toHaveBeenCalledTimes(1);
+    expect(f.cache.get("a")?.samplesPerPixel).toBe(512);
+    const data = f.cache.get("a")!;
+    expect(recordingPeakX(data, 0, 50, 27500)).toBeCloseTo(data.startSample / 44100 * 50 - 27500);
+    f.advanceTime(250);
+    await f.scheduler.poll();
+    expect(f.request.mock.calls[1][0]).toBe("b"); // Slow navigation must not starve another armed track.
+    expect(f.cache.get("a")?.samplesPerPixel).toBe(1024);
+
+    f.advanceTime(250);
+    f.setView({ ...view(), pixelsPerSecond: 50, scrollX: 27500, currentTime: 557 });
+    const oldTake = deferred<WaveformPeak[]>();
+    f.request.mockImplementationOnce(() => oldTake.promise);
+    const oldRun = f.scheduler.poll();
+    f.scheduler.invalidate(true); // Stop, followed by a new take at the same time.
+    const published = f.publish.mock.calls.length;
+    oldTake.resolve(peaks(10));
+    await oldRun;
+    expect(f.publish).toHaveBeenCalledTimes(published);
+    expect(f.cache.size).toBe(0);
   });
 });
