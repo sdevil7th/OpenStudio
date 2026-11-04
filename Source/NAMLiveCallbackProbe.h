@@ -9,6 +9,9 @@
 #include <atomic>
 #include <cmath>
 #include <vector>
+#if JUCE_WINDOWS
+ #include <windows.h>
+#endif
 
 // Explicit opt-in hardware diagnostic. It never exposes physical input samples
 // to the engine, and the device receives silence regardless of the engine output.
@@ -23,6 +26,8 @@ struct Options
     int warmupSeconds = 10, measurementSeconds = 10;
     std::vector<int> buffers {8, 16, 128};
     bool recording = false;
+    bool threadCycles = false;
+    bool bypassFX = false;
     int workerCount = -1;
     int workerSpinMicroseconds = 0;
     int recoveryGraceMicroseconds = 0;
@@ -47,7 +52,38 @@ inline bool validOptions(const Options& value)
 class Callback final : public juce::AudioIODeviceCallback
 {
 public:
-    struct Record { juce::int64 frame, arrival, duration; int samples; };
+    struct ThreadSample
+    {
+        juce::uint64 cycles = 0;
+        int processor = -1;
+        bool valid = false;
+    };
+    static ThreadSample sampleThread(bool requested) noexcept
+    {
+        ThreadSample result;
+       #if JUCE_WINDOWS
+        if (requested)
+        {
+            ULONG64 cycles = 0;
+            result.valid = QueryThreadCycleTime(GetCurrentThread(), &cycles) != FALSE;
+            result.cycles = cycles;
+            PROCESSOR_NUMBER processor {};
+            GetCurrentProcessorNumberEx(&processor);
+            result.processor = static_cast<int>(processor.Group) * 256 + processor.Number;
+        }
+       #else
+        juce::ignoreUnused(requested);
+       #endif
+        return result;
+    }
+    struct Record
+    {
+        juce::int64 frame, arrival, duration;
+        int samples;
+        juce::uint64 cycles = 0;
+        int processorStart = -1, processorEnd = -1;
+        bool cyclesValid = false;
+    };
     Callback(AudioEngine& owner, const Options& requested)
         : engine(owner), options(requested), cycleFrames(static_cast<int>(options.sampleRate * 2.0)),
           input(options.trackCount, cycleFrames + scratchCapacity), output(2, scratchCapacity), records(65536), missedRecords(4096)
@@ -108,12 +144,17 @@ public:
         float* scratch[] { output.getWritePointer(0), output.getWritePointer(1) };
         output.clear(0, samples);
         const auto before = juce::Time::getHighResolutionTicks();
+        const auto threadStart = sampleThread(options.threadCycles);
         engine.audioDeviceIOCallbackWithContext(synthetic.data(), options.trackCount, scratch, 2, samples, context);
+        const auto threadEnd = sampleThread(options.threadCycles);
         const auto duration = juce::Time::getHighResolutionTicks() - before;
         if (frames >= warmupFrames && frames < warmupFrames + targetFrames)
         {
             const auto interval = previousArrival == 0 ? 0 : arrival - previousArrival;
-            const Record record { frames, interval, duration, samples };
+            const bool cyclesValid = threadStart.valid && threadEnd.valid && threadEnd.cycles >= threadStart.cycles;
+            const Record record { frames, interval, duration, samples,
+                cyclesValid ? threadEnd.cycles - threadStart.cycles : 0,
+                threadStart.processor, threadEnd.processor, cyclesValid };
             if (measuredBlocks % traceStride == 0 && count < records.size()) records[count++] = record;
             ++measuredBlocks; measuredFrames += samples; totalTicks += duration; maximumTicks = juce::jmax(maximumTicks, duration);
             ++durationHistogram[histogramBin(duration)];
@@ -138,14 +179,16 @@ public:
     juce::var report(const juce::File& csv) const // Only after removeAudioCallback has joined callbacks.
     {
         auto* result = new juce::DynamicObject();
-        juce::String text("kind,frame,samples,engine_microseconds,arrival_interval_microseconds\n");
-        text.preallocateBytes(112 * (count + missedCount) + 128);
+        juce::String text("kind,frame,samples,engine_microseconds,arrival_interval_microseconds,thread_cycles,cycles_valid,processor_start,processor_end\n");
+        text.preallocateBytes(160 * (count + missedCount) + 256);
         const double budget = requestedBlock * 1.0e6 / options.sampleRate;
         const auto append = [&](const Record& row, const char* kind)
         {
             const double elapsed = juce::Time::highResolutionTicksToSeconds(row.duration) * 1.0e6;
             const double interval = juce::Time::highResolutionTicksToSeconds(row.arrival) * 1.0e6;
-            text << kind << ',' << row.frame << ',' << row.samples << ',' << juce::String(elapsed, 3) << ',' << juce::String(interval, 3) << '\n';
+            text << kind << ',' << row.frame << ',' << row.samples << ',' << juce::String(elapsed, 3) << ',' << juce::String(interval, 3)
+                 << ',' << juce::String(row.cycles) << ',' << (row.cyclesValid ? 1 : 0)
+                 << ',' << row.processorStart << ',' << row.processorEnd << '\n';
         };
         for (size_t index = 0; index < count; ++index) append(records[index], "uniform");
         for (size_t index = 0; index < missedCount; ++index) append(missedRecords[index], "deadline_miss");
@@ -161,6 +204,8 @@ public:
         result->setProperty("durationHistogramOverflow", durationHistogram.back()); result->setProperty("arrivalHistogramOverflow", arrivalHistogram.back());
         result->setProperty("uniformTraceStride", traceStride); result->setProperty("uniformTraceRows", static_cast<int>(count)); result->setProperty("deadlineTraceRows", static_cast<int>(missedCount));
         result->setProperty("traceScope", "Bounded uniform sample plus first 4096 deadline misses; duplicate rows are intentional. Summary counts, extrema and histograms include every measured callback.");
+        result->setProperty("threadCyclesRequested", options.threadCycles);
+        result->setProperty("threadCycleScope", "Diagnostic only: raw thread cycles, not CPU time. Processor endpoints do not exclude intermediate migration or interrupts. Optional queries are included in callback wall duration.");
         result->setProperty("arrivalIntervalsAbove150Percent", lateArrivals); result->setProperty("arrivalStatus", "diagnostic_only: driver batching and scheduling both affect arrival intervals");
         result->setProperty("outputPeak", peak); result->setProperty("outputSamplesAtOrAboveFullScale", clipped);
         result->setProperty("nonFiniteOutputSamples", nonFinite); result->setProperty("clippingStatus", "diagnostic_only: synthetic signal and unchanged preset gains");
@@ -394,6 +439,14 @@ inline int run(const juce::String& nameFragment, const juce::File& guitar, const
                     const auto xml = actual.createXml(); stateReadbacks.add(xml != nullptr ? xml->toString() : juce::String());
                 }
                 check("state_restore_" + juce::String(block), ready, stateReadbacks);
+                if (options.bypassFX)
+                    for (const auto& id : tracks)
+                    {
+                        engine->bypassTrackFX(id, 0, true);
+                        const auto fx = engine->getTrackFX(id);
+                        ready = ready && fx.isArray() && fx.size() == 1 && static_cast<bool>(fx[0].getProperty("bypassed", false));
+                    }
+                check("fx_workload_" + juce::String(block), ready, options.bypassFX ? "Host-bypassed NAM control; not a loaded-NAM capacity result." : "Loaded NAM workload unchanged.");
                 const auto recordingDirectory = directory.getChildFile("recordings-buffer-" + juce::String(block));
                 if (options.recording)
                 {
@@ -431,7 +484,8 @@ inline int run(const juce::String& nameFragment, const juce::File& guitar, const
                 for (const auto& id : tracks)
                 {
                     const auto state = engine->getNAMRackDiagnostics(id, "track", 0); diagnostics.add(state);
-                    witnesses = witnesses && static_cast<int>(state.getProperty("lastAmpDspFrames", 0)) > 0
+                    if (!options.bypassFX)
+                        witnesses = witnesses && static_cast<int>(state.getProperty("lastAmpDspFrames", 0)) > 0
                         && static_cast<int>(state.getProperty("embeddedDriveRequestedOversamplingFactor", 0)) == options.oversamplingFactor
                         && static_cast<int>(state.getProperty("embeddedDriveActiveOversamplingFactor", 0)) == options.oversamplingFactor
                         && static_cast<int>(state.getProperty("routedInputChannelCount", 0)) == 1
@@ -493,8 +547,10 @@ inline int run(const juce::String& nameFragment, const juce::File& guitar, const
                 if (workerCountersValid && !workerCapacity) { detail->setProperty("capacityStatus", "fail"); detail->setProperty("engineCapacityStatus", "fail"); }
                 if (accepted && xruns > 0) detail->setProperty("capacityStatus", "fail");
                 detail->setProperty("engineCapacityScope", "Callback-duration deadlines and worker completion; cancelled/rejected/quarantined DSP is a capacity failure. Driver telemetry remains separate.");
-                check("loaded_callback_" + juce::String(block), valid, "Driver settings, finite nonzero synthetic output, loaded NAM execution, "
-                    + juce::String(options.oversamplingFactor) + "x oversampling, MMCSS and callback safety counters.");
+                check(juce::String(options.bypassFX ? "bypassed_callback_" : "loaded_callback_") + juce::String(block), valid,
+                    options.bypassFX ? "Driver settings, finite nonzero synthetic output, verified host bypass, MMCSS and callback safety counters. Not loaded-NAM capacity."
+                    : "Driver settings, finite nonzero synthetic output, loaded NAM execution, "
+                        + juce::String(options.oversamplingFactor) + "x oversampling, MMCSS and callback safety counters.");
                 cases.add(row); manager.closeAudioDevice();
                 if (!accepted) break;
             }
@@ -524,6 +580,8 @@ inline int run(const juce::String& nameFragment, const juce::File& guitar, const
     result->setProperty("trackCount", options.trackCount); result->setProperty("requestedWorkerCount", options.workerCount); result->setProperty("recordingRequested", options.recording);
     result->setProperty("requestedWorkerSpinMicroseconds", options.workerSpinMicroseconds);
     result->setProperty("requestedRecoveryGraceMicroseconds", options.recoveryGraceMicroseconds);
+    result->setProperty("workload", options.bypassFX ? "host_bypassed_nam_control" : "loaded_nam");
+    result->setProperty("threadCyclesRequested", options.threadCycles);
     result->setProperty("inputFixtureVersion", 2); result->setProperty("inputFixturePeriodSeconds", 2);
     juce::Array<juce::var> requestedBuffers; for (int buffer : options.buffers) requestedBuffers.add(buffer); result->setProperty("requestedBuffers", requestedBuffers);
    #if JUCE_DEBUG
@@ -534,7 +592,7 @@ inline int run(const juce::String& nameFragment, const juce::File& guitar, const
     const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
     result->setProperty("executable", executable.getFullPathName()); result->setProperty("executableSha256", juce::SHA256(executable).toHexString());
     result->setProperty("inputPolicy", "Physical input pointers are never read or recorded; independent periodic guitar/bass mono fixtures feed unique synthetic channels. Physical I/O stays at two channels, and physical outputs are always silent.");
-    result->setProperty("timingScope", "Wall time of the full AudioEngine callback on the real ASIO callback thread, including engine telemetry. Excludes proxy preparation/inspection and surrounding JUCE/ASIO wrapper work. No WebView is loaded.");
+    result->setProperty("timingScope", "Wall time of the full AudioEngine callback on the real ASIO callback thread, including engine telemetry and optional requested thread-cycle queries. Excludes proxy preparation/inspection and surrounding JUCE/ASIO wrapper work. No WebView is loaded.");
     result->setProperty("audioQuality", "not_asserted: silent synthetic hardware qualification cannot establish audible live crackle, tone or instrument routing");
     result->setProperty("restorationScope", "Inactive ASIO observed rate/preferred buffer restored; other audio clients must be closed. User settings and source presets are never saved.");
     const bool written = directory.getChildFile("result.json").replaceWithText(juce::JSON::toString(juce::var(result), true));

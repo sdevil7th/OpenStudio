@@ -1497,6 +1497,8 @@ public:
                     options.buffers.push_back(value.getIntValue());
             }
             options.recording = commandLineHasFlag(commandLine, "--probe-recording");
+            options.threadCycles = commandLineHasFlag(commandLine, "--probe-thread-cycles");
+            options.bypassFX = commandLineHasFlag(commandLine, "--probe-bypass-fx");
            #if JUCE_WINDOWS
             ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
            #endif

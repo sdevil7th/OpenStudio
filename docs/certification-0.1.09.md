@@ -44,24 +44,23 @@ The user requested certification checks and a release PR, with publication held.
   the evaluation's pending module-import promise. That fixture now uses the
   existing document-owned loading pattern from the ruler/track-copy tests,
   without changing keyboard assertions. Its focused local check passes; the
-  Linux groups 1–3 at `8f75022a` passed (218 cases, 33 declared skips), including
-  the system WebKitGTK check. Group 4 was cancelled after 30 minutes downloading
-  Ubuntu browser dependencies, before its tests started. The remaining group
-  still needs a completed run; GitHub initially refused the scoped retry while
-  the cancelled run remained open. At 17:55 UTC GitHub was reporting an
-  [Actions incident](https://www.githubstatus.com/incidents/h02n9572mx9y), opened
-  at 17:40 UTC; the documentation push had not produced a new run either.
-  **The remaining Linux browser group is infrastructure-blocked, not passed.**
-  Linux now also uses four test groups for faster feedback, with the system
-  WebKitGTK check retained once per run. After Actions recovers, finish group 4
-  on the unchanged application source and retain its result before clearing this
-  software verification item. No more retries were started during the outage.
+  **Final Linux browser check: pass.** All four groups at `b80d47c4` completed
+  in [run 41882180129](https://github.com/sdevil7th/OpenStudio/actions/runs/41882180129):
+  54 + 88 + 76 + 77 = 295 passing cases, 33 declared skips, zero failures and
+  zero retries. The system WebKitGTK check also passed. The previously outstanding
+  [group 4](https://github.com/sdevil7th/OpenStudio/actions/runs/41882180129/job/126757203827)
+  completed at 18:16 UTC, retaining its
+  [test artifact](https://github.com/sdevil7th/OpenStudio/actions/runs/41882180129/artifacts/13351596111).
+  The earlier dependency-download stall and Actions outage did not run those
+  assertions; this subsequent completed run clears that software verification
+  item. No behavior assertions or retry policy were relaxed.
   Native-schema editor tests run separately after the native app build. Tests
   requiring a private project or explicit native tempo-preview input do not run
   automatically in this general browser suite.
 
 Windows package/WACK evidence is from `d8202953`; the Linux package and latest
-browser evidence above is from `8f75022a`. Between those commits only CI, a test
+Windows browser evidence above is from `8f75022a`; final Linux browser evidence
+is from the documentation-only `b80d47c4`. Between those commits only CI, a test
 fixture, the WACK result checker and this qualification document changed. App,
 Support and runtime dependency source is identical. Later documentation updates
 do not retroactively change the packaged release notes or certify a new binary.
@@ -160,6 +159,57 @@ Larger-buffer passes do not clear the failed 8-sample gate.
 Local evidence is retained under `output/candidate-0.1.09/hardware/`, with
 separate `1-tracks/result.json` and `4-tracks/result.json` reports. Those contain
 local device/preset details and are not automatically uploaded or committed.
+
+## Game-contention investigation — 4 November, 18:00–18:18 UTC
+
+The user explicitly requested leaving Dota 2 running. These are contention
+diagnostics on the Ryzen 9 7900X / Audient ASIO host, with Balanced power mode,
+48 kHz / 8 samples, synthetic input and silent physical outputs. Support was
+closed. No game setting, power mode, affinity or buffer requirement was changed.
+There is no matched game-closed baseline and no claim that the game caused each
+miss. The four loaded tracks alternate the same guitar/bass presets with 4x
+oversampling. Each case requests three seconds of warmup and 30 measured seconds.
+
+| Condition | Measured callbacks | Mean / p99 / max, microseconds | Outer deadline misses | Result |
+| --- | --- | --- | --- | --- |
+| Loaded NAM, normal workers | 180,000 | 107.8 / 222.0 / 488.5 | 7,667 | **fail** |
+| Loaded NAM, workers disabled | 145,080 | 284.4 / 554.0 / 1,202.1 | 145,080 | Incomplete measurement; every observed callback exceeded budget |
+| Loaded NAM, explicit 200 µs worker spin experiment | 180,000 | 110.5 / 193.4 / 399.3 | 3,073 | **fail**; extra CPU use, not adopted |
+| Four host-bypassed tracks, normal workers, cycle queries enabled | 180,000 | 12.3 / 34.5 / 431.0 | 5 | **fail**, control only |
+| One host-bypassed track, no workers, cycle queries disabled | 180,000 | 1.95 / 10.4 / 161.6 | 0 | **pass**, this minimal control only |
+
+The loaded normal-worker case also had 35,178 worker deadline misses, 41,237
+quarantined blocks and 135 cancelled jobs over warmup plus measurement. The spin
+experiment still had 11,674 worker misses, 16,687 quarantined blocks and four
+cancelled jobs. Worker counts cover a different interval and are not added to
+outer callback counts. All five raw-recording comparisons passed; this does not
+qualify the processed monitoring path. The incomplete serial run is not counted
+as a processing-integrity pass.
+
+The first three cases use Release SHA-256
+`84e529369dd7e2655f420f5130558ece85359dd92c470865889b692dcfa5719b`.
+The controls use `4224e2d78c1153541e95610205577b493d2ae79888d6da7d1ec6b07264fc72d3`,
+which adds only explicit diagnostic-probe options, not a production audio fix.
+`--probe-bypass-fx` verifies host bypass and labels the report as a control;
+`--probe-thread-cycles` adds raw Windows thread cycles and processor endpoints.
+Both are off by default and only used inside `--nam-live-callback-probe`.
+The probe-only source change builds in Windows Release and Debug with zero
+C++ warnings; the packaged frontend in Debug matches `frontend/dist`. It does
+not extend the earlier installer/WACK result to this new executable hash.
+Cycle-query cost is included in reported callback duration. Two of the five
+late four-track control callbacks changed processor between their endpoints.
+That demonstrates migration, not the duration or cause of the delay; cycles
+are not converted to CPU time and are not proof of a particular driver fault.
+
+An offline stage-isolation diagnostic also completed with processing/parity
+checks passing. Disabling whole FX stages changes the workload and sound, so
+those timings do not justify silently bypassing FX or establish a production
+optimization. No worker-spin, extra-buffer, hidden-delay or dropped-work
+acceptance change was promoted. The minimal control pass does not clear either
+the loaded NAM failure or the earlier 31-track UI/recording gate. **PR #36 remains
+a draft: the eight-sample failure has not been resolved.** Physical driver xruns
+are unsupported; monitoring continuity, loopback latency and audition remain
+**not_asserted**. Results under `output/eight-sample-investigation/` remain local.
 
 ## Physical test matrix
 
