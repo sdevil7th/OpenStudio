@@ -13,9 +13,45 @@ import tempfile
 import venv
 import struct
 import plistlib
+import ast
 from support_package import write_inventory
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def linux_system_notices(toc, destination):
+    """Retain the build distribution's notices for system libraries frozen by PyInstaller."""
+    data = ast.literal_eval(toc.read_text(encoding='utf-8'))
+    sources = set()
+    def visit(value):
+        if isinstance(value, (list, tuple)):
+            if (len(value) == 3 and value[2] in ('BINARY', 'EXTENSION')
+                    and isinstance(value[1], str) and value[1].startswith(('/lib/', '/usr/lib/'))):
+                sources.add(value[1])
+            else:
+                for child in value:
+                    visit(child)
+    visit(data)
+    owners = {}
+    for source in sorted(sources):
+        candidates = [source, str(Path(source).resolve())]
+        candidates += [p.removeprefix('/usr') if p.startswith('/usr/lib/') else '/usr' + p for p in candidates[:]]
+        for candidate in dict.fromkeys(candidates):
+            result = subprocess.run(['dpkg-query', '-S', candidate], capture_output=True, text=True)
+            if result.returncode == 0:
+                package = result.stdout.splitlines()[0].rsplit(': ', 1)[0].split(':')[0]
+                notice = Path('/usr/share/doc') / package / 'copyright'
+                if not notice.is_file():
+                    raise ValueError(f'Missing bundled system library notice: {package}')
+                destination.mkdir(exist_ok=True)
+                shutil.copyfile(notice, destination / (package + '.copyright'))
+                owners[source] = package
+                break
+        else:
+            raise ValueError(f'Cannot identify bundled system library license: {source}')
+    if owners:
+        shutil.copytree('/usr/share/common-licenses', destination / 'common-licenses')
+        (destination / 'bundled-system-libraries.json').write_text(json.dumps(owners, indent=2))
 
 
 def run(*command):
@@ -114,6 +150,9 @@ StringStruct('OriginalFilename','OpenStudioSupport.exe')])]), VarFileInfo([VarSt
         if target.exists():
             raise ValueError(f'Support output already exists; choose a fresh --output directory: {target}')
         shutil.copytree(generated, target, symlinks=True)
+        if sys.platform == 'linux':
+            linux_system_notices(work / 'build/OpenStudioSupport/COLLECT-00.toc',
+                                 target / 'support-runtime/support-licenses/system')
         if sys.platform == 'darwin':
             plist = target / 'Contents/Info.plist'
             info = plistlib.loads(plist.read_bytes())

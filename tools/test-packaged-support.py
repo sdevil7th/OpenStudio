@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import wave
@@ -34,6 +35,12 @@ def main():
             raise AssertionError(f'Packaged operation {arguments[0]} exited {result.returncode}; expected {expected}: {detail}')
     with tempfile.TemporaryDirectory(prefix='support-package-test-') as directory:
         root = Path(directory)
+        if os.name != 'nt':
+            # Keep only the OS process-list utility; /usr/bin may contain Python
+            # on CI images and must not accidentally satisfy a runtime dependency.
+            utilities = root / 'utilities'; utilities.mkdir()
+            (utilities / 'ps').symlink_to(shutil.which('ps'))
+            environment['PATH'] = str(utilities)
         invoke('--self-test', root / 'selftest.json')
         assert json.loads((root / 'selftest.json').read_text())['status'] == 'pass'
         logs = root / 'logs'; logs.mkdir()

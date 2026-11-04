@@ -61,6 +61,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           xvfb-run -a .venv-support/bin/python -m unittest tools.test_openstudio_support -q
+          python -m unittest tests.test_linux_native_packaging tests.test_linux_abi tests.test_release_notes -q
           xvfb-run -a python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport
           xvfb-run -a python tools/test-support-linux.py --bundle output/support-package/OpenStudioSupport --version "$SUPPORT_VERSION"
           python tools/validate-linux-abi.py --root output/support-package/OpenStudioSupport --report output/support-distribution/abi.json --max-glibc 2.35 --require-os ubuntu:22.04
@@ -98,3 +99,16 @@ jobs:
         with:
           name: support-macos-universal
           path: support-macos-universal.tgz
+  universal-macos-intel:
+    needs: universal-macos
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: support-macos-universal
+          path: output/universal
+      - name: Qualify universal launcher and mounted DMG on Intel
+        run: |
+          tar -xzf output/universal/support-macos-universal.tgz -C output/universal
+          python3 tools/test-macos-support-package.py --bundle output/universal --version '${{ inputs.version || '0.0.0' }}'

@@ -138,7 +138,7 @@ def deb_dependencies(stage, work):
         'libx11-6', 'libxext6', 'libxrandr2', 'libxinerama1', 'libxcursor1',
         'libxcomposite1', 'libxrender1', 'libfreetype6', 'libfontconfig1',
         'libcurl4t64 | libcurl4', 'ffmpeg', 'libsecret-tools',
-        'shared-mime-info', 'desktop-file-utils', 'libxft2', 'libxss1', 'libxrender1',
+        'shared-mime-info', 'desktop-file-utils', 'libxft2', 'libxss1',
     ))
 
 

@@ -888,16 +888,36 @@ These changes take effect once a release containing them is distributed. Users
 on older builds need to install that release first; if their old update feed is
 unavailable, they need to download it manually once.
 
-### Offline support companion (unreleased Windows integration)
+### Offline support companion (unreleased cross-platform integration)
 
-Windows Release CI and `build.py prod` build the separate support executable before
-packaging/signing. Direct CMake release builds must additionally follow
-[the support packaging instructions](offline-support.md#windows-packaging-and-qualification).
-The entire `support-runtime` directory is required. Both the installer and Store
-package expose **OpenStudio Support** as a separate Start menu application, with
-no autostart registration. Update the hosted SignPath `windows-payload` definition
-from the repository XML to include `OpenStudioSupport.exe` before the next release;
-missing/untrusted helper signatures must fail closed. Qualify both installed launchers
-on a clean machine without Python/Node and verify that the helper is absent from
-running processes until explicitly opened. Do not claim other-platform packaging
-or Store installation has been tested based on the local standalone checks.
+Release CI qualifies native support builds before packaging/signing. `build.py prod`
+also builds a native companion; direct CMake builds must additionally follow
+[the support packaging instructions](offline-support.md#packaging-and-qualification).
+The release-notes gate applies before preparing an actual release.
+
+- Windows: include `OpenStudioSupport.exe` and the entire `support-runtime` folder.
+  Installer and MSIX expose a separate **OpenStudio Support** Start menu entry.
+  Synchronize the hosted SignPath `windows-payload` definition with the repository
+  XML before signing a release; missing/untrusted helper signatures fail closed.
+- macOS: release CI assembles Apple Silicon and Intel runtimes inside the helper's
+  universal `.app`, stored in `OpenStudio.app/Contents/Helpers`. The DMG also contains
+  **OpenStudio Support.app**, a small Finder launcher. Install both top-level apps
+  together. Sign nested helper code inside out before the main app, then notarize
+  through the existing release path. A local native-only support build does not
+  satisfy the universal DMG gate; assemble both native artifacts first.
+- Linux x86-64: DEB/RPM install a separate desktop entry and private runtime.
+  AppImage distributions offer a `with-support.tar.gz` containing two independently
+  launched AppImages. Existing main-AppImage URLs remain compatible. RPM must preserve
+  frozen support bytes; the support ABI gate retains the Ubuntu 22.04 baseline.
+
+Nothing registers support for autostart or adds a hook to the DAW. The support
+window refuses work when it detects OpenStudio; users must keep the DAW closed
+until support exits. No monitor or resident service enforces that afterwards.
+
+`support-qualification.yml` exercises installer install/uninstall and shortcuts,
+MSIX registration/activation/package identity/cleanup, DEB/RPM payload round trips,
+the companion AppImage, and mounted-DMG/Finder activation. These use real support
+payloads with a dummy DAW and disposable package identities. They do not replace
+final signed-artifact testing, Store certification, Gatekeeper/notarization,
+oldest-supported-OS testing or full-DAW hardware qualification. Retain those release
+gates and verify that support remains absent until explicitly opened.

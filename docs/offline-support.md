@@ -208,12 +208,23 @@ implementation; neither is enabled by installing or running these tools.
 After installing frontend dependencies, run:
 
 ```sh
-python tools/build-support-tool.py --version <app-version> --output <fresh-build-folder> --stage build/OpenStudio_artefacts/Release
+python tools/build-support-tool.py --version <app-version> --output <fresh-build-folder> --stage <app-runtime-folder>
 ```
 Use a Python 3.13 build host with Tk. The builder installs its isolated
 `.venv-support` dependencies and bundles the current pure MIDI serializer. Node.js
 and frontend dependencies are build/source-runner requirements only. The NativeBridge
 is replaced by an unavailable stub in this offline bundle; it cannot contact the DAW.
+On Windows/Linux, stage into `build/OpenStudio_artefacts/Release`. On macOS, stage
+into `build/OpenStudio_artefacts/Release/OpenStudio.app`; a local build contains
+the build host's architecture only. A universal distribution requires both native
+builds and the separate Finder launcher, assembled by release CI. To assemble
+downloaded native artifacts locally on macOS:
+
+```sh
+python3 tools/assemble-macos-support.py --arm64 arm64/OpenStudioSupport.app --x86-64 x86_64/OpenStudioSupport.app --version <app-version> --output universal
+ditto universal/OpenStudioSupport.app build/OpenStudio_artefacts/Release/OpenStudio.app/Contents/Helpers/OpenStudioSupport.app
+ditto 'universal/OpenStudio Support.app' 'build/OpenStudio_artefacts/Release/OpenStudio Support.app'
+```
 
 `python build.py prod --version <version>` includes this build after its required
 release-notes gate. Release CI builds and qualifies the native companions before signing.
@@ -228,15 +239,15 @@ Developer checks (no DAW/audio device opened):
 - `python tools/validate-support-tool.py --bundle <runtime-folder> --version <version>`
 - `python tools/test-packaged-support.py --bundle <runtime-folder>`
 
-The packaged check launches the actual executable with Python/Node removed from
-PATH, constructs its window hidden, decodes synthetic audio, compares synthetic MIDI
+The packaged check launches the actual executable with a restricted PATH and no
+external Python/Node invocation, constructs its window hidden, decodes synthetic audio, compares synthetic MIDI
 with a saved project and exercises collection, redaction, review and ZIP creation.
-This is not an installer, clean-VM, Store, macOS/Linux or subjective audio-quality
-qualification. No release or upload is performed by these checks.
+That check alone does not qualify installation, OS trust or subjective audio quality.
+No release or upload is performed by these checks.
 
 The reusable `support-qualification.yml` workflow builds on Windows, Ubuntu 22.04,
 Apple silicon and Intel macOS. macOS assembly retains two native runtimes behind
-one universal launcher, rather than requiring Rosetta. Release packaging signs
+one universal launcher without requiring Rosetta. Release packaging signs
 nested code from the inside out and includes the Finder launcher in the DMG.
 Linux installers copy the private runtime and a separate desktop entry; RPM must
 preserve frozen runtime bytes while retaining dependency scanning. The AppImage
