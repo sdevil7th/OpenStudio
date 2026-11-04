@@ -1651,7 +1651,7 @@ bool PlaybackEngine::setClipRenderedPreviewSegment(const juce::String& clipId,
             return sameWindow || overlaps;
         }),
         segments.end());
-    segments.push_back({ audioFile, startSec, endSec, fileOffsetSec, segmentReaderKey });
+    segments.push_back({ audioFile, startSec, endSec, fileOffsetSec, segmentReaderKey, {} });
     // Publication owns the same lock as fillTrackBuffer. Prepare scratch capacity
     // here, never while the audio callback traverses a large edited segment set.
     reusableChunkBoundaries.reserve(juce::jmax(reusableChunkBoundaries.capacity(), segments.size() * 2 + 2));

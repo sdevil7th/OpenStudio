@@ -12,6 +12,26 @@ listed artifacts, but do **not** certify this newer application binary. The
 remaining Linux browser check passed; the strict 8-sample hardware gate still
 fails. PR #36 remains a draft.
 
+- **Pass — Linux qualification after the NAM preparation/insertion fix:**
+  [job 126802823878](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/job/126802823878)
+  at `bba16515` completed the native build, realtime safety fixtures, actual DEB
+  installation, normal/safe startup, render/features, AppImage payload checks
+  and packaged main/detached-window lifecycle. The retained
+  [qualification report](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/artifacts/13356283313)
+  and [candidate packages](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/artifacts/13356358288)
+  belong to that exact commit. AppImage still uses extract-and-run; physical
+  FUSE/interface and Fedora installation are not asserted.
+- **Pass — browser checks on that native revision:** all four Windows and all
+  four Linux groups in [run 41895223774](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774)
+  passed, each platform totaling 295 cases and 33 declared skips. The 3,136
+  frontend unit tests also passed. No behavior gate or retry policy changed.
+- **Compiler-warning follow-up:** inspection of the successful Linux log found
+  one `-Wmissing-field-initializers` warning in preview-segment publication.
+  The follow-up explicitly value-initializes the existing source binding, whose
+  defaults remain generation zero and null pointers. It changes no playback
+  behavior. This correction is not represented as a retroactive warning-free
+  Linux build; its compiler verification is separate from the package above.
+
 - **Pass — complete Windows candidate, locally:** Release and Debug were rebuilt
   with callback profiling compiled out and no C++ warnings. The current frontend
   build and all 3,136 tests passed; the native render/export matrix passed all 422
