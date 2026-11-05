@@ -11,6 +11,11 @@ registered-snap checks passed. The temporary export
 was removed after encrypted GitHub storage. These facts do not establish Store
 distribution approval.
 
+Both repository delivery switches, `OPENSTUDIO_STORE_ENABLED` and
+`OPENSTUDIO_SNAP_ENABLED`, are enabled so the next release tag requires both
+Store preflights. Missing Snap qualification or Canonical approval blocks GitHub
+publication and both submissions. No tag or release was created during setup.
+
 The candidate package uses the exact versioned Ubuntu 22.04 DEB payload, plus a
 coherent core22 dependency stack. Snapcraft's classic ELF patching handles its
 loader paths. Ubuntu's release WebKit ignores `WEBKIT_EXEC_PATH`; a bounded,
@@ -65,8 +70,9 @@ credentials or include them in reports.
    plugin compatibility, desktop integration, and refresh while an older version
    is running need hardware/desktop testing. Automated checks do not establish
    subjective quality or dropout-free recording.
-4. After account access, approval and qualification are complete, set
-   `OPENSTUDIO_SNAP_ENABLED=true`. Keep it disabled before those prerequisites.
+4. Keep both delivery switches enabled for releases intended for both Stores.
+   Before creating a tag, require successful qualification and a real approval
+   record. Do not disable a delivery path to bypass a failed preflight.
 
 ## Tag-triggered flow
 
