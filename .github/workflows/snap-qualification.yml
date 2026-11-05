@@ -38,7 +38,7 @@ jobs:
           APP_VERSION: ${{ inputs.version }}
           DIAGNOSTIC_SOURCE_RUN: ${{ inputs.source-run }}
         run: |
-          python3 -m pip install PyYAML==6.0.3
+          python3 -m pip install PyYAML==6.0.3 pyelftools==0.32
           python3 tools/validate-release-notes.py --version "$APP_VERSION"
           mapfile -t packages < <(find output/snap-input -name '*.deb' -type f)
           test "${#packages[@]}" -eq 1
@@ -60,6 +60,8 @@ jobs:
           sudo apt-get install -y xvfb xauth openbox
           printf '#!/bin/sh\nexec snap run openstudio "$@"\n' > output/snap-launch
           chmod +x output/snap-launch
+      - name: Reject damaged installed ELF metadata before opening the app
+        run: python3 tools/snap_elf.py --root /snap/openstudio/current --verify-only --output output/snap-elf.json
       - name: Qualify installed main and detached windows
         if: vars.OPENSTUDIO_SNAP_WINDOW_TESTS_PAUSED != 'true'
         run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-desktop --desktop
@@ -99,6 +101,7 @@ jobs:
             output/snap-browser-stack
             output/snap-render
             output/snap-support.json
+            output/snap-elf.json
             output/snap-updater/result.json
             output/snap-project/input-receipt.json
           if-no-files-found: warn

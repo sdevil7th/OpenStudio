@@ -75,6 +75,7 @@ def prepare(deb, version, output, diagnostic_source_run=''):
     (output / 'snapcraft.yaml').write_text(yaml.safe_dump(project, sort_keys=False))
     shutil.copyfile(ROOT / 'frontend/public/icon.png', output / 'icon.png')
     shutil.copyfile(ROOT / 'tools/patch-snap-webkit.py', output / 'patch-snap-webkit.py')
+    shutil.copyfile(ROOT / 'tools/snap_elf.py', output / 'snap_elf.py')
     receipt = {'version': version, 'sourceDebSha256': hashlib.sha256(deb.read_bytes()).hexdigest(),
                'applicationSha256': hashlib.sha256((runtime / 'OpenStudio').read_bytes()).hexdigest(),
                'nativeDebugIds': native_ids(runtime / 'OpenStudio'),

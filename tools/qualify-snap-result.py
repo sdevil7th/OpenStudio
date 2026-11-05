@@ -5,9 +5,11 @@ import json
 from pathlib import Path
 import yaml
 from openstudio_support.identity import native_ids
+from snap_elf import audit_root
 
 
 def qualify(root, snap, project, desktop, safe, render, support, updater, version):
+    elf_integrity = audit_root(root)
     meta = yaml.safe_load((root / 'meta/snap.yaml').read_text())
     if (meta.get('name') != 'openstudio' or str(meta.get('version')) != version
             or meta.get('confinement') != 'classic' or meta.get('base') != 'core22'):
@@ -44,6 +46,7 @@ def qualify(root, snap, project, desktop, safe, render, support, updater, versio
             'snapSha256': hashlib.sha256(snap.read_bytes()).hexdigest(),
             'supportLaunch': 'explicit_only', 'installedDesktopAndExports': 'pass',
             'storeUpdates': 'pass', 'classicApproval': 'not_asserted',
+            'elfMetadata': elf_integrity,
             'hardwareAudio': 'not_asserted', 'refreshWhileRunning': 'not_asserted'}
 
 

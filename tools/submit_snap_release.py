@@ -20,6 +20,11 @@ def validate(directory, version):
         raise ValueError('Expected an exact stable application version')
     report = json.loads((directory / 'qualification.json').read_text())
     package = directory / 'openstudio.snap'
+    metadata = report.get('elfMetadata')
+    if (not isinstance(metadata, dict) or metadata.get('status') != 'pass'
+            or metadata.get('runtimeNoteIntegrity') != 'pass'
+            or type(metadata.get('runtimeElfFiles')) is not int or metadata['runtimeElfFiles'] <= 0):
+        raise ValueError('Installed ELF metadata integrity was not qualified')
     if (report.get('status') != 'pass' or report.get('version') != version
             or report.get('diagnosticSourceRun')
             or report.get('snapName') != 'openstudio' or report.get('snapId') != SNAP_ID

@@ -27,10 +27,23 @@ apps:
     command: bin/openstudio-support-launch
     desktop: usr/share/applications/openstudio-support.desktop
 parts:
+  patchelf:
+    plugin: nil
+    source: https://archive.ubuntu.com/ubuntu/pool/universe/p/patchelf/patchelf_0.18.0.orig.tar.gz
+    source-checksum: sha256/1451d01ee3a21100340aed867d0b799f46f0b1749680028d38c3f5d0128fb8a7
+    build-packages: [g++]
+    override-build: |
+      mkdir -p "$CRAFT_PART_INSTALL/usr/bin"
+      g++ -std=c++17 -O2 -D_FILE_OFFSET_BITS=64 '-DPACKAGE_STRING="patchelf 0.18.0"' src/patchelf.cc -o "$CRAFT_PART_INSTALL/usr/bin/patchelf"
+    stage: [usr/bin/patchelf]
+    prime: [-*]
   runtime:
+    after: [patchelf]
     plugin: dump
     source: payload
-    build-attributes: [enable-patchelf]
+    # Canonical's bundled patchelf 0.9 corrupts runtime ELF note references.
+    # Apply the same dependency resolver explicitly with our pinned patcher.
+    build-attributes: [no-patchelf]
     organize:
       usr/lib/x86_64-linux-gnu/webkit2gtk-4.1: wk
     build-packages: [libglib2.0-bin]
@@ -61,9 +74,10 @@ parts:
       - shared-mime-info
       - desktop-file-utils
       - procps
-    # override-prime disables Snapcraft's ELF patching. Finish transformations
-    # during build so the classic loader/RPATH fixups still run at prime.
     override-build: |
       craftctl default
       glib-compile-schemas "$CRAFT_PART_INSTALL/usr/share/glib-2.0/schemas"
       python3 "$CRAFT_PROJECT_DIR/patch-snap-webkit.py" "$CRAFT_PART_INSTALL"
+    override-prime: |
+      craftctl default
+      snap run --shell snapcraft -c 'exec "$SNAP/bin/python3" "$1" --root "$2" --patchelf "$3"' -- "$CRAFT_PROJECT_DIR/snap_elf.py" "$CRAFT_PRIME" "$CRAFT_STAGE/usr/bin/patchelf"

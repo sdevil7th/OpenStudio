@@ -53,12 +53,32 @@ do not use captures of another platform as Linux screenshots.
 
 ## Desktop diagnostic hold
 
-After three Snap window-harness timeouts, `OPENSTUDIO_SNAP_WINDOW_TESTS_PAUSED`
-holds further automatic window attempts pending the owner-provided Linux desktop
-diagnostic session. Installed export, explicitly opened Support and updater checks
-run independently. A diagnostic Snap is retained even when qualification fails.
-The pause produces a failed qualification, never a release-ready candidate; both
-Store publication paths remain gated.
+Three Snap window-harness timeouts were paused with
+`OPENSTUDIO_SNAP_WINDOW_TESTS_PAUSED` until the owner provided a Linux desktop.
+The explicit desktop trace located a browser-child crash in Mesa's software
+driver while reading ELF notes. Snapcraft 8.14.5 bundles patchelf 0.9: its fixups
+moved valid note sections while leaving stale runtime note segments. This matches
+[upstream issue 217](https://github.com/NixOS/patchelf/issues/217).
+
+The recipe builds checksum-pinned patchelf 0.18.0 as a build-only tool, excludes it
+from the app, and invokes Canonical's same dependency resolver with that patcher.
+Its managed build must be Ubuntu 22.04. Runtime note mappings and original GNU
+build IDs must survive every fixup, then the installed package is audited again
+before any app window opens. GIO module discovery is restricted to the matching
+packaged directory. The browser-stack audit accepts base-identical GLib from
+core22; GTK/WebKit/Soup must come from the app Snap and host GLib is rejected.
+
+A corrected private Mesa copy reached frontend `boot-ready` on the Linux desktop.
+A real relocation fixture passes metadata validation and executes after the new
+patcher; the bundled 0.9 control fails the new audit. These are diagnostic results,
+not installed-package qualification or hardware GPU/audio qualification. Resume
+automatic window checks for this concrete packaging correction; full installed
+main/popout/recovery/export/Support/updater checks are still required.
+
+Installed export, explicitly opened Support and updater checks run independently.
+A diagnostic Snap is retained even when qualification fails. If the pause is
+enabled again it produces failed qualification, never a release-ready candidate;
+both Store publication paths remain gated.
 
 The Verify workflow's explicit `snap_source_run` input builds only a diagnostic
 Snap from `candidate-linux-x64` in that selected prior Verify run. This avoids
