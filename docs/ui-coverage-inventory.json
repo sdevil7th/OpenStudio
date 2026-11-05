@@ -2232,10 +2232,10 @@
       "coverage": []
     },
     {
-      "id": "feature:a9562580513610e0",
+      "id": "feature:c4149a3f1e372238",
       "kind": "feature",
       "section": "Rendering / Export / Interchange",
-      "description": "Render formats: WAV, AIFF, FLAC, MP3, OGG (FFmpeg-backed export uses the bundled audited binary on Windows and a system dependency on macOS/Linux)",
+      "description": "Render formats: WAV, AIFF, FLAC, MP3, OGG (OGG uses built-in Vorbis; MP3 and final FFmpeg conversions use the bundled audited binary on Windows and a system dependency on macOS/Linux)",
       "source": "docs/implemented_features.md",
       "coverage": []
     },
