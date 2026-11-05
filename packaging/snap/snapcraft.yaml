@@ -54,6 +54,7 @@ parts:
       - libgl1-mesa-dri
       - libgl1
       - libegl1
+      - libegl-mesa0
       - fonts-dejavu-core
       - ffmpeg
       - libsecret-tools

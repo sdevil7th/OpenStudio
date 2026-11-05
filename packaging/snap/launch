@@ -5,6 +5,10 @@ set -eu
 export PATH="$SNAP/usr/bin:$PATH"
 export GSETTINGS_SCHEMA_DIR="$SNAP/usr/share/glib-2.0/schemas"
 export XDG_DATA_DIRS="$SNAP/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+# GLVND and Mesa otherwise discover host driver configuration outside the
+# packaged core22 stack. Use the matching staged vendor and DRI modules.
+export __EGL_VENDOR_LIBRARY_FILENAMES="$SNAP/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+export LIBGL_DRIVERS_PATH="$SNAP/usr/lib/x86_64-linux-gnu/dri"
 case "$0" in
   *openstudio-support-launch) exec "$SNAP/usr/lib/openstudio/OpenStudioSupport" "$@" ;;
   *) exec "$SNAP/usr/lib/openstudio/OpenStudio" "$@" ;;

@@ -21,5 +21,8 @@
   "screenshots": [],
   "screenshotsStatus": "awaiting reviewed native Linux candidate captures",
   "storeApplied": false,
+  "storeIconApplied": true,
+  "storeIconSha256": "32ee0324c1fc4d30d1451bee95af868040e6775217b3ca24f2fa994d0ab57297",
+  "storeTextStatus": "staged; API rejects nonempty summary/description as blank; owner chose to revisit after package qualification",
   "published": false
 }

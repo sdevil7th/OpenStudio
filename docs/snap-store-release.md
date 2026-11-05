@@ -4,8 +4,10 @@ OpenStudio's publisher account is `sdevil7th` (displayed as Sourav Das). The
 `openstudio` name is registered with Snap ID
 `Qde7k3B7zO9NGOR8QIyMUWs8l6z6hkZ7`. No revision has been uploaded or released.
 The GitHub `snap-store` environment permits only `v*` tags. A credential scoped
-to `openstudio`, stable, access/push/release is configured, expiring 3 February
-2027. Read-only account and registered-snap checks passed. The temporary export
+to `openstudio`, stable, access/push/release is configured with a requested expiry
+of 3 February 2027. Renew by 2 February: Snapcraft 8.14 interprets expiry input
+using local time unless the command runs with `TZ=UTC`. Read-only account and
+registered-snap checks passed. The temporary export
 was removed after encrypted GitHub storage. These facts do not establish Store
 distribution approval.
 
@@ -33,12 +35,22 @@ the package recipe. The icon is the approved 512 px export at
 `frontend/public/icon.png`; Linux launchers use the existing 256 px export.
 
 Store-side application is tracked separately from package preparation. The
-dashboard currently requires a first revision before exposing its listing
-editor; Canonical's metadata API supports setting text and the icon without
-uploading or releasing a revision. Verify text readback and the icon SHA-256
-before recording this step as complete. Preserve other media and listing
-settings. Real Linux candidate screenshots remain required for the gallery;
+approved icon was saved through the binary-metadata API and its returned SHA-256
+matches `32ee0324c1fc4d30d1451bee95af868040e6775217b3ca24f2fa994d0ab57297`.
+No application revision was uploaded or released. The dashboard requires a first
+revision before exposing its listing editor. The text API currently rejects
+nonempty summary and description fields as blank, including Canonical's own
+Dashboard PUT format. The owner chose to revisit text after package qualification;
+title, description, keywords, category, license and public links remain staged.
+Do not record text as Store-applied until readback proves it. Preserve other
+media and listing settings. Real Linux candidate screenshots remain required for the gallery;
 do not use captures of another platform as Linux screenshots.
+
+For future credential exports, set `TZ=UTC` for the export command only and
+verify the resulting credential's actual expiry before using it. A short-lived
+listing credential has access/push/update permissions and no release permission;
+it must not replace the release credential in GitHub. Never print exported
+credentials or include them in reports.
 
 ## Remaining owner setup
 
