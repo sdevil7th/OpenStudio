@@ -2669,9 +2669,10 @@ private:
         {
             const auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(requested);
             auto* peer = window != nullptr ? window->getPeer() : nullptr;
-            return display != nullptr && peer != nullptr
-                ? requested.constrainedWithin(peer->getFrameSize().subtractedFrom(display->userBounds.getLargestIntegerWithin()))
-                : requested;
+            if (display == nullptr || peer == nullptr) return requested;
+            const auto frame = peer->getFrameSizeIfPresent();
+            const auto usable = display->userBounds.getLargestIntegerWithin();
+            return requested.constrainedWithin(frame ? frame->subtractedFrom(usable) : usable);
         };
         const auto checkGeometry = [geometryEvidence](const juce::String& id, juce::DocumentWindow* window,
                                                        juce::Rectangle<int> requested, juce::Rectangle<int> expected)
@@ -2684,7 +2685,11 @@ private:
             if (const auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(expected))
                 evidence->setProperty("usableDisplay", rectangleToVar(display->userBounds.getLargestIntegerWithin()));
             if (window != nullptr && window->getPeer() != nullptr)
-                evidence->setProperty("nativeFrame", rectangleToVar(window->getPeer()->getFrameSize().addedTo(expected)));
+            {
+                const auto frame = window->getPeer()->getFrameSizeIfPresent();
+                evidence->setProperty("nativeFrameKnown", static_cast<bool>(frame));
+                if (frame) evidence->setProperty("nativeFrame", rectangleToVar(frame->addedTo(expected)));
+            }
             geometryEvidence->add(juce::var(evidence));
             return window != nullptr && window->getBounds() == expected;
         };
