@@ -16,9 +16,11 @@ from openstudio_support.identity import native_ids
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def prepare(deb, version, output):
+def prepare(deb, version, output, diagnostic_source_run=''):
     if not re.fullmatch(r'\d+\.\d+\.\d+', version):
         raise ValueError('Expected an exact three-part application version')
+    if diagnostic_source_run and not re.fullmatch(r'[1-9]\d*', diagnostic_source_run):
+        raise ValueError('Expected an explicit prior workflow run ID')
     deb, output = Path(deb).resolve(strict=True), Path(output).absolute()
     if output.exists():
         raise ValueError('Use a fresh Snap project output directory')
@@ -79,6 +81,8 @@ def prepare(deb, version, output):
                'snapName': 'openstudio', 'snapId': 'Qde7k3B7zO9NGOR8QIyMUWs8l6z6hkZ7',
                'publisher': 'sdevil7th', 'published': False,
                'classicApproval': 'not_asserted', 'hardwareAudio': 'not_asserted'}
+    if diagnostic_source_run:
+        receipt['diagnosticSourceRun'] = diagnostic_source_run
     (output / 'input-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     return receipt
 
@@ -88,5 +92,6 @@ if __name__ == '__main__':
     parser.add_argument('--deb', required=True, type=Path)
     parser.add_argument('--version', required=True)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--diagnostic-source-run', default='')
     args = parser.parse_args()
-    print(json.dumps(prepare(args.deb, args.version, args.output), indent=2))
+    print(json.dumps(prepare(args.deb, args.version, args.output, args.diagnostic_source_run), indent=2))

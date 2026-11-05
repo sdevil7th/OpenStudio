@@ -7,7 +7,7 @@ import yaml
 from openstudio_support.identity import native_ids
 
 
-def qualify(root, snap, project, desktop, safe, support, updater, version):
+def qualify(root, snap, project, desktop, safe, render, support, updater, version):
     meta = yaml.safe_load((root / 'meta/snap.yaml').read_text())
     if (meta.get('name') != 'openstudio' or str(meta.get('version')) != version
             or meta.get('confinement') != 'classic' or meta.get('base') != 'core22'):
@@ -21,7 +21,7 @@ def qualify(root, snap, project, desktop, safe, support, updater, version):
         raise ValueError('Unexpected Snap lifecycle hooks')
     if (root / 'usr/lib/openstudio/OpenStudio.package').read_text().strip() != 'snap':
         raise ValueError('Snap-managed update marker missing')
-    for folder in (desktop, safe):
+    for folder in (desktop, safe, render):
         report = json.loads((folder / 'qualification.json').read_text())
         if report.get('success') is not True or not report.get('checks'):
             raise ValueError('Installed desktop/export qualification failed')
@@ -33,6 +33,8 @@ def qualify(root, snap, project, desktop, safe, support, updater, version):
             for item in report.get('checks', [])):
         raise ValueError('Installed Snap update routing was not qualified')
     receipt = json.loads((project / 'input-receipt.json').read_text())
+    if receipt.get('diagnosticSourceRun'):
+        raise ValueError('A diagnostic reuse cannot become a publication candidate')
     installed_ids = native_ids(root / 'usr/lib/openstudio/OpenStudio')
     if not installed_ids or installed_ids != receipt.get('nativeDebugIds'):
         raise ValueError('Snap ELF patching changed native symbol identity')
@@ -47,7 +49,7 @@ def qualify(root, snap, project, desktop, safe, support, updater, version):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('root', 'snap', 'project', 'desktop', 'safe', 'support', 'updater', 'output'):
+    for name in ('root', 'snap', 'project', 'desktop', 'safe', 'render', 'support', 'updater', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--version', required=True)
     args = vars(parser.parse_args())

@@ -19,6 +19,9 @@ permissions:
 
 jobs:
   qualify-snap:
+    permissions:
+      contents: read
+      actions: read
     name: Qualify Snap before Store release
     if: vars.OPENSTUDIO_SNAP_ENABLED == 'true'
     needs: [build-linux, validate-release-notes]

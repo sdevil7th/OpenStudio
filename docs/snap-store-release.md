@@ -51,6 +51,22 @@ Do not record text as Store-applied until readback proves it. Preserve other
 media and listing settings. Real Linux candidate screenshots remain required for the gallery;
 do not use captures of another platform as Linux screenshots.
 
+## Desktop diagnostic hold
+
+After three Snap window-harness timeouts, `OPENSTUDIO_SNAP_WINDOW_TESTS_PAUSED`
+holds further automatic window attempts pending the owner-provided Linux desktop
+diagnostic session. Installed export, explicitly opened Support and updater checks
+run independently. A diagnostic Snap is retained even when qualification fails.
+The pause produces a failed qualification, never a release-ready candidate; both
+Store publication paths remain gated.
+
+The Verify workflow's explicit `snap_source_run` input builds only a diagnostic
+Snap from `candidate-linux-x64` in that selected prior Verify run. This avoids
+rebuilding unchanged application code for packaging diagnosis. The package stays
+unqualified even if its diagnostic checks succeed. Release does not set this
+input and always uses its own build artifacts. Resume automatic window checks
+after the desktop investigation; complete qualification is still required.
+
 For future credential exports, set `TZ=UTC` for the export command only and
 verify the resulting credential's actual expiry before using it. A short-lived
 listing credential has access/push/update permissions and no release permission;

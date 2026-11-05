@@ -55,7 +55,8 @@ class SnapReleaseTests(unittest.TestCase):
             for tag, approval in [('v0.1.08', 'https://forum.snapcraft.io/t/review/123'), ('v0.1.09', '')]:
                 with self.assertRaises(ValueError):
                     run(path, '0.1.09', tag, preflight=True, approval_url=approval, command=forbidden)
-            for key, value in [('version', '0.1.08'), ('snapId', 'wrong'), ('supportLaunch', 'service')]:
+            for key, value in [('version', '0.1.08'), ('snapId', 'wrong'), ('supportLaunch', 'service'),
+                               ('status', 'diagnostic_only'), ('diagnosticSourceRun', '42082337881')]:
                 (path / 'qualification.json').write_text(json.dumps({**report, key: value}))
                 with self.assertRaises(ValueError): run(path, '0.1.09', 'v0.1.09', command=forbidden)
             (path / 'qualification.json').write_text(json.dumps(report))

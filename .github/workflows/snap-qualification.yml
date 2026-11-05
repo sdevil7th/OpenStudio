@@ -8,8 +8,13 @@ on:
       artifact:
         required: true
         type: string
+      source-run:
+        description: Explicit diagnostic reuse of an earlier qualified DEB; empty for release builds
+        default: ''
+        type: string
 permissions:
   contents: read
+  actions: read
 jobs:
   installed-snap:
     runs-on: ubuntu-22.04
@@ -17,23 +22,34 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: inputs.source-run == ''
         with:
           name: ${{ inputs.artifact }}
           path: output/snap-input
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: inputs.source-run != ''
+        with:
+          name: ${{ inputs.artifact }}
+          path: output/snap-input
+          run-id: ${{ inputs.source-run }}
+          github-token: ${{ github.token }}
       - name: Prepare the exact versioned DEB payload
         env:
           APP_VERSION: ${{ inputs.version }}
+          DIAGNOSTIC_SOURCE_RUN: ${{ inputs.source-run }}
         run: |
           python3 -m pip install PyYAML==6.0.3
+          python3 tools/validate-release-notes.py --version "$APP_VERSION"
           mapfile -t packages < <(find output/snap-input -name '*.deb' -type f)
           test "${#packages[@]}" -eq 1
-          python3 tools/prepare-snap-project.py --deb "${packages[0]}" --version "$APP_VERSION" --output output/snap-project
+          python3 tools/prepare-snap-project.py --deb "${packages[0]}" --version "$APP_VERSION" --output output/snap-project --diagnostic-source-run "$DIAGNOSTIC_SOURCE_RUN"
       - uses: canonical/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1.3.0
         id: build
         with:
           path: output/snap-project
           snapcraft-channel: 8.x/stable
       - name: Install unpublished Snap for qualification
+        id: install
         env:
           SNAP_FILE: ${{ steps.build.outputs.snap }}
         run: |
@@ -44,22 +60,35 @@ jobs:
           sudo apt-get install -y xvfb xauth openbox
           printf '#!/bin/sh\nexec snap run openstudio "$@"\n' > output/snap-launch
           chmod +x output/snap-launch
-      - name: Qualify installed main and detached windows and exports
-        run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-desktop --desktop --render
+      - name: Qualify installed main and detached windows
+        if: vars.OPENSTUDIO_SNAP_WINDOW_TESTS_PAUSED != 'true'
+        run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-desktop --desktop
       - name: Qualify installed recovery windows
+        if: vars.OPENSTUDIO_SNAP_WINDOW_TESTS_PAUSED != 'true'
         run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-safe --desktop --safe-mode
       - name: Prove the installed browser uses the Snap dependency stack
+        if: vars.OPENSTUDIO_SNAP_WINDOW_TESTS_PAUSED != 'true'
         run: xvfb-run -a python3 tools/check-snap-browser-stack.py --root /snap/openstudio/current --output output/snap-browser-stack
+      - name: Qualify installed exports independently of desktop readiness
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-render --render
       - name: Qualify explicitly opened frozen Support
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: |
           xvfb-run -a snap run openstudio.support --self-test "$GITHUB_WORKSPACE/output/snap-support.json"
           xvfb-run -a python3 tools/test-packaged-support.py --bundle /snap/openstudio/current/usr/lib/openstudio
       - name: Qualify Snap-managed update routing
-        run: snap run openstudio --updater-self-test "$GITHUB_WORKSPACE/output/snap-updater"
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: xvfb-run -a snap run openstudio --updater-self-test "$GITHUB_WORKSPACE/output/snap-updater"
+      - name: Keep paused or reused diagnostic packages unqualified
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && (vars.OPENSTUDIO_SNAP_WINDOW_TESTS_PAUSED == 'true' || inputs.source-run != '') }}
+        run: |
+          echo '::error::This is an unqualified diagnostic package: window checks are paused or the DEB was explicitly reused from another run. Publication requires the complete release-run qualification.'
+          exit 1
       - name: Check installed Snap identity and inactivity contract
         env:
           APP_VERSION: ${{ inputs.version }}
-        run: python3 tools/qualify-snap-result.py --version "$APP_VERSION" --root /snap/openstudio/current --snap output/snap-candidate/openstudio.snap --project output/snap-project --desktop output/snap-desktop --safe output/snap-safe --support output/snap-support.json --updater output/snap-updater --output output/snap-candidate/qualification.json
+        run: python3 tools/qualify-snap-result.py --version "$APP_VERSION" --root /snap/openstudio/current --snap output/snap-candidate/openstudio.snap --project output/snap-project --desktop output/snap-desktop --safe output/snap-safe --render output/snap-render --support output/snap-support.json --updater output/snap-updater --output output/snap-candidate/qualification.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -68,10 +97,19 @@ jobs:
             output/snap-desktop
             output/snap-safe
             output/snap-browser-stack
+            output/snap-render
             output/snap-support.json
             output/snap-updater/result.json
             output/snap-project/input-receipt.json
           if-no-files-found: warn
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ failure() && steps.install.outcome == 'success' }}
+        with:
+          name: snap-diagnostic-candidate-unqualified
+          path: output/snap-candidate/openstudio.snap
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: snap-candidate

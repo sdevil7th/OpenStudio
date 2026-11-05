@@ -11,12 +11,32 @@ on:
         description: Unpublished candidate version to qualify
         default: "0.1.09"
         type: string
+      snap_source_run:
+        description: Diagnostic Snap only using candidate-linux-x64 from this explicit prior Verify run; no publication
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  diagnostic-snap:
+    name: Diagnostic Snap (unqualified; no publication)
+    if: inputs.snap_source_run != ''
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/snap-qualification.yml
+    with:
+      version: ${{ inputs.version || '0.1.09' }}
+      artifact: candidate-linux-x64
+      source-run: ${{ inputs.snap_source_run }}
+
   qualify-snap:
+    if: inputs.snap_source_run == ''
+    permissions:
+      contents: read
+      actions: read
     name: Installed Snap (unpublished)
     needs: verify-linux
     uses: ./.github/workflows/snap-qualification.yml
@@ -25,11 +45,13 @@ jobs:
       artifact: candidate-linux-x64
 
   support-packages:
+    if: inputs.snap_source_run == ''
     uses: ./.github/workflows/support-qualification.yml
     with:
       version: ${{ inputs.version || '0.1.09' }}
 
   verify-python-tools:
+    if: inputs.snap_source_run == ''
     name: Python tooling
     runs-on: ubuntu-24.04
     steps:
@@ -82,6 +104,7 @@ jobs:
           tests.test_free_suite_ui_regression
 
   verify-ai-policy:
+    if: inputs.snap_source_run == ''
     name: AI execution policy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -141,6 +164,7 @@ jobs:
           if-no-files-found: error
 
   verify-input-profiles:
+    if: inputs.snap_source_run == ''
     name: Input profiles (${{ matrix.os }}, ${{ matrix.shard }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -246,6 +270,7 @@ jobs:
           if-no-files-found: ignore
 
   verify-windows:
+    if: inputs.snap_source_run == ''
     runs-on: windows-latest
     env:
       VERSION: ${{ inputs.version || '0.1.09' }}
@@ -648,6 +673,7 @@ jobs:
           if-no-files-found: error
 
   verify-macos:
+    if: inputs.snap_source_run == ''
     needs: support-packages
     name: macOS native windows (${{ matrix.os }}; callback diagnostics ${{ matrix.os == 'macos-15-intel' && 'ON' || 'OFF' }})
     runs-on: ${{ matrix.os }}
@@ -851,6 +877,7 @@ jobs:
           if-no-files-found: warn
 
   qualify-macos-candidate-intel:
+    if: inputs.snap_source_run == ''
     name: Installed universal DMG (Intel)
     needs: verify-macos
     runs-on: macos-15-intel
@@ -873,6 +900,7 @@ jobs:
           if-no-files-found: error
 
   verify-linux:
+    if: inputs.snap_source_run == ''
     runs-on: ubuntu-22.04
     env:
       # AppImage verification exercises the real release-notes gate.
@@ -1084,6 +1112,7 @@ jobs:
           if-no-files-found: error
 
   certify-windows-package:
+    if: inputs.snap_source_run == ''
     name: Windows App Certification Kit (unpublished candidate)
     needs: verify-windows
     runs-on: windows-latest

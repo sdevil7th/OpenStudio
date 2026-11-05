@@ -21,6 +21,7 @@ def validate(directory, version):
     report = json.loads((directory / 'qualification.json').read_text())
     package = directory / 'openstudio.snap'
     if (report.get('status') != 'pass' or report.get('version') != version
+            or report.get('diagnosticSourceRun')
             or report.get('snapName') != 'openstudio' or report.get('snapId') != SNAP_ID
             or report.get('publisher') != 'sdevil7th' or report.get('published') is not False
             or report.get('supportLaunch') != 'explicit_only'
