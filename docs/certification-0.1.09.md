@@ -6,6 +6,10 @@ The user requested certification checks and a release PR, with publication held.
 
 ## Current evidence
 
+The follow-up "Mac export/window qualification" below records the latest source
+changes and the completed Windows certification at `dd92c765`. PR #36 retains
+final-head CI links; earlier results remain tied to their listed artifacts.
+
 **Merge acceptance decision — 5 November 2026:** the user explicitly accepted the
 strict 8-sample contention failure as a non-blocking known limitation for PR #36
 and requested that optimization work on that target stop. Its measured result
@@ -590,3 +594,48 @@ retain them as separate Actions artifacts; the workflow was not invoked here.
 Automatic timed dumps of running-session UI hangs are deliberately disabled in
 ordinary builds. No claim of zero total DAW cost or historical CPU/RAM attribution
 is made from the offline reports.
+
+## Mac export/window qualification — 5 November 2026
+
+Windows certification completed at `dd92c765` before this follow-up. The
+[WACK job](https://github.com/sdevil7th/OpenStudio/actions/runs/41968313366/job/127064166209)
+passed overall, exit 0, with all 13 required tests and no required findings.
+The [retained report](https://github.com/sdevil7th/OpenStudio/actions/runs/41968313366/artifacts/13389764270)
+identifies MSIX SHA-256
+`b32b78294ca5473e52a7cbe42f75d6c71481362a5c6c2a11903c802bdf059e46`.
+Application-count and blocked-executable findings remain optional; no WACK gate
+was weakened. `published: false`; this does not establish Store approval.
+
+The Mac Intel job passed callback/ARA contracts but failed six OGG cases. Its
+FFmpeg 9.0.1 configuration lacks `libvorbis`. The export path now uses JUCE's
+bundled Vorbis encoder with the existing quality 0–10 mapping. Final SRC keeps
+the existing FFmpeg WAV conversion. Encoding is bounded and cancellable, checks
+file-write/finalisation status and decoded stream length, and stays inside the
+existing atomic export transaction. Tests cover cancellation, missing input,
+refusal to append over an existing staging destination, mono/stereo, quality,
+sample-rate changes and Unicode paths. This changes only explicit offline export.
+
+The Apple Silicon runner has a 1024x768 display with only 1024x681 usable points.
+The failing main/preferred-plugin geometry requests did not reserve native title
+bar space. The explicit lifecycle harness now fits those expected client bounds
+to the usable native-frame area before requesting them. Exact requested-result
+and delayed stability assertions remain, with an additional restored-plugin
+stability check. Requested/expected/actual rectangles and usable display/native
+frame geometry are retained only in the explicit harness report. Normal window
+startup gains no diagnostic timer or collector. Five redundant-capture warnings
+are addressed using explicit initialised captures accepted by MSVC and Clang.
+
+Local Windows Release validation of this source follow-up: **pass**, zero C++
+compiler warnings and all 426 render/export checks passing, including the new
+native Vorbis contracts. Desktop-qualification/release-note tools: 43 tests,
+31 passed and 12 platform-specific skips. The updated development website guides
+passed TypeScript checking; they were not deployed. Local native evidence was
+built from the dirty source tree before committing this follow-up, not a clean
+`dd92c765` binary. New Mac/Windows/Linux artifacts require their own CI results;
+PR #36 records those results rather than relabelling older artifacts.
+
+Support remains manual-only. No callback diagnostics or ARA logging was enabled.
+The accepted 8-sample failure remains **fail, non-blocking**; no new hardware
+measurement was made. Listening quality, physical devices, Apple notarization,
+Gatekeeper acceptance and Store approval remain **not_asserted**. Nothing was
+published, submitted or merged.

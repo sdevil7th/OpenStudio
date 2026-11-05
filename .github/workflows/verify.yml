@@ -815,6 +815,14 @@ jobs:
         shell: pwsh
         run: ./tools/run-render-export-headless-regression.ps1 -AppPath "$env:APP_BUNDLE/Contents/MacOS/OpenStudio" -Configuration Release -SkipBuild -OutputRoot "$env:RUNNER_TEMP/candidate-render" -TimeoutSeconds 300
 
+      - name: Retain Mac render/export diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: render-export-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-render/**/render_export_regression_result.json
+          if-no-files-found: warn
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: env.CALLBACK_DIAGNOSTICS == 'OFF'
         with:

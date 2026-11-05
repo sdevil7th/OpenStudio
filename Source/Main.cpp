@@ -2660,6 +2660,34 @@ private:
         auto checks = std::make_shared<juce::Array<juce::var>>();
         auto inputEvidence = std::make_shared<juce::Array<juce::var>>();
         auto frontendDocuments = std::make_shared<juce::Array<juce::var>>();
+        auto geometryEvidence = std::make_shared<juce::Array<juce::var>>();
+        // Cocoa constrains native frames to the usable display. A requested
+        // client size must leave room for its native title bar (the arm64 CI
+        // desktop is 1024x768). Assert exact predetermined, achievable bounds;
+        // never replace an expectation with whatever the window returned.
+        const auto fitNativeBounds = [](juce::DocumentWindow* window, juce::Rectangle<int> requested)
+        {
+            const auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(requested);
+            auto* peer = window != nullptr ? window->getPeer() : nullptr;
+            return display != nullptr && peer != nullptr
+                ? requested.constrainedWithin(peer->getFrameSize().subtractedFrom(display->userBounds.getLargestIntegerWithin()))
+                : requested;
+        };
+        const auto checkGeometry = [geometryEvidence](const juce::String& id, juce::DocumentWindow* window,
+                                                       juce::Rectangle<int> requested, juce::Rectangle<int> expected)
+        {
+            auto* evidence = new juce::DynamicObject();
+            evidence->setProperty("id", id);
+            evidence->setProperty("requested", rectangleToVar(requested));
+            evidence->setProperty("expected", rectangleToVar(expected));
+            evidence->setProperty("actual", rectangleToVar(window != nullptr ? window->getBounds() : juce::Rectangle<int>{}));
+            if (const auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(expected))
+                evidence->setProperty("usableDisplay", rectangleToVar(display->userBounds.getLargestIntegerWithin()));
+            if (window != nullptr && window->getPeer() != nullptr)
+                evidence->setProperty("nativeFrame", rectangleToVar(window->getPeer()->getFrameSize().addedTo(expected)));
+            geometryEvidence->add(juce::var(evidence));
+            return window != nullptr && window->getBounds() == expected;
+        };
         auto steps = std::make_shared<std::vector<HarnessStep>>();
         const auto addDocumentCheck = [steps, frontendDocuments](const juce::String& role,
                                                                std::function<juce::DocumentWindow*()> getWindow)
@@ -2687,7 +2715,8 @@ private:
         addDocumentCheck("main", [this]() { return mainWindow.get(); });
 
         const auto originalBounds = mainWindow->getBounds();
-        const auto geometryBounds = originalBounds.withSizeKeepingCentre(1000, 700).translated(17, 13);
+        const auto requestedGeometryBounds = originalBounds.withSizeKeepingCentre(1000, 700).translated(17, 13);
+        const auto geometryBounds = fitNativeBounds(mainWindow.get(), requestedGeometryBounds);
         steps->push_back({ "main_native_chrome", 0, [this]() {
             if (!mainWindow || !mainWindow->isUsingNativeTitleBar()) return false;
            #if JUCE_WINDOWS
@@ -2706,12 +2735,13 @@ private:
                 && SUCCEEDED(::DwmGetWindowAttribute(static_cast<HWND>(mainWindow->getPeer()->getNativeHandle()), 20, &dark, sizeof(dark))) && dark;
         }});
        #endif
-        steps->push_back({ "main_move_resize", 900, [this, geometryBounds]() {
+        steps->push_back({ "main_move_resize", 900, [this, geometryBounds, requestedGeometryBounds, originalBounds, checkGeometry]() {
             mainWindow->setBounds(geometryBounds);
-            return mainWindow->getBounds() == geometryBounds;
+            return checkGeometry("main_move_resize", mainWindow.get(), requestedGeometryBounds, geometryBounds)
+                && geometryBounds != originalBounds && geometryBounds.getWidth() >= 800 && geometryBounds.getHeight() >= 600;
         }});
-        steps->push_back({ "main_bounds_stable", 0, [this, geometryBounds]() {
-            return mainWindow->getBounds() == geometryBounds;
+        steps->push_back({ "main_bounds_stable", 0, [this, geometryBounds, requestedGeometryBounds, checkGeometry]() {
+            return checkGeometry("main_bounds_stable", mainWindow.get(), requestedGeometryBounds, geometryBounds);
         }});
        #if JUCE_WINDOWS
         steps->push_back({ "main_os_maximize", 300, [this]() {
@@ -2873,15 +2903,15 @@ private:
         };
         addInputChecks("main", [this]() { return mainWindow.get(); });
        #endif
-        auto addGeometryChecks = [steps](const juce::String& role, std::function<juce::DocumentWindow*()> getWindow)
+        auto addGeometryChecks = [steps, checkGeometry](const juce::String& role, std::function<juce::DocumentWindow*()> getWindow)
         {
             auto expected = std::make_shared<juce::Rectangle<int>>();
-            steps->push_back({ role + "_native_move_resize", 900, [getWindow, expected]() {
+            steps->push_back({ role + "_native_move_resize", 900, [getWindow, expected, role, checkGeometry]() {
                 auto* window = getWindow();
                 if (!window || !window->isUsingNativeTitleBar()) return false;
                 *expected = window->getBounds().translated(11, 9).withWidth(window->getWidth() + 20);
                 window->setBounds(*expected);
-                return window->getBounds() == *expected;
+                return checkGeometry(role + "_native_move_resize", window, *expected, *expected);
             }});
             steps->push_back({ role + "_bounds_stable", 0, [getWindow, expected]() {
                 return getWindow() && getWindow()->getBounds() == *expected;
@@ -3146,12 +3176,20 @@ private:
             return window != nullptr && window->getWidth() == 640 && window->getHeight() == 480
                 && pluginEditorWindowManagers.at(pluginSessionId)->isFrontendReady();
         }});
-        steps->push_back({ "plugin_restore_preferred_geometry", 300, [this, pluginSessionId, pluginBounds]()
+        auto restoredPluginBounds = std::make_shared<juce::Rectangle<int>>();
+        steps->push_back({ "plugin_restore_preferred_geometry", 300, [this, pluginSessionId, pluginBounds, restoredPluginBounds, fitNativeBounds, checkGeometry]()
         {
             auto* window = pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow();
             if (window == nullptr) return false;
-            window->setBounds(pluginBounds);
-            return window->getBounds() == pluginBounds;
+            *restoredPluginBounds = fitNativeBounds(window, pluginBounds);
+            window->setBounds(*restoredPluginBounds);
+            return checkGeometry("plugin_restore_preferred_geometry", window, pluginBounds, *restoredPluginBounds)
+                && restoredPluginBounds->getWidth() >= 640 && restoredPluginBounds->getHeight() >= 480;
+        }});
+        steps->push_back({ "plugin_restored_bounds_stable", 0, [this, pluginSessionId, pluginBounds, restoredPluginBounds, checkGeometry]()
+        {
+            return checkGeometry("plugin_restored_bounds_stable", pluginEditorWindowManagers.at(pluginSessionId)->getNativeWindow(),
+                pluginBounds, *restoredPluginBounds);
         }});
         if (editorReviewHoldMs > 0)
             steps->push_back({ "plugin_editor_review_hold", editorReviewHoldMs, []() { return true; } });
@@ -3270,7 +3308,7 @@ private:
         auto stepAttempt = std::make_shared<int>(0);
         auto runner = std::make_shared<std::function<void()>>();
         const std::weak_ptr<std::function<void()>> weakRunner = runner;
-        *runner = [this, reportFile, checks, inputEvidence, frontendDocuments, steps, stepIndex, stepAttempt, weakRunner, midiSessionId, offlineRequested]() mutable
+        *runner = [this, reportFile, checks, inputEvidence, frontendDocuments, geometryEvidence, steps, stepIndex, stepAttempt, weakRunner, midiSessionId, offlineRequested]() mutable
         {
             // Timers own the next invocation. The function must not own itself,
             // otherwise all check results survive application shutdown.
@@ -3298,6 +3336,7 @@ private:
                 root->setProperty("nativeBrowserComponents", MainComponent::getBrowserInstanceCounts());
                 root->setProperty("inputMeasurements", juce::var(*inputEvidence));
                 root->setProperty("frontendDocuments", juce::var(*frontendDocuments));
+                root->setProperty("geometryMeasurements", juce::var(*geometryEvidence));
                 root->setProperty("offlineRequested", offlineRequested);
                 root->setProperty("audioDeviceOpened", audioDeviceOpened);
                 root->setProperty("audioDeviceStartCount", deviceStarts);

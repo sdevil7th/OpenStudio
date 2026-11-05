@@ -160,7 +160,7 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | Offline project render through the same playback/FX engine | H | H |
-| Render formats: WAV, AIFF, FLAC, MP3, OGG (FFmpeg-backed export uses the bundled audited binary on Windows and a system dependency on macOS/Linux) | H | H |
+| Render formats: WAV, AIFF, FLAC, MP3, OGG (OGG uses built-in Vorbis; MP3 and final FFmpeg conversions use the bundled audited binary on Windows and a system dependency on macOS/Linux) | H | H |
 | Render options: sample rate, bit depth/quality, mono/stereo, normalize, tail | H | M |
 | Dithered render path | M | H |
 | Master and per-track stem render paths, plus region/razor range orchestration | H | H |

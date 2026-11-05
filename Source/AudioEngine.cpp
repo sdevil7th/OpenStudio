@@ -3,6 +3,7 @@
 #include "PluginAutomationDelivery.h"
 #include "OfflinePluginTransport.h"
 #include "OfflineHostedControl.h"
+#include "OfflineVorbisEncoder.h"
 #include "BuiltInAllPassFit.h"
 #include "BuiltInSpectralPhaseFit.h"
 #include "BuiltInInstrumentPreviewBindings.h"
@@ -74175,7 +74176,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     juce::String formatLower = format.toLowerCase();
     bool isLossyFormat = (formatLower == "mp3" || formatLower == "ogg");
     const bool isRawFormat = formatLower == "raw";
-    bool needsFFmpegPostProcess = isLossyFormat || isRawFormat;
+    bool needsExportPostProcess = isLossyFormat || isRawFormat;
 
     // For lossy formats, bitDepth holds codec quality:
     //   MP3: bitrate in kbps (128, 192, 256, 320)
@@ -74489,7 +74490,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                       + " so FFmpeg handles final SRC to "
                       + juce::String(requestedOutputSampleRate));
             actualSampleRate = includedClipSampleRate;
-            needsFFmpegPostProcess = true;
+            needsExportPostProcess = true;
         }
     }
 
@@ -74519,7 +74520,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     }
 
     const bool quantizeExport = (ditherMode > 0 || reducedPrecision > 0) && !isLossyFormat && bitDepth < 32;
-    const bool quantizeAfterSRC = quantizeExport && needsFFmpegPostProcess;
+    const bool quantizeAfterSRC = quantizeExport && needsExportPostProcess;
 
     // ========== 5. Create format writer ==========
     // For lossy formats (mp3/ogg) or sample rate conversion, render to temp WAV first
@@ -74531,7 +74532,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 + "_intermediate.wav"));
     juce::File renderFile = stagedOutput.getFile();
 
-    if (needsFFmpegPostProcess)
+    if (needsExportPostProcess)
     {
         // Render an intermediate WAV while the final encoded file is staged
         // separately. Neither temporary can replace an existing user file
@@ -74540,7 +74541,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     }
 
     std::unique_ptr<juce::AudioFormat> audioFormat;
-    juce::String renderFormatLower = needsFFmpegPostProcess ? "wav" : formatLower;
+    juce::String renderFormatLower = needsExportPostProcess ? "wav" : formatLower;
 
     if (renderFormatLower == "wav")
         audioFormat = std::make_unique<juce::WavAudioFormat>();
@@ -75047,7 +75048,9 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         root->setProperty("format", format);
         root->setProperty("requestedOutputSampleRate", requestedOutputSampleRate);
         root->setProperty("actualSampleRate", actualSampleRate);
-        root->setProperty("ffmpegPostProcess", needsFFmpegPostProcess);
+        root->setProperty("ffmpegPostProcess", needsExportPostProcess
+            && (formatLower != "ogg" || std::abs(actualSampleRate - requestedOutputSampleRate) > 1.0));
+        root->setProperty("oggEncoder", formatLower == "ogg" ? "native_libvorbis" : "not_applicable");
         root->setProperty("lossyIntermediateRender", isLossyFormat);
         root->setProperty("bitDepth", bitDepth);
         root->setProperty("channels", numChannels);
@@ -75926,20 +75929,33 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         logToDisk ("renderProject: signal-chain debug report=" + reportFile.getFullPathName());
     }
 
-    // ========== 9. FFmpeg post-processing (encoding or final SRC) ==========
-    if (needsFFmpegPostProcess)
+    // ========== 9. Offline encoding or final SRC ==========
+    if (needsExportPostProcess)
     {
-        logToDisk("renderProject: Starting FFmpeg post-processing (encoding/final SRC)...");
-        bool ffmpegOk = false;
-        if (quantizeAfterSRC)
+        logToDisk("renderProject: Starting post-processing (encoding/final SRC)...");
+        bool postProcessOk = false;
+        if (formatLower == "ogg")
+        {
+            // System FFmpeg builds need not include libvorbis (including current
+            // macOS builds). Keep existing final SRC, then encode with bundled
+            // libvorbis. Both paths stay within the export publication transaction.
+            juce::TemporaryFile resampled(outputFile.getSiblingFile("vorbis-src.wav"));
+            const bool needsSRC = std::abs(actualSampleRate - requestedOutputSampleRate) > 1.0;
+            postProcessOk = !needsSRC || convertWithFFmpeg(renderFile, resampled.getFile(), "wav",
+                requestedOutputSampleRate, 0, 32, numChannels, keepRunning);
+            if (postProcessOk)
+                postProcessOk = encodeOfflineVorbis(needsSRC ? resampled.getFile() : renderFile,
+                    stagedOutput.getFile(), codecQuality, keepRunning);
+        }
+        else if (quantizeAfterSRC)
         {
             // SRC must precede the sole integer quantizer. Retain float precision
             // through FFmpeg; raw PCM only needs a lossless container removal afterwards.
             juce::TemporaryFile resampled(outputFile.getSiblingFile("quantizer-src.wav"));
             juce::TemporaryFile quantizedRaw(outputFile.getSiblingFile("quantizer-raw.wav"));
-            ffmpegOk = convertWithFFmpeg(renderFile, resampled.getFile(), "wav",
+            postProcessOk = convertWithFFmpeg(renderFile, resampled.getFile(), "wav",
                 requestedOutputSampleRate, 0, 32, numChannels, keepRunning);
-            if (ffmpegOk)
+            if (postProcessOk)
             {
                 juce::AudioFormatManager manager; manager.registerBasicFormats();
                 std::unique_ptr<juce::AudioFormatReader> reader(manager.createReaderFor(resampled.getFile()));
@@ -75951,32 +75967,32 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 std::unique_ptr<juce::OutputStream> stream = target.createOutputStream();
                 auto finalWriter = finalFormat->createWriterFor(stream, juce::AudioFormatWriterOptions()
                     .withSampleRate(requestedOutputSampleRate).withNumChannels(numChannels).withBitsPerSample(bitDepth));
-                ffmpegOk = reader != nullptr && finalWriter != nullptr;
+                postProcessOk = reader != nullptr && finalWriter != nullptr;
                 juce::AudioBuffer<float> block(numChannels, 4096);
-                if (ffmpegOk)
-                    for (juce::int64 offset = 0; offset < reader->lengthInSamples && ffmpegOk; offset += 4096)
+                if (postProcessOk)
+                    for (juce::int64 offset = 0; offset < reader->lengthInSamples && postProcessOk; offset += 4096)
                     {
                         const int count = static_cast<int>(juce::jmin(juce::int64{4096}, reader->lengthInSamples - offset));
-                        ffmpegOk = (!keepRunning || keepRunning())
+                        postProcessOk = (!keepRunning || keepRunning())
                             && reader->read(&block, 0, count, offset, true, numChannels > 1)
                             && exportQuantizer.write(*finalWriter, block, 0, count);
                     }
                 finalWriter.reset();
-                if (ffmpegOk && isRawFormat)
-                    ffmpegOk = convertWithFFmpeg(target, stagedOutput.getFile(), "raw",
+                if (postProcessOk && isRawFormat)
+                    postProcessOk = convertWithFFmpeg(target, stagedOutput.getFile(), "raw",
                         requestedOutputSampleRate, 0, bitDepth, numChannels, keepRunning);
             }
         }
         else
-            ffmpegOk = convertWithFFmpeg(renderFile, stagedOutput.getFile(), formatLower,
+            postProcessOk = convertWithFFmpeg(renderFile, stagedOutput.getFile(), formatLower,
                 requestedOutputSampleRate, codecQuality, bitDepth, numChannels, keepRunning);
 
         // Clean up temp file
         renderFile.deleteFile();
 
-        if (!ffmpegOk)
+        if (!postProcessOk)
         {
-            logToDisk("renderProject: FAIL - FFmpeg post-processing failed");
+            logToDisk("renderProject: FAIL - export post-processing failed");
             restorePreparedTracksForRealtime();
             return false;
         }
@@ -76524,6 +76540,30 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
     addCheck("mono_fixture_written",
              fixtureWritten,
              fixtureFile.getFullPathName());
+
+    {
+        const auto previousExport = outputDirectory.getChildFile("native-vorbis-cancel.ogg");
+        const bool previousWritten = previousExport.replaceWithText("previous export remains intact");
+        juce::File stagingPath;
+        int cancellationChecks = 0;
+        bool cancelled = false;
+        {
+            juce::TemporaryFile staging(previousExport);
+            stagingPath = staging.getFile();
+            cancelled = !encodeOfflineVorbis(fixtureFile, stagingPath, 6,
+                [&cancellationChecks] { return ++cancellationChecks < 4; });
+        }
+        addCheck("native_vorbis_cancellation_preserves_previous_export",
+            fixtureWritten && previousWritten && cancelled && cancellationChecks == 4
+                && previousExport.loadFileAsString() == "previous export remains intact" && !stagingPath.exists(),
+            "Cancelling the bounded native encoder mid-stream removes staging without publishing over an existing export.");
+        const auto missingStage = outputDirectory.getChildFile("native-vorbis-missing-input.ogg");
+        addCheck("native_vorbis_invalid_input_and_existing_stage_rejected",
+            !encodeOfflineVorbis(outputDirectory.getChildFile("missing-vorbis-input.wav"), missingStage, 6, {})
+                && !missingStage.exists() && !encodeOfflineVorbis(fixtureFile, previousExport, 6, {})
+                && previousExport.loadFileAsString() == "previous export remains intact",
+            "Missing input fails before creating output; an existing destination cannot be appended to or overwritten by the staging encoder.");
+    }
 
     // Long sources must use complete worker reads, regardless of the realtime
     // full-decode budget, render speed, seek position or block partitioning.
@@ -77207,6 +77247,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         { "mp3_256", "master", "mp3", 44100.0, 256, 2 },
         { "mp3_320", "master", "mp3", 96000.0, 320, 2 },
         { "ogg_q3", "master", "ogg", 44100.0, 3, 2 },
+        { "ogg_q0_mono_96000", "master", "ogg", 96000.0, 0, 1 },
         { "ogg_q5", "master", "ogg", 48000.0, 5, 2 },
         { "ogg_q6", "master", "ogg", 48000.0, 6, 2 },
         { "ogg_q7", "master", "ogg", 48000.0, 7, 2 },
@@ -80249,7 +80290,7 @@ bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::
     // Preserve closely spaced controller changes when exchanging with DAWs
     // that collapse multiple values for the same controller at one SMF tick.
     constexpr int exportTicksPerQuarterNote = 9600;
-    const auto secondsToTicks = [&tempoMap, exportTicksPerQuarterNote] (double seconds)
+    const auto secondsToTicks = [&tempoMap, exportTicksPerQuarterNote=exportTicksPerQuarterNote] (double seconds)
     {
         const double end = juce::jmax(0.0, seconds);
         double previous = 0.0, rate = tempoMap.front().second, ticks = 0.0;

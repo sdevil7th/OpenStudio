@@ -2255,7 +2255,7 @@ Choose the time range to render:
 | **AIFF** | Uncompressed output with the available bit-depth selection |
 | **FLAC** | Lossless compressed output with the available bit-depth selection |
 | **MP3** | FFmpeg-encoded output using the selected bitrate; FFmpeg is bundled on Windows and must be installed on `PATH` on macOS/Linux |
-| **OGG Vorbis** | FFmpeg-encoded output using the selected quality; FFmpeg is bundled on Windows and must be installed on `PATH` on macOS/Linux |
+| **OGG Vorbis** | Built-in Vorbis encoding using the selected quality (0–10), including when system FFmpeg lacks a Vorbis encoder. Final sample-rate conversion may still use FFmpeg. |
 
 **Sample rate**: Select the target render rate. The offline engine renders at
 that rate while the playback path converts source files as required.
@@ -3307,7 +3307,7 @@ OpenStudio project files (`.osproj`) are saved to the location you choose when s
 
 **Import formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and video audio extraction where FFmpeg is available. The audited executable is bundled on Windows; FFmpeg-backed operations require a system `ffmpeg` on `PATH` on macOS/Linux.
 
-**Export formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and DDP export. MP3/OGG and other FFmpeg conversions require the bundled Windows executable or a system `ffmpeg` on macOS/Linux.
+**Export formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and DDP export. OGG encoding uses the built-in Vorbis codec. MP3 and final FFmpeg conversions require the bundled Windows executable or a system `ffmpeg` on macOS/Linux.
 
 **Plugin formats**: VST3 is the stable primary path. CLAP and LV2 code paths are present where available. Experimental 32-bit bridging controls are not part of the stable plugin-hosting path.
 
