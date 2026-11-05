@@ -101,6 +101,27 @@ class NativePackageTests(unittest.TestCase):
         self.assertFalse(runtime.stat().st_mode & 0o022)
         self.assertEqual((unpacked / 'usr/lib/openstudio/OpenStudio.package').read_text(), 'deb\n')
 
+    @unittest.skipUnless(shutil.which('cc') and shutil.which('strip'), 'Native compiler and strip required')
+    def test_deb_excludes_debug_sections_preserving_archive_source_and_build_id(self):
+        from openstudio_support.common import sha256
+        from openstudio_support.identity import native_ids
+        source = self.root / 'fixture.c'
+        source.write_text('int main(void) { return 0; }\n')
+        original = self.bundle / 'OpenStudio'
+        subprocess.run(['cc', '-g', '-Wl,--build-id=sha1', source, '-o', original], check=True)
+        original_hash = sha256(original)
+        support_hash = sha256(self.bundle / 'OpenStudioSupport')
+        self.assertIn('.debug_info', subprocess.check_output(['readelf', '-S', original], text=True))
+        runtime = packaging.stage_bundle(self.bundle, self.root / 'package', 'deb')
+        packaged = runtime / 'OpenStudio'
+        self.assertNotIn('.debug_info', subprocess.check_output(['readelf', '-S', packaged], text=True))
+        self.assertTrue(native_ids(original))
+        self.assertEqual(native_ids(packaged), native_ids(original))
+        self.assertEqual(sha256(original), original_hash)
+        self.assertEqual(sha256(runtime / 'OpenStudioSupport'), support_hash)
+        self.assertLess(packaged.stat().st_size, original.stat().st_size)
+        self.assertEqual(subprocess.run([packaged]).returncode, 0)
+
     def test_release_entry_point_rejects_missing_notes_before_build(self):
         process = subprocess.run(['python3', ROOT / 'tools/package-linux-native.py',
                                   '--format', 'deb', '--version', '1.2.3',

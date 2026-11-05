@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from support_package import validate as validate_support
 from release_build_policy import validate as validate_release_build_policy
+from openstudio_support.identity import native_ids
 import re
 import shutil
 import subprocess
@@ -79,6 +80,17 @@ def stage_bundle(bundle, stage, package_format):
     destination = stage / 'usr/lib/openstudio'
     shutil.copytree(bundle, destination, symlinks=True,
                     ignore=shutil.ignore_patterns('*.log', '__pycache__', '*.pyc'))
+    if package_format == 'deb':
+        # Unlike rpmbuild/linuxdeploy, dpkg-deb does not strip debug sections.
+        # Retain the original binary for the separate symbol archive; only
+        # change this package's copy, never the frozen Support runtime.
+        binary = destination / 'OpenStudio'
+        debug_ids = native_ids(binary)
+        if not debug_ids:
+            raise ValueError('Missing native build identity before DEB stripping')
+        run(['strip', '--strip-debug', binary])
+        if native_ids(binary) != debug_ids:
+            raise ValueError('DEB stripping changed the native build identity')
     marker = destination / 'OpenStudio.package'
     marker.write_text(package_format + '\n')
     marker.chmod(0o644)

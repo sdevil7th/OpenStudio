@@ -264,6 +264,9 @@ symbols, stale frontend maps and changed binaries fail the archive operation.
 Windows checks PE/PDB GUID plus age, macOS checks all Mach-O/dSYM UUIDs, and Linux
 checks ELF/GNU build IDs against extracted debug files. Native binaries are retained
 with their symbols. macOS also retains the dSYM bundle for standard Apple tools.
+DEB packaging strips debug sections from its staged executable and verifies that
+the GNU build ID stays unchanged. The archive's original binary and the frozen
+Support payload are untouched. RPM and AppImage retain their existing stripping.
 
 Frontend builds place hidden JavaScript maps and matching JavaScript in
 `frontend/debug-symbols`, outside `dist`. Maps include source content; do not add
