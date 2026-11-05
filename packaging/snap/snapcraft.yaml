@@ -60,7 +60,9 @@ parts:
       - shared-mime-info
       - desktop-file-utils
       - procps
-    override-prime: |
+    # override-prime disables Snapcraft's ELF patching. Finish transformations
+    # during build so the classic loader/RPATH fixups still run at prime.
+    override-build: |
       craftctl default
-      glib-compile-schemas "$CRAFT_PRIME/usr/share/glib-2.0/schemas"
-      python3 "$CRAFT_PROJECT_DIR/patch-snap-webkit.py" "$CRAFT_PRIME"
+      glib-compile-schemas "$CRAFT_PART_INSTALL/usr/share/glib-2.0/schemas"
+      python3 "$CRAFT_PROJECT_DIR/patch-snap-webkit.py" "$CRAFT_PART_INSTALL"

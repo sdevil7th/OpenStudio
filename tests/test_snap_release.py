@@ -77,6 +77,10 @@ class SnapReleaseTests(unittest.TestCase):
         self.assertEqual(set(recipe['apps']), {'openstudio', 'support'})
         for app in recipe['apps'].values():
             self.assertFalse({'daemon', 'timer', 'autostart', 'activates-on'} & set(app))
+        # Snapcraft explicitly skips classic ELF fixups for override-prime.
+        for part in recipe['parts'].values():
+            if 'enable-patchelf' in part.get('build-attributes', []):
+                self.assertNotIn('override-prime', part)
 
     def test_webkit_relocation_preserves_elf_offsets(self):
         source = b'prefix\0' + webkit.OLD + b'/injected-bundle/test.so\0suffix'

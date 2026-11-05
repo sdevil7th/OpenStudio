@@ -13,6 +13,8 @@ The candidate package uses the exact versioned Ubuntu 22.04 DEB payload, plus a
 coherent core22 dependency stack. Snapcraft's classic ELF patching handles its
 loader paths. Ubuntu's release WebKit ignores `WEBKIT_EXEC_PATH`; a bounded,
 same-size prefix relocation points its helpers at the staged `wk` directory.
+Perform the schema and WebKit transformations during `override-build`:
+Snapcraft explicitly disables `enable-patchelf` for an `override-prime` part.
 The installed package must pass main/detached WebView readiness, recovery,
 export, updater routing and frozen Support checks before any upload. Source
 DEB identity and the final Snap hash are retained in the qualification report.
