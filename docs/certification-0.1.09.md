@@ -6,6 +6,17 @@ The user requested certification checks and a release PR, with publication held.
 
 ## Current evidence
 
+**Merge acceptance decision — 5 November 2026:** the user explicitly accepted the
+strict 8-sample contention failure as a non-blocking known limitation for PR #36
+and requested that optimization work on that target stop. Its measured result
+remains **fail**; no threshold, recording-integrity assertion, or timing result is
+changed. This is a merge-scope decision, not evidence that further optimization is
+impossible, that eight samples is glitch-free, or that larger buffers qualify that
+workload. Complete the current Linux checks before making the PR ready. Support
+must remain manual-only; publication and Store/notarization remain separate gates.
+Earlier statements tying draft status to the 8-sample result are historical and
+superseded by this acceptance decision.
+
 Further offline collection, symbol matching and diagnostic-removal changes after
 `93d03c15` change the native binary and Support payload. The older installer,
 WACK and Linux package results below do **not** certify these new artifacts.
@@ -18,7 +29,7 @@ at `b6aba8ae`, including the warning-only follow-up to the functional NAM fix.
 Each result applies to its listed artifact. The remaining Linux browser check
 passed; the strict 8-sample hardware gate still fails. An automatic Mac run also
 exposed three geometry-check failures after successful frontend startup.
-PR #36 remains a draft, with no submitted formal review approval. Subsequent
+At that earlier qualification, PR #36 remained a draft with no submitted formal review approval. Subsequent
 qualification/release-note edits through `93d03c15` did not change that tested application source.
 
 - **Pass — Linux qualification after the NAM preparation/insertion fix:**

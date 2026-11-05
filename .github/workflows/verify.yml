@@ -921,6 +921,17 @@ jobs:
         shell: bash
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
 
+      - name: Verify and archive Linux native/frontend symbol matches
+        run: |
+          python3 -m unittest tests.test_support_identity tests.test_release_build_policy -v
+          python3 tools/build-symbols.py archive --app "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --build-dir "$BUILD_DIR" --output output/linux-symbols
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-linux-debug-symbols
+          path: output/linux-symbols/
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Validate Linux runtime bundle
         shell: pwsh
         run: ./tools/validate-runtime-bundle.ps1 -Platform linux -BundlePath "$env:BUILD_DIR/OpenStudio_artefacts/Release" -ExpectedVersion $env:VERSION -EnforceLeanBundle
