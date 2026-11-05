@@ -824,7 +824,7 @@ jobs:
           if-no-files-found: warn
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: env.CALLBACK_DIAGNOSTICS == 'OFF'
+        if: always() && env.CALLBACK_DIAGNOSTICS == 'OFF'
         with:
           name: candidate-macos-universal
           path: dist/macos/*

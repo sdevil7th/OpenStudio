@@ -78096,8 +78096,14 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
             spectralChange = juce::jmax(spectralChange, std::abs(wet - dry));
         }
     }
+    auto* spectralEvidence = new juce::DynamicObject();
+    spectralEvidence->setProperty("pdc", spectralPDC);
+    spectralEvidence->setProperty("renderAndLengths", spectralRenderPass);
+    spectralEvidence->setProperty("neutralError", spectralNeutralError);
+    spectralEvidence->setProperty("routeError", spectralMixError);
+    spectralEvidence->setProperty("activeChange", spectralChange);
     addCheck("spectral_eq_export_alignment", spectralPDC && spectralRenderPass && spectralNeutralError < 2e-6 && spectralMixError < 2e-6 && spectralChange > 1e-6,
-        "Prepared spectral delay preserves neutral parallel alignment; active corrections agree in master, stem and selected-item exports.", spectralMixError);
+        "Prepared spectral delay preserves neutral parallel alignment; active corrections agree in master, stem and selected-item exports.", juce::var(spectralEvidence));
     bool spectralRecall = setBuiltInPluginParam(phaseTrack, "track", 0, "phaseMode", 1)
         && phaseEQ->getLatencySamples() == 4352 && trackMap[parallelTrack]->getPDCDelay() == 4352;
     spectralRecall = setBuiltInPluginState(phaseTrack, "track", 0, juce::JSON::toString(spectralState)) && spectralRecall
