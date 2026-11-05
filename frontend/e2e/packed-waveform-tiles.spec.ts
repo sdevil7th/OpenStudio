@@ -8,6 +8,7 @@ declare global {
     __packedWaveformQA: {
       calls: Request[];
       legacyCalls: number;
+      startupState: string;
       hold: boolean;
       pending: Array<{ resolve: (value: unknown) => void; payload: unknown }>;
       listeners: Map<string, { name: string; callback: (value: unknown) => void }>;
@@ -24,7 +25,7 @@ async function ready(page: Page) {
       schemaVersion: 1, keyboardProfileId: "openstudio", mouseProfileId: "openstudio", onboardingSeen: true,
     }));
     const listeners = new Map<string, { name: string; callback: (value: unknown) => void }>();
-    const qa = { calls: [] as Request[], legacyCalls: 0, listeners, hold: false,
+    const qa = { calls: [] as Request[], legacyCalls: 0, startupState: "", listeners, hold: false,
       pending: [] as Array<{ resolve: (value: unknown) => void; payload: unknown }>,
       store: undefined as unknown as typeof useDAWStore,
       invalidate: () => {
@@ -35,7 +36,7 @@ async function ready(page: Page) {
     window.__JUCE__ = { backend: {
       addTrack: async (id?: string) => id ?? "unused",
       emitEvent: () => {},
-      reportFrontendStartupState: async () => true,
+      reportFrontendStartupState: async (state: string) => { qa.startupState = state; return true; },
       addEventListener: (name: string, callback: (value: unknown) => void) => {
         const token = String(++listenerId);
         listeners.set(token, { name, callback }); return token;
@@ -60,7 +61,12 @@ async function ready(page: Page) {
     } };
   });
   await page.goto("/?platform=windows&windowChrome=native");
-  await expect(page.getByText("Starting OpenStudio...", { exact: true })).toBeHidden();
+  // Vite's cold module loading is outside this waveform contract. Require the
+  // actual ready signal, then check both bootstrap and workspace gates.
+  await expect.poll(() => page.evaluate(() => window.__packedWaveformQA.startupState),
+    { timeout: 15_000 }).toBe("boot-ready");
+  await expect(page.locator("#openstudio-boot-overlay")).toBeHidden();
+  await expect(page.locator('[data-qa="app-startup-loading"]')).toBeHidden();
   const source = await (await page.request.get("/src/App.tsx")).text();
   const storeUrl = source.match(/from "([^"]*useDAWStore\.ts[^"]*)"/)?.[1];
   if (!storeUrl) throw new Error("Store module missing");

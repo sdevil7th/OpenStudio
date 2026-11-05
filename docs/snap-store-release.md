@@ -98,6 +98,12 @@ credentials or include them in reports.
 1. Request and obtain Canonical's classic-confinement approval. Arbitrary native
    plugins, plugin executables and projects may live outside a confined home.
    Approval is a Store decision, not established by the local `--classic` test.
+   Confirm eligibility with Canonical rather than treating arbitrary file access
+   as sufficient: its [review process](https://forum.snapcraft.io/t/process-for-reviewing-classic-confinement-snaps/1460/)
+   requires a supported category or further reviewer/architect consideration.
+   A strict-confinement interface test has not been performed; do not claim it
+   has, or promise that a DAW will receive classic approval. Any strict-package
+   alternative needs separate plugin, device and performance qualification.
    Record the reviewed decision URL in `OPENSTUDIO_SNAP_CLASSIC_APPROVAL_URL`.
 2. Keep `SNAPCRAFT_STORE_CREDENTIALS` in the GitHub `snap-store` environment
    current. Renew the scoped credential before its expiry; never send it in chat
