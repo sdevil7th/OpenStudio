@@ -321,7 +321,10 @@ endif()
 # Fetch Lua 5.4 — scripting engine (MIT license)
 FetchContent_Declare(
     lua
-    URL "https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+    URL
+        "https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+        "https://deb.debian.org/debian/pool/main/l/lua5.4/lua5.4_5.4.7.orig.tar.gz"
+    DOWNLOAD_NAME lua-5.4.7.tar.gz
     URL_HASH SHA256=9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30
 )
 FetchContent_MakeAvailable(lua)
