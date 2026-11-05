@@ -4,6 +4,9 @@
     <parameter name="version" required="true" />
   </parameters>
   <zip-file>
+    <pe-file path="OpenStudioSupport.exe" product-name="OpenStudio" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
     <pe-file path="OpenStudio.exe" product-name="OpenStudio" product-version="${version}">
       <authenticode-sign />
     </pe-file>

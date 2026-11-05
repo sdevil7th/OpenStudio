@@ -38,7 +38,9 @@ public:
     juce::var getPeaks(const juce::File& audioFile,
                        int samplesPerPixel,
                        int startSample,
-                       int numPixels) const;
+                       int numPixels,
+                       juce::int64 sourceRangeStartSample = 0,
+                       juce::int64 sourceRangeEndSample = -1) const;
 
     /** Check if a valid, up-to-date cache exists for this audio file. */
     bool hasCachedPeaks(const juce::File& audioFile) const;
@@ -101,6 +103,24 @@ private:
         std::vector<MipmapLevel> levels;
     };
 
+    struct SourceVersion
+    {
+        juce::String key;
+        juce::uint64 generation = 0;
+        juce::int64 size = 0, modified = 0;
+    };
+
+    SourceVersion captureSourceVersion(const juce::File&) const;
+    bool isGenerationCurrent(const SourceVersion&) const;
+    static bool sourceMatches(const juce::File&, const SourceVersion&);
+    std::shared_ptr<const CacheEntry> publishLoadedEntry(const juce::File&, const SourceVersion&,
+                                                        std::shared_ptr<const CacheEntry>) const;
+    bool generateSyncForVersion(const juce::File&, const SourceVersion&);
+    bool claimPendingGeneration(const SourceVersion&);
+    void finishPendingGeneration(const SourceVersion&);
+    bool publishGeneratedEntry(const juce::File&, const SourceVersion&,
+                               std::shared_ptr<const CacheEntry>, juce::TemporaryFile&, bool stagedReady);
+
     // Get the .ospeaks file path for an audio file
     static juce::File getPeakFilePath(const juce::File& audioFile);
 
@@ -110,19 +130,28 @@ private:
     // Write peak data to a peak cache file
     static bool writeToFile(const juce::File& peakFile, const CacheEntry& entry,
                             int64_t sourceFileSize, int64_t sourceModTimeMs);
+    static bool writeStagedFile(const juce::File&, const CacheEntry&, int64_t, int64_t);
 
     // Generate all mipmap levels from an audio file
     bool buildPeaks(const juce::File& audioFile, CacheEntry& entry);
     std::atomic<bool> stopping { false };
     MessageThreadLifetime completions;
     friend class RuntimeSafetyRegression;
+    friend struct PeakCacheGenerationRegressionAccess;
 
     // In-memory cache: audioFilePath -> CacheEntry
-    mutable std::map<juce::String, CacheEntry> memoryCache;
+    mutable std::map<juce::String, std::shared_ptr<const CacheEntry>> memoryCache;
+    mutable std::map<juce::String, juce::uint64> sourceGenerations;
     mutable juce::CriticalSection cacheLock;
+    // Only final sidecar rename/delete and brief publication checks share this
+    // lock. Full-file scanning, staging writes and reads never hold cacheLock.
+    mutable juce::CriticalSection publicationLock;
+    // Small immutable edge aggregates, built only by clipped-request workers.
+    mutable std::map<juce::String, std::vector<float>> boundaryPeaks;
+    mutable juce::CriticalSection boundaryLock;
 
     // Track files currently being generated to prevent duplicate jobs
-    std::set<juce::String> pendingGenerations;
+    std::map<juce::String, juce::uint64> pendingGenerations;
     juce::CriticalSection pendingLock;
 
     // Keep waveform generation serialized and low-impact; concurrent full-file

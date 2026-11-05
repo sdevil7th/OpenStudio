@@ -34,7 +34,15 @@ SIGNING_KIND="${MACOS_CODESIGN_KIND:-developer-id}"
 case "$SIGNING_KIND" in
   developer-id) TIMESTAMP_OPTION="--timestamp" ;;
   self-signed) TIMESTAMP_OPTION="--timestamp=none" ;;
-  *) echo "MACOS_CODESIGN_KIND must be developer-id or self-signed." >&2; exit 1 ;;
+  ad-hoc)
+    TIMESTAMP_OPTION="--timestamp=none"
+    if [[ -n "${MACOS_CODESIGN_IDENTITY:-}" && "$MACOS_CODESIGN_IDENTITY" != "-" ]]; then
+      echo "Ad-hoc candidate signing cannot use a certificate identity." >&2
+      exit 1
+    fi
+    MACOS_CODESIGN_IDENTITY="-"
+    ;;
+  *) echo "MACOS_CODESIGN_KIND must be developer-id, self-signed or ad-hoc." >&2; exit 1 ;;
 esac
 if [[ "$SIGNING_KIND" == "self-signed" && -z "${MACOS_CODESIGN_IDENTITY:-}" ]]; then
   echo "Self-signed mode requires a persistent MACOS_CODESIGN_IDENTITY." >&2
@@ -57,7 +65,7 @@ if [[ "$NOTARY_CREDENTIAL_COUNT" -eq 3 && -z "${MACOS_CODESIGN_IDENTITY:-}" ]]; 
 fi
 
 if [[ "$NOTARY_CREDENTIAL_COUNT" -eq 3 && "$SIGNING_KIND" != "developer-id" ]]; then
-  echo "Self-signed builds cannot be notarized. Use Developer ID for notarization." >&2
+  echo "Only Developer ID builds can be notarized." >&2
   exit 1
 fi
 
@@ -66,12 +74,25 @@ if [[ ! -x "$STAGED_APP/Contents/Helpers/OpenStudioUpdateInstaller" ]]; then
   echo "The app is missing its executable update helper. Rebuild before packaging." >&2
   exit 1
 fi
+python3 "$SCRIPT_DIR/validate-support-tool.py" --bundle "$STAGED_APP" --version "$VERSION"
+python3 "$SCRIPT_DIR/release_build_policy.py" --bundle "$STAGED_APP" --version "$VERSION"
+SUPPORT_SHORTCUT="$(dirname "$APP_PATH")/OpenStudio Support.app"
+if [[ ! -d "$SUPPORT_SHORTCUT" ]]; then
+  echo "Missing separate Finder support launcher; assemble/stage the support package first." >&2
+  exit 1
+fi
+ditto "$SUPPORT_SHORTCUT" "$STAGING_DIR/OpenStudio Support.app"
+lipo "$STAGED_APP/Contents/Helpers/OpenStudioSupport.app/Contents/MacOS/OpenStudioSupport" -verify_arch arm64 x86_64
 ln -s /Applications "$STAGING_DIR/Applications"
 
 if [[ -n "${MACOS_CODESIGN_IDENTITY:-}" ]]; then
   # Sign the outer app explicitly.  Do not use --deep while signing: any future
   # nested code must be signed deliberately in its own designated-code slot,
   # and the strict deep verification below will fail closed if it is missed.
+  SUPPORT_SIGN_OPTIONS=()
+  [[ "$SIGNING_KIND" == "developer-id" ]] || SUPPORT_SIGN_OPTIONS+=(--no-timestamp)
+  python3 "$SCRIPT_DIR/sign-macos-support.py" "$STAGED_APP/Contents/Helpers/OpenStudioSupport.app" --identity "$MACOS_CODESIGN_IDENTITY" "${SUPPORT_SIGN_OPTIONS[@]}"
+  python3 "$SCRIPT_DIR/sign-macos-support.py" "$STAGING_DIR/OpenStudio Support.app" --identity "$MACOS_CODESIGN_IDENTITY" "${SUPPORT_SIGN_OPTIONS[@]}"
   codesign --force "$TIMESTAMP_OPTION" --options runtime --sign "$MACOS_CODESIGN_IDENTITY" "$STAGED_APP/Contents/Helpers/OpenStudioUpdateInstaller"
   if [[ -f "$ENTITLEMENTS_PATH" ]]; then
     codesign --force "$TIMESTAMP_OPTION" --options runtime --entitlements "$ENTITLEMENTS_PATH" --sign "$MACOS_CODESIGN_IDENTITY" "$STAGED_APP"
@@ -116,5 +137,8 @@ fi
 { codesign -d --verbose=4 --requirements :- "$STAGED_APP" 2>&1 || true; } > "$OUTPUT_DIR/OpenStudio-macOS.signing.txt"
 if [[ "$SIGNING_KIND" == "self-signed" ]]; then
   echo "Self-signing is an identity-continuity experiment, not Gatekeeper acceptance. Reuse the same release key; never ask users to trust a root certificate." >&2
+fi
+if [[ "$SIGNING_KIND" == "ad-hoc" ]]; then
+  echo "Ad-hoc candidate signing verifies package integrity only, not trusted distribution or Gatekeeper acceptance." >&2
 fi
 echo "Created macOS DMG at $DMG_PATH"

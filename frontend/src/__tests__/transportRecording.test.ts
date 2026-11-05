@@ -3,6 +3,7 @@ import { nativeBridge } from "../services/NativeBridge";
 import { createDefaultTrack, type Track, useDAWStore } from "../store/useDAWStore";
 import transportBarSource from "../components/TransportBar.tsx?raw";
 import { dispatchGlobalShortcut } from "../utils/globalShortcutDispatcher";
+import { advanceProjectEpoch } from "../utils/projectLifetime";
 import {
   activateShortcutContext,
   registerShortcutSurface,
@@ -38,6 +39,7 @@ describe("transport recording", () => {
     vi.spyOn(nativeBridge, "setTransportPosition").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "setTransportPlaying").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "setTransportRecording").mockResolvedValue(true);
+    vi.spyOn(nativeBridge, "startPreparedRecording").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "setPunchRange").mockResolvedValue(true);
     vi.spyOn(nativeBridge, "getLastCompletedClips").mockResolvedValue([]);
     vi.spyOn(nativeBridge, "getLastCompletedMIDIClips").mockResolvedValue([]);
@@ -123,6 +125,7 @@ describe("transport recording", () => {
   it.each([false, true])("restores playback after rejected recording (already playing: %s)", async (isPlaying) => {
     const showToast = vi.fn();
     vi.mocked(nativeBridge.setTransportRecording).mockResolvedValue(false);
+    vi.mocked(nativeBridge.startPreparedRecording).mockResolvedValue(false);
     useDAWStore.setState({
       tracks: [armedInstrumentTrack()],
       transport: { ...initialState.transport, isPlaying, isRecording: false },
@@ -142,16 +145,81 @@ describe("transport recording", () => {
     let rejectStart!: (accepted: boolean) => void;
     const start = new Promise<boolean>((resolve) => { rejectStart = resolve; });
     const showToast = vi.fn();
-    vi.mocked(nativeBridge.setTransportRecording).mockImplementation(async recording => recording ? start : true);
+    vi.mocked(nativeBridge.startPreparedRecording).mockReturnValue(start);
     useDAWStore.setState({ tracks: [armedInstrumentTrack()], showToast,
       syncClipsWithBackend: vi.fn().mockResolvedValue(undefined) });
     const pending = useDAWStore.getState().record();
-    await vi.waitFor(() => expect(nativeBridge.setTransportRecording).toHaveBeenCalledWith(true));
+    await vi.waitFor(() => expect(nativeBridge.startPreparedRecording).toHaveBeenCalled());
     await useDAWStore.getState().stop();
     rejectStart(false);
     await pending;
     expect(useDAWStore.getState().transport).toMatchObject({ isPlaying: false, isRecording: false });
     expect(showToast).not.toHaveBeenCalledWith("Failed to start recording", "error");
+  });
+
+  it("keeps the playhead and live clips stopped until native writer preparation commits", async () => {
+    let finishPreparation!: (accepted: boolean) => void;
+    vi.mocked(nativeBridge.startPreparedRecording).mockReturnValue(new Promise(resolve => { finishPreparation = resolve; }));
+    useDAWStore.setState({ tracks: [armedInstrumentTrack()],
+      transport: { ...initialState.transport, currentTime: 4, isPlaying: false, isRecording: false },
+      syncClipsWithBackend: vi.fn().mockResolvedValue(undefined) });
+    const pending = useDAWStore.getState().record();
+    await vi.waitFor(() => expect(nativeBridge.startPreparedRecording).toHaveBeenCalledOnce());
+    expect(useDAWStore.getState()).toMatchObject({ isPreparingToRecord: true, recordSession: null, recordingClips: [],
+      transport: { currentTime: 4, isPlaying: false, isRecording: false } });
+    expect(nativeBridge.setTransportPosition).toHaveBeenCalledWith(4);
+    expect(nativeBridge.setTransportPlaying).not.toHaveBeenCalledWith(true);
+    expect(nativeBridge.setTransportRecording).not.toHaveBeenCalledWith(true);
+    finishPreparation(true);
+    await pending;
+    expect(useDAWStore.getState()).toMatchObject({ isPreparingToRecord: false,
+      transport: { currentTime: 4, isPlaying: true, isRecording: true },
+      recordingClips: [{ trackId: "track-midi", startTime: 4 }] });
+  });
+
+  it("does not publish a late successful prepared start after Stop", async () => {
+    let finishPreparation!: (accepted: boolean) => void;
+    vi.mocked(nativeBridge.startPreparedRecording).mockReturnValue(new Promise(resolve => { finishPreparation = resolve; }));
+    useDAWStore.setState({ tracks: [armedInstrumentTrack()], syncClipsWithBackend: vi.fn().mockResolvedValue(undefined) });
+    const pending = useDAWStore.getState().record();
+    await vi.waitFor(() => expect(nativeBridge.startPreparedRecording).toHaveBeenCalledOnce());
+    await useDAWStore.getState().stop();
+    finishPreparation(true);
+    await pending;
+    expect(useDAWStore.getState()).toMatchObject({ isPreparingToRecord: false, recordSession: null, recordingClips: [],
+      transport: { isPlaying: false, isRecording: false } });
+    expect(nativeBridge.setTransportPlaying).toHaveBeenCalledWith(false);
+    expect(nativeBridge.setTransportRecording).toHaveBeenCalledWith(false);
+  });
+
+  it("does not publish a prepared start into a replacement project", async () => {
+    let finishPreparation!: (accepted: boolean) => void;
+    vi.mocked(nativeBridge.startPreparedRecording).mockReturnValue(new Promise(resolve => { finishPreparation = resolve; }));
+    useDAWStore.setState({ tracks: [armedInstrumentTrack()], syncClipsWithBackend: vi.fn().mockResolvedValue(undefined) });
+    const pending = useDAWStore.getState().record();
+    await vi.waitFor(() => expect(nativeBridge.startPreparedRecording).toHaveBeenCalledOnce());
+    advanceProjectEpoch();
+    useDAWStore.setState({ tracks: [], isPreparingToRecord: false });
+    finishPreparation(true);
+    await pending;
+    expect(useDAWStore.getState()).toMatchObject({ tracks: [], isPreparingToRecord: false, recordSession: null,
+      transport: { isPlaying: false, isRecording: false } });
+  });
+
+  it("allows a replacement project to record while the old preparation resolves", async () => {
+    let finishOldPreparation!: (accepted: boolean) => void;
+    vi.mocked(nativeBridge.startPreparedRecording).mockReturnValueOnce(new Promise(resolve => { finishOldPreparation = resolve; }));
+    useDAWStore.setState({ tracks: [armedInstrumentTrack()], syncClipsWithBackend: vi.fn().mockResolvedValue(undefined) });
+    const oldStart = useDAWStore.getState().record();
+    await vi.waitFor(() => expect(nativeBridge.startPreparedRecording).toHaveBeenCalledTimes(1));
+    advanceProjectEpoch();
+    useDAWStore.setState({ tracks: [armedInstrumentTrack({ id: "replacement-track" })], isPreparingToRecord: false });
+    await useDAWStore.getState().toggleRecord();
+    expect(nativeBridge.startPreparedRecording).toHaveBeenCalledTimes(2);
+    finishOldPreparation(true);
+    await oldStart;
+    expect(useDAWStore.getState()).toMatchObject({ isPreparingToRecord: false,
+      transport: { isPlaying: true, isRecording: true }, recordingClips: [{ trackId: "replacement-track", startTime: 0 }] });
   });
 
   it("punches in at the playhead captured when record is pressed", async () => {

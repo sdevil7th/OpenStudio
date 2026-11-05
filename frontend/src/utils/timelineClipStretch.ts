@@ -104,6 +104,11 @@ export function createStretchedMIDIClip(
     loopLength: scaleOptional(clip.loopLength),
     events: scaleMIDIEvents(clip.events, timeScale),
     ccEvents: scaleCCEvents(clip.ccEvents, timeScale),
+    sourceTempoInfo: clip.sourceTempoInfo ? {
+      tempo: clip.sourceTempoInfo.tempo / timeScale,
+      tempoMarkers: clip.sourceTempoInfo.tempoMarkers.map(marker => ({ time: marker.time * timeScale, bpm: marker.bpm / timeScale })),
+      timeSignature: { ...clip.sourceTempoInfo.timeSignature },
+    } : undefined,
     quantizeBackup: clip.quantizeBackup
       ? {
           events: scaleMIDIEvents(clip.quantizeBackup.events, timeScale),

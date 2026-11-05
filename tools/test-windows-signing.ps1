@@ -43,8 +43,8 @@ try {
     Set-Content -LiteralPath (Join-Path $source "thirdparty.dll") -Value "Do not sign or copy this."
     Copy-OpenStudioSigningFiles -SourceDirectory $source -DestinationDirectory $stage `
         -Version "0.1.01" -RequireEmptyDestination
-    if (@(Get-ChildItem -LiteralPath $stage).Count -ne 2) {
-        throw "Only the two first-party payload files should be staged."
+    if (@(Get-ChildItem -LiteralPath $stage).Count -ne 3) {
+        throw "Only the three first-party payload files should be staged."
     }
     Assert-Fails { Copy-OpenStudioSigningFiles -SourceDirectory $source -DestinationDirectory $stage `
         -Version "0.1.01" -RequireEmptyDestination } "*must be empty*"

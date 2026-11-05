@@ -8,9 +8,9 @@ namespace OpenStudioCrashDiagnostics
         trackBufferContract, pluginBufferContract, recordingBufferContract,
         processorException, processorNonFinite, processorRemote, count };
     void recordRealtimeFault(RealtimeFault fault) noexcept;
-    void flushRealtimeFaults(); // Message thread, rate-limited, disk writes only after a failure.
+    void flushRealtimeFaults(); // Control thread at stop/shutdown; disk writes only after a failure.
     void installCrashHandlers();
-    void pulseMessageThread() noexcept; // One atomic timestamp; never writes to disk.
+    void pulseMessageThread() noexcept; // Explicit diagnostic builds/self-tests or committed final Quit only.
     // Only after the user committed to quitting. No thread termination; the
     // external reporter bounds the entire already-quitting process lifetime.
     void beginFinalShutdown();

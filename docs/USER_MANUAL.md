@@ -236,6 +236,9 @@ After configuring audio, you are ready to begin:
      is undoable. MIDI currently combines source MIDI tracks into one clip per file.
    - Import references source audio files; it does not copy them into the project.
      Keyboard profiles and custom shortcuts can change or unbind these defaults.
+   - In the development checkout, a newly created audio track follows the file's
+     channel count (mono or stereo). Importing onto an existing compatible track
+     preserves that track's configuration. MIDI imports use MIDI-compatible tracks.
 4. Press `Space` to play back.
 5. Save your project with `Ctrl+S` (project files use the `.osproj` extension).
 
@@ -377,7 +380,8 @@ The Timeline is the central canvas-based workspace where you arrange audio and M
 - **Playhead visibility**: the ruler marker and vertical line update together after zoom, scroll, or resize, including while stopped, whenever the playhead lies within the visible time range.
 - **Horizontal scroll**: Shift+scroll wheel, or use the horizontal scrollbar.
 - **Vertical scroll**: Scroll wheel when hovering over the track area.
-- **Zoom to Fit**: `Ctrl+0` resets zoom to a standard overview level.
+- **Zoom to Full Project**: `Ctrl+0` fits the timeline's clips, including the current recording extent, as far as the zoom limits allow. Long recordings can still require horizontal scrolling at the minimum zoom. The View menu command also works after using track or mixer controls.
+- **Wide views**: bar labels and displayed grid lines thin out to stay readable. Their musical positions and the selected snap resolution stay unchanged; ruler beats follow the time signature's beat value.
 - **Zoom to Time Selection**: `Ctrl+Shift+E` zooms the view to fit the current time selection.
 - **Crosshair cursor**: Toggle via View menu for precise positioning guidance.
 
@@ -688,6 +692,8 @@ When a track is armed, you can enable input monitoring to hear the live signal:
 
 Recorded audio files are saved as WAV files in the project directory.
 
+**Live waveform navigation (development):** recording waveforms continue refreshing while you scroll or zoom, including a held ruler gesture. Newly revealed areas may briefly use an earlier preview while current detail arrives. Holding the ruler still keeps automatic following paused until the gesture ends.
+
 ### 4.5 Record Modes
 
 OpenStudio offers three record modes, configurable via **Options > Record Mode**:
@@ -740,6 +746,14 @@ OpenStudio automatically detects connected MIDI devices:
 - MIDI devices are listed in the Track Header's MIDI input selector.
 - Select a MIDI device from the dropdown on a MIDI or Instrument track.
 - Available devices can be queried via Lua: `openstudio.getMIDIDevices()`.
+
+In the October 28 development checkout, saved MIDI input and output names stay
+selected while devices are checked. A name marked **(checking)** is awaiting
+discovery, **(unavailable)** was absent from a successful device-list check, and
+**(unverified)** means the list could not be read. The saved route is retained;
+it does not automatically become **All Inputs** or **No Out**. Reconnect the saved
+device and restart OpenStudio to refresh the list if needed, or explicitly choose
+another listed device.
 
 Track Routing > MIDI hardware output > Same-key overlap defaults to Raw note messages. Merge overlapping keys sends the first note-on and last note-off for each channel/key, suppressing intermediate retriggers. Changes take effect after held keys are released. This setting is saved with the track and supports Undo/Redo. It affects one track's hardware output; use separate MIDI channels for independent tracks sharing a receiver. Controllers and aftertouch pass through. Relative RPN reconstruction without a known absolute baseline is skipped rather than inventing receiver state.
 
@@ -807,7 +821,7 @@ MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons
 
 **Time selection:**
 - Primary+drag on the timeline background creates a time selection; Shift+drag on the ruler sets or extends it (`Primary` is Ctrl on Windows/Linux and Command on macOS). Plain horizontal ruler drag changes the separate project/loop range and leaves the edit selection unchanged. These are OpenStudio-profile defaults; custom mappings take priority.
-- The time selection is highlighted as a shaded region.
+- The time selection is highlighted as a blue shaded region. A timeline label shows its start, end and duration, with **Select clips inside**, **Set loop** and **Clear** actions. Cyan clip outlines indicate selected clips instead. In the default OpenStudio mouse profile, Ctrl/Command+drag on a clip body copies it; Ctrl/Command+Shift+drag slips its source contents. A persistent **Source offset +N s** label describes the clip trim, not an active gesture.
 - Time selections are used for punch recording, rendering bounds, and editing operations.
 
 ### 6.2 Moving Clips
@@ -819,6 +833,11 @@ MIDI Learn allows you to map physical MIDI controller knobs, faders, and buttons
 - Hold `Shift` while dragging to lock movement to the first axis that crosses the drag threshold.
 - Hold `Alt`/`Option` while dragging to bypass snapping.
 - Multi-selected clips move together as a group.
+- In the development checkout, dropping on a track body moves compatible clips
+  there. Dropping on a highlighted divider inserts destination tracks at that
+  position with one Undo; a selection spanning several source rows creates one
+  new row per source row in the same order. Dropping MIDI over an audio track
+  creates a compatible MIDI row below rather than changing the audio track.
 
 ### 6.3 Splitting Clips
 
@@ -858,6 +877,29 @@ Each clip has adjustable fade-in and fade-out regions:
 4. The fade is displayed as a curved line on the clip.
 
 **Auto-Crossfade**: When enabled (toggle in Main Toolbar or View menu), overlapping clips on the same track automatically create crossfades.
+
+**Crossfade selected clips (development):** Select overlapping audio clips on one
+track and use **Crossfade Selected Audio Clips** in the clip context menu, or
+`Shift+X` in the OpenStudio Timeline profile. The clips remain separate, and the
+whole operation is one Undo step. Adjoining clips hand off across their overlap;
+a contained replacement fades in and back out while the underlying clip returns.
+Same-start, same-end, coincident and nested/multiple overlaps share a consistent
+handoff sequence, with later-starting clips taking foreground priority. Coincident
+items follow their arrangement stack order. No source files are rewritten.
+
+**Edit Selected Crossfade...** opens the resulting gain-curve preview from any
+member of an existing crossfade, including a split fragment. Choose incoming/outgoing curves and automatic or custom
+handoff lengths; lengths are bounded to prevent colliding transitions. Automatic
+uses the available overlap for adjoining clips and the configured default short
+crossfade length for contained entry/exit. Crossfades are an independent gain
+layer: existing manual clip fades and gain-envelope points remain active and
+unchanged. Reapplying replaces the affected existing crossfades together. If linked
+partners are not selected, the editor lists the affected clips before applying.
+**Remove Crossfade** removes the listed linked layers and restores manual gain
+behavior, with Undo. Layers survive project save/load, trim/untrim, move, split
+and time stretch. Copies keep their curves in independent groups, so editing or
+removing their crossfade does not change the originals. Other input profiles/custom
+bindings can change the shortcut.
 
 For an audio clip's gain envelope, Shift+click the clip to add a point. Drag an
 existing point to change its time and gain; right-click a point to remove it.
@@ -998,6 +1040,48 @@ The playhead jumps to the next or previous transient position within the selecte
 
 When enabled via **View > Free Item Positioning**, clips can be placed at any vertical position within a track lane, rather than being confined to a single row. This is useful for arranging overlapping clips visually.
 
+### 6.19 Detecting Clip Tempo (development)
+
+Right-click an audio or MIDI clip and choose **Detect Tempo...**. You can also
+select one clip, open **Help > Command Palette** (`Ctrl+Shift+P` in the OpenStudio
+keyboard profile), search for "tempo", and run **Detect Selected Clip Tempo...**.
+An intersecting
+timeline time selection initializes the range; otherwise the whole retained clip
+is selected. Edit Start and End in seconds from the clip start, then **Analyze
+range**. Audio analysis compares up to three audible sections with at most 60
+seconds of spectral analysis in total. Section buttons show the analyzed ranges
+and choose a preview location. MIDI uses retained source tempo metadata when
+available, otherwise it compares repeated beat grids in the selected notes.
+
+Review the editable BPM, pulse evidence, section spread and half/double or triplet
+candidates. Pulse evidence is a heuristic rather than a probability; neither
+automatic path identifies the intended downbeat. Sparse notes, syncopation and
+changing tempos can remain ambiguous. **Cancel analysis** stops pending native
+analysis without closing the dialog. Closing the dialog or changing its clip also
+cancels that work. Tempo analysis uses a separate bounded worker so obsolete
+analyses do not queue ahead of waveform requests. You can still enter BPM, **Tap pulse**, or expand
+**Set tempo by counting beats in the selected range** when analysis finds no pulse.
+For counting, set the range ends on beats and enter the number of intervals:
+beat 1 to beat 5 spans four intervals.
+
+**Audition clip + click** plays a separate bounded dry preview, including clip
+gain/fades but excluding track/master FX. Set Preview from, choose four or eight
+seconds, and adjust First accented click and Group pulses by ear. Source only
+keeps the source playing while you tap a new tempo. MIDI uses simple note guide
+tones instead of impersonating the track's instrument or effects. Preview level
+is bounded; high-rate files may produce a shorter excerpt to keep transfer size
+bounded. Stop project playback/recording before starting this separate audition.
+The preview uses the WebView/system audio output, which can differ from the
+project's selected ASIO or other native audio-device route.
+
+Stop audition, Close, changing clips, hiding the page or leaving its window stops
+the preview and rejects stale work. Preview does not seek or start project
+transport, alter recording, write source files, or save a tempo/phase change.
+
+**Apply Project Tempo** changes the base BPM in one Undo step. It leaves clip
+positions and audio intact and does not apply the estimated beat offset. Existing
+tempo markers remain and can override the base tempo along the timeline.
+
 ---
 
 ## 7. MIDI Editing
@@ -1013,6 +1097,9 @@ The Piano Roll consists of several areas:
 - **Toolbar**: Tool selection (Draw, Select, Erase), step input controls, quantize, scale highlighting options.
 - **Piano keyboard**: Vertical piano keyboard on the left (128 notes, C-2 to G8). Click keys to preview notes.
 - **Note grid**: The main editing area where notes are displayed as colored rectangles. Color indicates velocity (blue = quiet, green = medium, yellow/red = loud).
+- **Note hover (development)**: Hover a note to see its note name, MIDI pitch number
+  and velocity, including notes too narrow to contain a label. Leaving the grid or
+  starting an edit hides the tooltip.
 - **Velocity lane**: Bottom strip showing velocity bars for each note. Drag bars to adjust velocity.
 - **CC lane**: Additional lane for MIDI Continuous Controller editing.
 
@@ -1119,6 +1206,20 @@ The Piano Roll supports editing multiple MIDI clips simultaneously:
 
 Toggle the Mixer Panel with `Ctrl+M` or **View > Show Mixer** or the mixer icon in the Main Toolbar.
 
+In the development checkout, drag the grip in the docked mixer's header to resize
+it. The Mixer title, grip, pop-out and close buttons share one row; the buttons
+have separate hit areas and do not start resizing. Focus the grip and use
+Up/Down (Shift for larger steps), Home/End for the
+available limits, or double-click to restore the preferred 340 px height. The
+preferred height is remembered on this computer and clamped to preserve timeline
+space as other editors open or the window changes size. Detached mixer windows
+retain their own window sizing.
+
+Pointer resizing leaves the previous Timeline or Piano Roll editing context in
+place. Releasing or cancelling a drag releases pointer capture and the temporary
+Escape handler; the grip does not keep keyboard focus. Tab navigation still
+focuses the grip intentionally for keyboard resizing.
+
 ### 8.2 Channel Strip
 
 Each track has a channel strip in the mixer that provides:
@@ -1133,7 +1234,9 @@ Each track has a channel strip in the mixer that provides:
   - dB scale markings: +12, +6, 0, -6, -12, -24, -48, -inf
   - Gain staging indicator shows the current value.
 - **Peak meter**: Real-time level display updated at 10 Hz.
-- **Solo (S), Mute (M), Record Arm (R)** buttons.
+- **Solo (S), Mute (M), Record Arm** buttons. In the OpenStudio profile,
+  `Ctrl+Shift+R` arms selected tracks with track controls or Mixer focused;
+  `R` starts or finishes transport recording. Other profiles/custom bindings can differ.
 - **Phase invert** toggle for polarity correction.
 
 ### 8.3 Master Channel
@@ -1143,7 +1246,7 @@ The Master channel strip is always visible on the left side of the Mixer:
 - Controls the final stereo output volume and pan.
 - Displays the master peak level meter.
 - Has its own FX chain (master FX).
-- Does not have Solo, Mute, or Record Arm buttons.
+- Includes Mute and Mono controls; it has no Solo or Record Arm button.
 
 ### 8.4 Volume and Pan
 
@@ -1152,6 +1255,11 @@ The Master channel strip is always visible on the left side of the Mixer:
   the track header volume knob. A completed drag is one undoable edit. With a
   fader focused, Up/Down adjust the value and Home/End select its minimum/maximum.
 - Range: -60 dB (silence) to +12 dB.
+- **Numeric level (development):** Click the dB readout below a track or master
+  fader and type a value. Enter or moving focus applies one Undo step; Escape
+  discards the draft. `-inf` or `-∞` sets silence. Invalid and out-of-range drafts
+  do not change the level. Typing leaves playback and recording shortcuts inactive
+  in the text field.
 - Double-click the fader to reset to 0 dB (unity gain).
 - Volume changes are smooth (no zipper noise) due to pre-computed gain caching.
 
@@ -2147,7 +2255,7 @@ Choose the time range to render:
 | **AIFF** | Uncompressed output with the available bit-depth selection |
 | **FLAC** | Lossless compressed output with the available bit-depth selection |
 | **MP3** | FFmpeg-encoded output using the selected bitrate; FFmpeg is bundled on Windows and must be installed on `PATH` on macOS/Linux |
-| **OGG Vorbis** | FFmpeg-encoded output using the selected quality; FFmpeg is bundled on Windows and must be installed on `PATH` on macOS/Linux |
+| **OGG Vorbis** | Built-in Vorbis encoding using the selected quality (0–10), including when system FFmpeg lacks a Vorbis encoder. Final sample-rate conversion may still use FFmpeg. |
 
 **Sample rate**: Select the target render rate. The offline engine renders at
 that rate while the playback path converts source files as required.
@@ -2162,7 +2270,7 @@ that rate while the playback path converts source files as required.
 |-----------------|------------------------------------------------------------------|
 | **Normalize**   | Peak-normalizes the output to 0 dBFS                             |
 | **Dither**      | Final integer quantization: flat TPDF, first/second-order shaped TPDF, or lower-noise RPDF |
-| **Resample Quality** | UI placeholder only in the current build; backend support is pending |
+| **Output sample rate** | Converts the rendered output to the selected target rate |
 
 Dither is applied once, after normalization, channel conversion and final sample-rate conversion, for 16/24-bit integer output. TPDF is the general-purpose choice. Shaped TPDF moves noise toward high frequencies; second order does so more strongly. RPDF has lower noise but its noise level varies with the signal. These are original quantizers, not a proprietary IDR emulation. Floating-point and lossy output disable dither. Queue jobs retain their selected mode, including secondary integer outputs. The limiter does not add a second dither stage. Near full scale, integer saturation can clip the dither; allow output headroom when this matters.
 
@@ -2317,6 +2425,39 @@ Export all MIDI data in the project:
 
 - Go to **File > Export Project MIDI...**
 - A standard MIDI file is created containing all MIDI clips.
+
+In the development checkout, project export writes the current project tempo,
+time signature and tempo changes with the events. Clip context-menu **Export This
+MIDI Clip...** and external MIDI file dragging export the visible source window,
+including looped content and controller/channel data, starting at file time zero;
+the project's tempo map is rebased to that window. The track's MIDI processing is
+applied once. Source MIDI tempo metadata is retained for detection; exporting uses
+the current project timing rather than silently reverting to that imported tempo.
+Project and context-menu exports use 9,600 ticks per quarter note to retain closely
+spaced controller changes, with standard quarter-note and notation metadata.
+The receiving DAW can still quantize or combine controller events during its own export.
+
+To export several clips into one `.mid` file, Ctrl/Command+click the clips,
+right-click one of the selected MIDI clips and choose **Export Selected MIDI
+Clips (N)...** near the top of the menu. This command is also available by searching
+the Command Palette; it has no default dedicated shortcut. Assign one in
+**Keyboard, Mouse & Trackpad** if desired. Export keeps each source track as a MIDI
+track in that file, retains gaps, and places the earliest selected clip at file
+time zero. Muted clips and muted notes are excluded, matching playback. Audio
+clips in a mixed selection are ignored. The blue time selection does not crop
+this export. The clips, track MIDI effects and tempo map are captured together
+before the save dialog opens. Export does not join or edit the arrangement.
+
+To join MIDI items, select two or more unlocked MIDI clips on one track and choose
+**Join Selected MIDI Clips** from their context menu, or press `Ctrl+J` with the
+OpenStudio Timeline profile active. This produces one finite clip spanning their
+combined range and preserves event timing and gaps. Source loops are materialized
+within the selected items' boundaries. Joining and restoring the original items
+take one Undo step; this joins MIDI data rather than rendering an instrument.
+The menu shows the selected count and explains unavailable joins (mixed media,
+different tracks, locks or a frozen track). Overlapping same-pitch notes retain
+their individual note-off, channel, release velocity and mute identity, including
+after saving and reopening the project.
 
 ### 13.14 Batch File Converter
 
@@ -2706,6 +2847,8 @@ platform keys without this portable notation.
 | Ungroup Selected Clips     | `Ctrl+Shift+G`     |
 | Toggle Clip Mute           | `U`                |
 | Duplicate Selected Clips   | `Ctrl+D` (shared group offset) |
+| Join Selected MIDI Clips   | `Ctrl+J` (OpenStudio Timeline scope; development) |
+| Crossfade Selected Audio Clips | `Shift+X` (OpenStudio Timeline scope; development) |
 | Nudge Left                 | `Left`             |
 | Nudge Right                | `Right`            |
 | Nudge Left (Fine)          | `Ctrl+Left`        |
@@ -2749,7 +2892,7 @@ combination in its own editor scope. `R` is reserved for global Record.
 | Zoom to Time Selection          | `Ctrl+Shift+E`       |
 | Zoom In                         | `+` / `=` / numpad `+` (also `Ctrl++`) |
 | Zoom Out                        | `-` / numpad `-` (also `Ctrl+-`) |
-| Zoom to Fit                     | `Ctrl+0`             |
+| Zoom to Full Project            | `Ctrl+0`             |
 | Save Screenset 1                | `Ctrl+Shift+1`       |
 | Save Screenset 2                | `Ctrl+Shift+2`       |
 | Save Screenset 3                | `Ctrl+Shift+3`       |
@@ -2962,6 +3105,30 @@ microphone permission for every application.
 
 ### 17.11 Render Produces Silence
 
+**Unreleased support companion:** after closing OpenStudio, open
+**OpenStudio Support** from the Windows Start menu, macOS Finder (install both apps
+from the DMG), or Linux application menu/companion AppImage. Collect existing evidence or inspect
+an audio/MIDI export, and use **Open output folder** to review the report. Choose
+**Create reviewed ZIP** to prepare an attachment for support. No Python or terminal
+is needed in packaged builds. Nothing is uploaded automatically.
+Collection includes plugin scan logs and filtered plugin/audio settings. Optional
+fields accept the app executable, an existing OS crash report, and a developer's
+matching symbol archive. Incident debug IDs remain separate from the currently
+installed build; later settings cannot establish conditions at an earlier glitch.
+Ordinary builds omit ARA callback logging and periodic hang monitoring. Crash
+capture and final-Quit protection remain; a running-session freeze does not
+automatically start Support or a timed hang dump.
+Close the support window before reopening the DAW. This adds no work to normal
+recording, playback or exports; the explicitly opened tool uses CPU, RAM and disk.
+Dumps are optional and unredacted. See [Offline support and export inspection](offline-support.md)
+for platform launch instructions, source-tool setup, comparisons and limits. A valid file or
+matching duration alone does not prove that every track was rendered.
+
+Ordinary 0.1.09 candidate builds do not collect callback timing profiles. Timing
+readouts may therefore be unavailable rather than zero. Existing device, plugin
+and recording failure information can still help, but a later support bundle
+cannot reconstruct unmeasured CPU scheduling or RAM pressure at a past glitch.
+
 **Symptoms**: Rendered file is silent or contains only silence.
 
 **Solutions**:
@@ -3140,7 +3307,7 @@ OpenStudio project files (`.osproj`) are saved to the location you choose when s
 
 **Import formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and video audio extraction where FFmpeg is available. The audited executable is bundled on Windows; FFmpeg-backed operations require a system `ffmpeg` on `PATH` on macOS/Linux.
 
-**Export formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and DDP export. MP3/OGG and other FFmpeg conversions require the bundled Windows executable or a system `ffmpeg` on macOS/Linux.
+**Export formats**: WAV, AIFF, FLAC, MP3, OGG Vorbis, MIDI, and DDP export. OGG encoding uses the built-in Vorbis codec. MP3 and final FFmpeg conversions require the bundled Windows executable or a system `ffmpeg` on macOS/Linux.
 
 **Plugin formats**: VST3 is the stable primary path. CLAP and LV2 code paths are present where available. Experimental 32-bit bridging controls are not part of the stable plugin-hosting path.
 
@@ -3212,9 +3379,30 @@ OpenStudio generates `.ospeaks` sidecar files alongside audio files for efficien
 
 ### Sample Rate Handling
 
-- OpenStudio handles sample rate conversion automatically when importing audio files recorded at different rates than the project's device rate.
-- Linear interpolation is used for real-time sample rate conversion during playback.
-- Offline rendering supports the selected target sample rate. The **Resample Quality** selector is currently a UI placeholder and does not yet change the backend conversion algorithm.
+- By default, import keeps each source file at its original sample rate. A 48 kHz file in a
+  44.1 kHz session is read using its own rate and converted during playback; the
+  original file is not rewritten to 44.1 kHz. Changing sample rate alone should
+  preserve duration and pitch, but it does not promise bit-identical samples.
+- Cubic interpolation is used for real-time sample rate conversion during playback.
+- Offline rendering supports the selected target sample rate.
+- **Create [project rate] kHz Project-Rate Copy** in an audio clip's context menu
+  prepares a cached, band-limited 32-bit float WAV at the current project rate.
+  The original file remains available; the clip keeps its position, source offset,
+  musical duration, gain, fades and pitch-original source. A completed source
+  replacement is one Undo step, and Redo reuses the prepared file.
+- Muted clips can also be converted without becoming audible. Unmuting uses the
+  converted file; Undo/Redo restores the selected source while retaining mute.
+  Tempo detection and explicit source audition also work on muted clips without
+  changing the timeline mute state.
+- **File > Project Settings > Audio import sample rate** chooses between keeping
+  source rates and creating high-quality project-rate copies for new imports.
+  Existing projects and new projects default to keeping source files. The import
+  and any prepared copy share one Undo step. Cancelled or unavailable optional
+  conversion imports the original instead and reports that choice.
+- Conversion progress offers Cancel while preparation is running. Once the atomic
+  source replacement begins, it finishes before the progress entry closes. The
+  former inactive Resample Quality dropdown is no longer shown; source-copy
+  conversion and the selected render output rate are separate controls.
 
 ### Audio Thread Safety
 

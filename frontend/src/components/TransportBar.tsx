@@ -145,7 +145,9 @@ export function TransportBar() {
 
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
   const isPaused = useDAWStore((state) => state.transport.isPaused);
-  const isRecording = useDAWStore((state) => state.transport.isRecording);
+  const { isRecording, isPreparingToRecord } = useDAWStore(useShallow(state => ({
+    isRecording: state.transport.isRecording, isPreparingToRecord: state.isPreparingToRecord,
+  })));
   const tempo = useDAWStore((state) => state.transport.tempo);
   const loopEnabled = useDAWStore((state) => state.transport.loopEnabled);
   const recordMode = useDAWStore((state) => state.recordMode);
@@ -217,6 +219,7 @@ export function TransportBar() {
   const hasArmedTracks = tracks.some((track) => track.armed);
 
   const getStatusText = () => {
+    if (isPreparingToRecord) return "Preparing recording";
     if (isRecording) return "Recording";
     if (isPlaying) return "Playing";
     if (isPaused) return "Paused";
@@ -234,6 +237,7 @@ export function TransportBar() {
               "text-neutral-500": !isRecording,
             })}
             aria-live="polite"
+            role="status"
             aria-label={`Transport status: ${getStatusText()}`}
           >
             {isRecording && (
@@ -270,10 +274,10 @@ export function TransportBar() {
             variant="danger"
             size="icon-lg"
             active={isRecording}
-            disabled={!hasArmedTracks && !isRecording}
+            disabled={!hasArmedTracks && !isRecording && !isPreparingToRecord}
             onClick={handleRecord}
-            title={isRecording || hasArmedTracks ? `Record (${shortcuts.record})` : "Arm a track to record"}
-            aria-label={isRecording || hasArmedTracks ? "Record" : "Arm a track to record"}
+            title={isPreparingToRecord ? "Cancel recording preparation" : isRecording || hasArmedTracks ? `Record (${shortcuts.record})` : "Arm a track to record"}
+            aria-label={isPreparingToRecord ? "Cancel recording preparation" : isRecording || hasArmedTracks ? "Record" : "Arm a track to record"}
           >
             <Circle size={16} fill="currentColor" />
           </Button>
@@ -281,7 +285,7 @@ export function TransportBar() {
             variant="success"
             size="icon-lg"
             active={isPlaying && !isRecording}
-            disabled={isPlaying && !isPaused}
+            disabled={isPreparingToRecord || (isPlaying && !isPaused)}
             onClick={handlePlay}
             title={`Play (${shortcuts.play})`}
             aria-label="Play"
@@ -291,7 +295,7 @@ export function TransportBar() {
           <Button
             variant="default"
             size="icon-lg"
-            disabled={!isPlaying && !isPaused}
+            disabled={!isPlaying && !isPaused && !isPreparingToRecord}
             onClick={handleStop}
             title={`Stop (${shortcuts.play})`}
             aria-label="Stop"

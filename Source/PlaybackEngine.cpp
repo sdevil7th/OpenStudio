@@ -5,6 +5,43 @@
 
 namespace
 {
+double snapNearWholeSample(double position) noexcept
+{
+    const double whole = std::round(position);
+    return std::abs(position - whole) < 1.0e-6 ? whole : position;
+}
+
+int boundedSampleBoundary(double position, int blockSamples) noexcept
+{
+    // Most long clips cover the whole eight-frame callback. Their boundaries
+    // need no rounding; preserve near-edge snapping for the interior cases.
+    if (position <= 0.0)
+        return 0;
+    if (position >= static_cast<double>(blockSamples))
+        return blockSamples;
+    return static_cast<int>(juce::jlimit(0.0, static_cast<double>(blockSamples),
+        std::ceil(snapNearWholeSample(position))));
+}
+
+#if defined(_MSC_VER)
+ #define OPENSTUDIO_BOUNDARY_BENCH_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+ #define OPENSTUDIO_BOUNDARY_BENCH_NOINLINE __attribute__((noinline))
+#else
+ #define OPENSTUDIO_BOUNDARY_BENCH_NOINLINE
+#endif
+OPENSTUDIO_BOUNDARY_BENCH_NOINLINE int referenceSampleBoundary(double position, int blockSamples) noexcept
+{
+    return static_cast<int>(juce::jlimit(0.0, static_cast<double>(blockSamples),
+        std::ceil(snapNearWholeSample(position))));
+}
+
+OPENSTUDIO_BOUNDARY_BENCH_NOINLINE int measuredSampleBoundary(double position, int blockSamples) noexcept
+{
+    return boundedSampleBoundary(position, blockSamples);
+}
+#undef OPENSTUDIO_BOUNDARY_BENCH_NOINLINE
+
 constexpr unsigned int kPitchRouteScrubPreview = 1u << 0;
 constexpr unsigned int kPitchRouteClipLivePreview = 1u << 1;
 constexpr unsigned int kPitchRouteRenderedSegment = 1u << 2;
@@ -173,6 +210,82 @@ static float sampleBufferCubic (const juce::AudioBuffer<float>& buffer,
 }
 }
 
+juce::var PlaybackEngine::runSampleBoundaryRegression()
+{
+    bool exact = true;
+    int cases = 0;
+    const auto compare = [&](double position, int size)
+    {
+        exact = boundedSampleBoundary(position, size) == referenceSampleBoundary(position, size) && exact;
+        ++cases;
+    };
+    juce::Random random(0x5a6d8f12);
+    for (const int size : { 1, 8, 16, 32, 512, 65536 })
+    {
+        for (const double position : { -1.0e300, -1.0e12, -8.0, 0.0, 1.0e12, 1.0e300 })
+            compare(position, size);
+        for (const double edge : { -1.0, 0.0, 1.0, static_cast<double>(size - 1), static_cast<double>(size), static_cast<double>(size + 1) })
+        {
+            compare(std::nextafter(edge, -std::numeric_limits<double>::infinity()), size);
+            compare(std::nextafter(edge, std::numeric_limits<double>::infinity()), size);
+            for (const double delta : { -1.000001e-6, -1.0e-6, -0.999999e-6, -1.0e-12,
+                                        0.0, 1.0e-12, 0.999999e-6, 1.0e-6, 1.000001e-6 })
+                compare(edge + delta, size);
+        }
+        for (int iteration = 0; iteration < 4096; ++iteration)
+            compare((random.nextDouble() * 4.0 - 1.5) * size, size);
+    }
+
+    // Runtime input and non-inlined wrappers keep both implementations' work
+    // observable. Alternate order to avoid consistently favouring a warm path.
+    std::array<double, 4096> positions {};
+    for (size_t index = 0; index < positions.size(); ++index)
+    {
+        const double time = random.nextDouble() * 187.0;
+        positions[index] = (index & 1u) == 0 ? -time * 48000.0 : (410.0 - time) * 48000.0;
+    }
+    std::vector<double> referenceTimes, measuredTimes;
+    juce::uint64 referenceChecksum = 0, measuredChecksum = 0;
+    constexpr int batches = 32, repeats = 8;
+    constexpr int operationsPerBatch = 4096 * repeats;
+    const double toNanoseconds = 1.0e9 / static_cast<double>(juce::Time::getHighResolutionTicksPerSecond());
+    const auto measure = [&](bool reference)
+    {
+        juce::uint64 checksum = 0;
+        const auto start = juce::Time::getHighResolutionTicks();
+        for (int repeat = 0; repeat < repeats; ++repeat)
+            for (const double position : positions)
+                checksum += static_cast<juce::uint64>(reference
+                    ? referenceSampleBoundary(position, 8) : measuredSampleBoundary(position, 8));
+        const double elapsed = static_cast<double>(juce::Time::getHighResolutionTicks() - start)
+            * toNanoseconds / operationsPerBatch;
+        if (reference) { referenceTimes.push_back(elapsed); referenceChecksum += checksum; }
+        else { measuredTimes.push_back(elapsed); measuredChecksum += checksum; }
+    };
+    for (int batch = 0; batch < batches; ++batch)
+        if ((batch & 1) == 0) { measure(true); measure(false); }
+        else { measure(false); measure(true); }
+    const auto statistics = [](std::vector<double> values)
+    {
+        std::sort(values.begin(), values.end());
+        auto* result = new juce::DynamicObject();
+        result->setProperty("medianNanosecondsPerBoundary", values[values.size() / 2]);
+        result->setProperty("p95NanosecondsPerBoundary", values[static_cast<size_t>(0.95 * static_cast<double>(values.size() - 1))]);
+        return juce::var(result);
+    };
+    auto* result = new juce::DynamicObject();
+    result->setProperty("exactFiniteParity", exact);
+    result->setProperty("finiteCases", cases);
+    result->setProperty("benchmarkClassification", "diagnostic_only: isolated outside-block boundary cost; no hardware timing or audible-quality claim");
+    result->setProperty("operationsPerVariant", batches * operationsPerBatch);
+    result->setProperty("matchingNonzeroChecksums", referenceChecksum != 0 && referenceChecksum == measuredChecksum);
+    result->setProperty("referenceChecksum", static_cast<juce::int64>(referenceChecksum));
+    result->setProperty("candidateChecksum", static_cast<juce::int64>(measuredChecksum));
+    result->setProperty("reference", statistics(std::move(referenceTimes)));
+    result->setProperty("earlyClamp", statistics(std::move(measuredTimes)));
+    return juce::var(result);
+}
+
 float PlaybackEngine::applyFadeCurve(float t, int curveType)
 {
     // t is normalized 0.0 to 1.0
@@ -309,12 +422,8 @@ void PlaybackEngine::StreamingContinuityState::advanceFrame(
 
 PlaybackEngine::StreamingContinuityState&
 PlaybackEngine::getTrackPlaybackContinuityState(
-    const juce::String& trackId) noexcept
+    juce::int64 trackKey) noexcept
 {
-    juce::int64 trackKey = trackId.hashCode64();
-    if (trackKey == 0)
-        trackKey = 1;
-
     ++trackPlaybackContinuityUseCounter;
     if (trackPlaybackContinuityUseCounter == 0)
         trackPlaybackContinuityUseCounter = 1;
@@ -523,7 +632,7 @@ PlaybackEngine::runOuterLockContinuityRegression()
     PlaybackEngine probe;
     auto& continuity =
         probe.getTrackPlaybackContinuityState(
-            trackId);
+            prepareTrackContinuityKey(trackId));
     continuity.reset(1);
     continuity.beginBlock(true, false, 1);
     for (int sample = 0;
@@ -631,6 +740,14 @@ PlaybackEngine::~PlaybackEngine()
     fullyDecodedBytesInUse = 0;
     refreshFullyDecodedSourceDiagnosticsLocked();
     clips.clear();
+    clipIndicesByTrack.clear();
+}
+
+void PlaybackEngine::rebuildClipIndicesLocked()
+{
+    clipIndicesByTrack.clear();
+    for (size_t index = 0; index < clips.size(); ++index)
+        clipIndicesByTrack[clips[index].trackId].push_back(index);
 }
 
 void PlaybackEngine::refreshStreamingReaderDiagnosticsLocked() noexcept
@@ -705,6 +822,22 @@ void PlaybackEngine::preloadReader(const juce::File& file,
     // publication lock. The callback can keep the previously published state.
     const auto filePath = file.getFullPathName();
     const auto cacheKey = readerKey.isNotEmpty() ? readerKey : filePath;
+    if (offlineSourceReads)
+    {
+        // This engine belongs exclusively to the export worker. Do not decode
+        // whole files or run export ahead of a realtime read-ahead thread.
+        if (offlineReaders.find(cacheKey) != offlineReaders.end()) return;
+        std::unique_ptr<juce::AudioFormatReader> source(formatManager.createReaderFor(file));
+        if (source == nullptr)
+        {
+            offlineSourceReadFailure.store(true);
+            return;
+        }
+        offlineReaders.emplace(cacheKey,
+            std::make_unique<StereoStreamingSourceReader>(std::move(source)));
+        invalidatePreparedSources();
+        return;
+    }
     std::shared_ptr<juce::BufferingAudioReader> existingReader;
     {
         const juce::ScopedLock sl(lock);
@@ -806,6 +939,7 @@ void PlaybackEngine::preloadReader(const juce::File& file,
                     fullyDecodedSources.emplace(
                         cacheKey,
                         std::move(decodedSource));
+                    invalidatePreparedSources();
                     fullyDecodedSourceAccessTimes[cacheKey] =
                         juce::Time::currentTimeMillis();
                     refreshFullyDecodedSourceDiagnosticsLocked();
@@ -850,13 +984,18 @@ void PlaybackEngine::preloadReader(const juce::File& file,
     bufferedReader->setReadTimeout(0);
     primeStreamingReader(*bufferedReader, initialOffsetSeconds, maxWaitMilliseconds);
 
+    StreamingContinuityState preparedContinuity;
+    preparedContinuity.readWindow = std::make_unique<RealtimeSourceReadWindow>(
+        static_cast<int>(bufferedReader->numChannels), &streamingWindowCounters);
+
     std::shared_ptr<juce::BufferingAudioReader> concurrentlyPublishedReader;
     {
         const juce::ScopedLock sl(lock);
         auto [it, inserted] = readers.emplace(cacheKey, bufferedReader);
         if (!inserted && it->second != nullptr)
             concurrentlyPublishedReader = it->second;
-        streamingContinuityStates.try_emplace(cacheKey);
+        streamingContinuityStates.try_emplace(cacheKey, std::move(preparedContinuity));
+        invalidatePreparedSources();
         readerAccessTimes[cacheKey] = juce::Time::currentTimeMillis();
         evictOldReaders(cacheKey);
     }
@@ -924,8 +1063,13 @@ void PlaybackEngine::requestReadAheadAtTime(double timelineTimeSeconds)
         primeStreamingReader(*request.reader, request.offsetSeconds, 0);
 }
 
-juce::BufferingAudioReader* PlaybackEngine::getCachedReader(const juce::String& readerKey)
+juce::AudioFormatReader* PlaybackEngine::getCachedReader(const juce::String& readerKey)
 {
+    if (offlineSourceReads)
+    {
+        const auto reader = offlineReaders.find(readerKey);
+        return reader != offlineReaders.end() ? reader->second.get() : nullptr;
+    }
     auto it = readers.find(readerKey);
     if (it != readers.end() && it->second != nullptr)
         return it->second.get();
@@ -943,6 +1087,26 @@ PlaybackEngine::getFullyDecodedSource(
         return it->second.get();
     }
     return nullptr;
+}
+
+const PlaybackEngine::PreparedSourceBinding& PlaybackEngine::resolvePreparedSource(
+    const juce::String& readerKey, PreparedSourceBinding& binding)
+{
+    if (binding.generation == sourceBindingGeneration)
+        return binding;
+
+    sourceBindingResolutionCount.fetch_add(1, std::memory_order_relaxed);
+    binding.decoded = getFullyDecodedSource(readerKey);
+    binding.reader = binding.decoded == nullptr ? getCachedReader(readerKey) : nullptr;
+    binding.continuity = nullptr;
+    if (binding.reader != nullptr)
+    {
+        const auto state = streamingContinuityStates.find(readerKey);
+        if (state != streamingContinuityStates.end())
+            binding.continuity = &state->second;
+    }
+    binding.generation = sourceBindingGeneration;
+    return binding;
 }
 
 bool PlaybackEngine::evictFullyDecodedSourcesToFitLocked(
@@ -1039,6 +1203,7 @@ bool PlaybackEngine::evictFullyDecodedSourcesToFitLocked(
         retiredSources.push_back(
             std::move(source->second));
         fullyDecodedSources.erase(source);
+        invalidatePreparedSources();
         fullyDecodedSourceAccessTimes.erase(key);
         ++evicted;
     }
@@ -1103,6 +1268,7 @@ void PlaybackEngine::evictOldReaders(const juce::String& protectedKey)
         const auto& path = entries[i].second;
         readers.erase(path);
         streamingContinuityStates.erase(path);
+        invalidatePreparedSources();
         readerAccessTimes.erase(path);
     }
 
@@ -1127,7 +1293,7 @@ void PlaybackEngine::evictOldReaders(const juce::String& protectedKey)
 
 float PlaybackEngine::interpolateGainEnvelope(const std::vector<GainEnvelopePoint>& points, double time)
 {
-    if (points.empty())
+    if (points.empty() || !std::isfinite(time))
         return 1.0f;
 
     // Before first point
@@ -1138,36 +1304,36 @@ float PlaybackEngine::interpolateGainEnvelope(const std::vector<GainEnvelopePoin
     if (time >= points.back().time)
         return points.back().gain;
 
-    // Find surrounding points and interpolate linearly
-    for (size_t i = 0; i + 1 < points.size(); ++i)
-    {
-        if (time >= points[i].time && time < points[i + 1].time)
-        {
-            double t = (time - points[i].time) / (points[i + 1].time - points[i].time);
-            return points[i].gain + static_cast<float>(t) * (points[i + 1].gain - points[i].gain);
-        }
-    }
-
-    return 1.0f;
+    const auto next = std::upper_bound(points.begin(), points.end(), time,
+        [](double value, const GainEnvelopePoint& point) { return value < point.time; });
+    const auto& before = *std::prev(next);
+    const double amount = (time - before.time) / (next->time - before.time);
+    return before.gain + static_cast<float>(amount) * (next->gain - before.gain);
 }
 
 void PlaybackEngine::setClipGainEnvelope(const juce::String& trackId, const juce::String& clipId,
                                           const std::vector<GainEnvelopePoint>& points)
 {
-    juce::ScopedLock sl(lock);
-    juce::String key = trackId + "::" + clipId;
-    if (points.empty())
+    auto sorted = points;
+    sorted.erase(std::remove_if(sorted.begin(), sorted.end(), [](const auto& point) {
+        return !std::isfinite(point.time) || !std::isfinite(point.gain);
+    }), sorted.end());
+    std::stable_sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
+    const juce::ScopedLock sl(lock);
+    const juce::String key = trackId + "::" + clipId;
+    if (sorted.empty())
         gainEnvelopes.erase(key);
     else
-        gainEnvelopes[key] = points;
+        gainEnvelopes[key] = std::move(sorted);
 }
 
 void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, double duration, const juce::String& trackId,
                               double offset, double volumeDB, double fadeIn, double fadeOut, const juce::String& clipId,
-                              const juce::File& sourceAudioFile, double sourceOffset)
+                              const juce::File& sourceAudioFile, double sourceOffset, int fadeInCurve, int fadeOutCurve)
 {
     if (!audioFile.existsAsFile())
     {
+        if (offlineSourceReads) offlineSourceReadFailure.store(true);
         juce::Logger::writeToLog("PlaybackEngine: Cannot add clip - file does not exist: " + audioFile.getFullPathName());
         return;
     }
@@ -1221,7 +1387,8 @@ void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, doub
                           segment.fileOffsetSec);
     }
 
-    ClipInfo clip(effectiveFile, startTime, duration, trackId, effectiveOffset, volumeDB, fadeIn, fadeOut);
+    ClipInfo clip(effectiveFile, startTime, duration, trackId, effectiveOffset, volumeDB, fadeIn, fadeOut,
+                  juce::jlimit(0, 4, fadeInCurve), juce::jlimit(0, 4, fadeOutCurve));
     clip.clipId = clipId;
     clip.envelopeKey = trackId + "::" + clipId;  // Pre-compute to avoid string alloc on audio thread
     clip.readerKey = clipReaderKey;
@@ -1230,7 +1397,9 @@ void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, doub
     int totalClipCount = 0;
     {
         const juce::ScopedLock sl(lock);
+        clip.publicationSerial = ++nextClipPublicationSerial;
         clips.push_back(clip);
+        clipIndicesByTrack[trackId].push_back(clips.size() - 1);
         totalClipCount = static_cast<int>(clips.size());
     }
 
@@ -1250,6 +1419,51 @@ void PlaybackEngine::addClip(const juce::File& audioFile, double startTime, doub
     juce::ignoreUnused(totalClipCount); // The diagnostic macro is disabled in Release.
 }
 
+bool PlaybackEngine::replaceClipSourcePreservingTimeline(const juce::String& trackId, const juce::String& clipId,
+    const juce::File& expectedFile, const juce::File& replacement, const juce::File& immutableSource,
+    double immutableOffset, const std::function<bool()>& keepRunning,
+    const std::function<std::shared_ptr<void>()>& publicationLeaseFactory)
+{
+    const auto active = [&] { return !keepRunning || keepRunning(); };
+    if (!active() || !replacement.existsAsFile() || !immutableSource.existsAsFile()) return false;
+    juce::uint64 serial = 0; double offset = 0.0;
+    {
+        const juce::ScopedLock sl(lock);
+        for (const auto& clip : clips)
+            if (clip.trackId == trackId && clip.clipId == clipId && clip.audioFile == expectedFile)
+            { serial = clip.publicationSerial; offset = clip.offset; break; }
+    }
+    if (serial == 0) return false;
+    const auto readerKey = "clip|" + clipId + "|" + replacement.getFullPathName();
+    preloadReader(replacement, readerKey, offset);
+    std::shared_ptr<juce::BufferingAudioReader> preparedReader;
+    {
+        const juce::ScopedLock sl(lock);
+        const auto reader = readers.find(readerKey);
+        if (reader != readers.end()) preparedReader = reader->second;
+        if (getFullyDecodedSource(readerKey) == nullptr && getCachedReader(readerKey) == nullptr) return false;
+    }
+    if (preparedReader != nullptr && !primeStreamingReader(*preparedReader, offset, 250)) return false;
+    if (!active()) return false;
+    const auto publicationLease = publicationLeaseFactory ? publicationLeaseFactory() : std::shared_ptr<void>();
+    if (publicationLeaseFactory && publicationLease == nullptr) return false;
+    const juce::ScopedLock sl(lock);
+    for (auto& clip : clips)
+    {
+        if (clip.trackId != trackId || clip.clipId != clipId || clip.audioFile != expectedFile || clip.publicationSerial != serial) continue;
+        // A source representation change retains all musical geometry and gain.
+        clip.audioFile = replacement; clip.readerKey = readerKey;
+        clip.preparedSource = {};
+        clip.originalAudioFile = immutableSource; clip.originalOffset = immutableOffset;
+        clip.publicationSerial = ++nextClipPublicationSerial;
+        clearAllPitchPreviewRoutes(clipId);
+        pitchCorrectedFiles.erase(clipId);
+        deferredClipSwaps.erase(clipId);
+        return true;
+    }
+    return false;
+}
+
 void PlaybackEngine::removeClip(const juce::String& trackId, const juce::String& filePath)
 {
     juce::ScopedLock sl(lock);
@@ -1262,6 +1476,7 @@ void PlaybackEngine::removeClip(const juce::String& trackId, const juce::String&
             }),
         clips.end()
     );
+    rebuildClipIndicesLocked();
     
     juce::Logger::writeToLog("PlaybackEngine: Removed clip from track " + trackId);
 }
@@ -1277,6 +1492,7 @@ void PlaybackEngine::removeClipById(const juce::String& trackId, const juce::Str
             }),
         clips.end()
     );
+    rebuildClipIndicesLocked();
     gainEnvelopes.erase(trackId + "::" + clipId);
 
     juce::Logger::writeToLog("PlaybackEngine: Removed clip " + clipId + " from track " + trackId);
@@ -1304,6 +1520,8 @@ void PlaybackEngine::replaceClipAudioFile(const juce::String& clipId, const juce
             clip.audioFile = newFile;
             clip.offset = restoringOriginal ? clip.originalOffset : 0.0;
             clip.readerKey = newReaderKey;
+            clip.preparedSource = {};
+            clip.publicationSerial = ++nextClipPublicationSerial;
             // Clear any active pitch preview — the corrected audio is now baked
             // into the file, so the real-time PitchShifter must not double-shift.
             clipPitchPreviews.erase(clipId);
@@ -1433,7 +1651,10 @@ bool PlaybackEngine::setClipRenderedPreviewSegment(const juce::String& clipId,
             return sameWindow || overlaps;
         }),
         segments.end());
-    segments.push_back({ audioFile, startSec, endSec, fileOffsetSec, segmentReaderKey });
+    segments.push_back({ audioFile, startSec, endSec, fileOffsetSec, segmentReaderKey, {} });
+    // Publication owns the same lock as fillTrackBuffer. Prepare scratch capacity
+    // here, never while the audio callback traverses a large edited segment set.
+    reusableChunkBoundaries.reserve(juce::jmax(reusableChunkBoundaries.capacity(), segments.size() * 2 + 2));
     std::sort(segments.begin(), segments.end(), [] (const RenderedPreviewSegment& a, const RenderedPreviewSegment& b) {
         return a.startSec < b.startSec;
     });
@@ -1648,7 +1869,11 @@ void PlaybackEngine::clearAllClips()
     const int preservedCorrectedCount = static_cast<int>(pitchCorrectedFiles.size());
 #endif
     clips.clear();
+    clipIndicesByTrack.clear();
+    invalidatePreparedSources();
     readers.clear();
+    offlineReaders.clear();
+    offlineSourceReadFailure.store(false);
     streamingContinuityStates.clear();
     readerAccessTimes.clear();
     refreshStreamingReaderDiagnosticsLocked();
@@ -1681,6 +1906,7 @@ void PlaybackEngine::clearTrackClips(const juce::String& trackId)
             }),
         clips.end()
     );
+    rebuildClipIndicesLocked();
 
     lagrangeInterpolatorL.reset();
     lagrangeInterpolatorR.reset();
@@ -1702,7 +1928,31 @@ int PlaybackEngine::getNumClipsForTrack(const juce::String& trackId) const
 std::vector<PlaybackEngine::ClipInfo> PlaybackEngine::getClipSnapshot() const
 {
     juce::ScopedLock sl(lock);
-    return clips;
+    auto snapshot = clips;
+    for (auto& clip : snapshot)
+    {
+        const auto envelope = gainEnvelopes.find(clip.envelopeKey);
+        if (envelope != gainEnvelopes.end()) clip.gainEnvelope = envelope->second;
+    }
+    return snapshot;
+}
+
+void PlaybackEngine::addClipFromSnapshot(const ClipInfo& snapshot)
+{
+    addClip(snapshot.audioFile, snapshot.startTime, snapshot.duration,
+            snapshot.trackId, snapshot.offset, snapshot.volumeDB,
+            snapshot.fadeIn, snapshot.fadeOut, snapshot.clipId,
+            snapshot.originalAudioFile, snapshot.originalOffset);
+    const juce::ScopedLock sl(lock);
+    for (auto& clip : clips)
+    {
+        if (clip.trackId != snapshot.trackId || clip.clipId != snapshot.clipId) continue;
+        clip.fadeInCurve = snapshot.fadeInCurve;
+        clip.fadeOutCurve = snapshot.fadeOutCurve;
+        clip.isActive = snapshot.isActive;
+        if (!snapshot.gainEnvelope.empty()) gainEnvelopes[clip.envelopeKey] = snapshot.gainEnvelope;
+        break;
+    }
 }
 
 // ---- Pitch preview methods ----
@@ -1745,6 +1995,7 @@ void PlaybackEngine::setClipPitchPreview (const juce::String& clipId,
                     + " to original file for preview");
             }
             clip.readerKey = desiredReaderKey;
+            clip.preparedSource = {};
             originalFileToPreload = clip.originalAudioFile;
             originalReaderKey = desiredReaderKey;
             originalOffsetToPreload = clip.originalOffset;
@@ -2124,7 +2375,9 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                                      juce::AudioBuffer<float>& buffer,
                                      double currentTime,
                                      int numSamples,
-                                     double sampleRate)
+                                     double sampleRate,
+                                     bool foldStereoSourceToMono,
+                                     juce::int64 preparedContinuityKey)
 {
     if (numSamples <= 0
         || sampleRate <= 0.0
@@ -2139,7 +2392,8 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             reusableTrackPlaybackBuffer
                 .getNumChannels());
     auto& trackContinuity =
-        getTrackPlaybackContinuityState(trackId);
+        getTrackPlaybackContinuityState(preparedContinuityKey != 0
+            ? preparedContinuityKey : prepareTrackContinuityKey(trackId));
     const double continuityTolerance =
         2.0 / sampleRate;
     const bool timelineContiguous =
@@ -2226,6 +2480,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         0, numSamples);
     auto& playbackMix =
         reusableTrackPlaybackBuffer;
+    auto* const* mixChannels = playbackMix.getArrayOfWritePointers();
 
     int overlappingClipCount = 0;
     int mixedClipCount = 0;
@@ -2235,10 +2490,14 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
 
     double windowEnd = currentTime + (numSamples / sampleRate);
 
-    // Find and mix all clips that should be playing at current time
-    for (const auto& clip : clips)
+    // Only the control thread rebuilds this index. The try-lock above protects
+    // both the indices and the vector throughout this callback's use.
+    const auto trackClips = clipIndicesByTrack.find(trackId);
+    if (trackClips != clipIndicesByTrack.end())
+    for (const auto clipIndex : trackClips->second)
     {
-        if (clip.trackId != trackId || !clip.isActive)
+        const auto& clip = clips[clipIndex];
+        if (!clip.isActive)
             continue;
 
         double clipEndTime = clip.startTime + clip.duration;
@@ -2249,10 +2508,9 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         ++overlappingClipCount;
 
         {
-        const int clipOutputStart = juce::jlimit (0, numSamples,
-            static_cast<int> (std::ceil ((clip.startTime - currentTime) * sampleRate - 1.0e-9)));
+        const int clipOutputStart = boundedSampleBoundary((clip.startTime - currentTime) * sampleRate, numSamples);
         const int clipOutputEnd = juce::jlimit (clipOutputStart, numSamples,
-            static_cast<int> (std::ceil ((clipEndTime - currentTime) * sampleRate - 1.0e-9)));
+            boundedSampleBoundary((clipEndTime - currentTime) * sampleRate, numSamples));
         if (clipOutputEnd <= clipOutputStart)
             continue;
 
@@ -2269,8 +2527,9 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         const auto requiredBoundaryCapacity = renderedSegmentsForClip != nullptr ? renderedSegmentsForClip->size() * 2 + 2 : 2;
         if (chunkBoundaries.capacity() < requiredBoundaryCapacity)
         {
-            chunkBoundaries.reserve (requiredBoundaryCapacity);
+            jassertfalse; // Every segment publication must prepare this capacity.
             chunkBoundaryReserveCount.fetch_add (1, std::memory_order_relaxed);
+            continue;
         }
         chunkBoundaries.push_back (clipOutputStart);
         chunkBoundaries.push_back (clipOutputEnd);
@@ -2279,9 +2538,9 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             for (const auto& segment : *renderedSegmentsForClip)
             {
                 const int segmentStart = juce::jlimit (clipOutputStart, clipOutputEnd,
-                    static_cast<int> (std::ceil ((clip.startTime + segment.startSec - currentTime) * sampleRate - 1.0e-9)));
+                    boundedSampleBoundary((clip.startTime + segment.startSec - currentTime) * sampleRate, numSamples));
                 const int segmentEnd = juce::jlimit (clipOutputStart, clipOutputEnd,
-                    static_cast<int> (std::ceil ((clip.startTime + segment.endSec - currentTime) * sampleRate - 1.0e-9)));
+                    boundedSampleBoundary((clip.startTime + segment.endSec - currentTime) * sampleRate, numSamples));
                 if (segmentStart > clipOutputStart && segmentStart < clipOutputEnd)
                     chunkBoundaries.push_back (segmentStart);
                 if (segmentEnd > clipOutputStart && segmentEnd < clipOutputEnd)
@@ -2291,7 +2550,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         std::sort (chunkBoundaries.begin(), chunkBoundaries.end());
         chunkBoundaries.erase (std::unique (chunkBoundaries.begin(), chunkBoundaries.end()), chunkBoundaries.end());
 
-        const float clipGain = juce::Decibels::decibelsToGain (static_cast<float> (clip.volumeDB));
+        const float clipGain = clip.linearGain;
         const std::vector<GainEnvelopePoint>* envPoints = nullptr;
         if (clip.clipId.isNotEmpty())
         {
@@ -2303,6 +2562,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         auto mixChunk = [&] (int outputStart, int requestedOutputSamples,
                             const juce::File& playbackFile,
                             const juce::String& readerKey,
+                            PreparedSourceBinding& preparedSource,
                             double playbackOffset,
                             bool usingRenderedPreviewSegment, bool usingCorrectedSource)
         {
@@ -2310,28 +2570,14 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             if (requestedOutputSamples <= 0)
                 return false;
 
-            const auto* decodedSource =
-                getFullyDecodedSource(readerKey);
-            auto* reader = decodedSource == nullptr
-                ? getCachedReader(readerKey)
-                : nullptr;
-            StreamingContinuityState*
-                streamingContinuity = nullptr;
-            if (reader != nullptr)
-            {
-                auto continuity =
-                    streamingContinuityStates.find(
-                        readerKey);
-                if (continuity
-                    != streamingContinuityStates.end())
-                {
-                    streamingContinuity =
-                        &continuity->second;
-                }
-            }
+            const auto& source = resolvePreparedSource(readerKey, preparedSource);
+            const auto* decodedSource = source.decoded;
+            auto* reader = source.reader;
+            auto* streamingContinuity = source.continuity;
             if (decodedSource == nullptr
                 && reader == nullptr)
             {
+                if (offlineSourceReads) offlineSourceReadFailure.store(true);
                 const int missingReaders = missingReaderCount.fetch_add (1, std::memory_order_relaxed) + 1;
                 OPENSTUDIO_LOG_AUDIO_PLAYBACK("fillTrackBuffer missingStreamingReader track=" + trackId
                     + " clipId=" + clip.clipId
@@ -2347,10 +2593,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                     ? decodedSource->sampleRate
                     : reader->sampleRate;
             const double ratio = fileSampleRate / sampleRate;
-            double exactFileStart = juce::jmax (0.0, playbackOffset) * fileSampleRate;
-            const double roundedFileStart = std::round (exactFileStart);
-            if (std::abs (exactFileStart - roundedFileStart) < 1.0e-6)
-                exactFileStart = roundedFileStart;
+            const double exactFileStart = snapNearWholeSample(juce::jmax (0.0, playbackOffset) * fileSampleRate);
 
             const juce::int64 fileStartSample = static_cast<juce::int64> (std::floor (exactFileStart));
             const juce::int64 readStartSample = fileStartSample > 0 ? fileStartSample - 1 : fileStartSample;
@@ -2369,8 +2612,13 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             if (fileSamplesAvailable < fileSamplesToRead)
             {
                 fileSamplesToRead = static_cast<int> (fileSamplesAvailable);
-                outputSamples = static_cast<int> (std::floor (
-                    (static_cast<double> (fileSamplesToRead - 1) - bufferStartPosition) / ratio));
+                // Source length is an exclusive frame boundary, not the last
+                // sample index. Cubic interpolation clamps its endpoint taps;
+                // keep every output whose source position is before EOF.
+                const double availableOutputSamples = std::ceil(
+                    snapNearWholeSample((static_cast<double>(fileSamplesToRead) - bufferStartPosition) / ratio));
+                outputSamples = static_cast<int>(juce::jlimit(0.0,
+                    static_cast<double>(requestedOutputSamples), availableOutputSamples));
             }
             if (outputSamples <= 0 || fileSamplesToRead <= 0)
                 return false;
@@ -2407,13 +2655,9 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             }
             else
             {
-                allReadAheadReady = reader->read(
-                    &reusableFileBuffer,
-                    0,
-                    fileSamplesToRead,
-                    readStartSample,
-                    true,
-                    true);
+                allReadAheadReady = streamingContinuity != nullptr && streamingContinuity->readWindow
+                    ? streamingContinuity->readWindow->read(*reader, reusableFileBuffer, fileSamplesToRead, readStartSample)
+                    : reader->read(&reusableFileBuffer, 0, fileSamplesToRead, readStartSample, true, true);
             }
             const double outputTimelineStart =
                 currentTime
@@ -2446,6 +2690,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             }
             if (! allReadAheadReady)
             {
+                if (offlineSourceReads) offlineSourceReadFailure.store(true);
                 audioDataCacheMissCount.fetch_add(1, std::memory_order_relaxed);
                 streamingContinuityConcealmentCount
                     .fetch_add(
@@ -2529,14 +2774,28 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
 
             const int outChannels =
                 playbackOutputChannels;
-            const bool expandMonoSourceToStereo =
-                readerChannels == 1 && outChannels >= 2;
-            const int channelsToProcess = expandMonoSourceToStereo
+            const bool mixMonoSource = readerChannels == 1
+                || (readerChannels > 1 && (foldStereoSourceToMono || outChannels == 1));
+            const int channelsToProcess = mixMonoSource
                 ? outChannels
                 : std::min (outChannels, readerChannels);
+            // At the device rate an integer source cursor needs no cubic
+            // interpolation. Keep the fractional/rate-conversion path exactly
+            // as before; fades, envelopes, folding and continuity still run.
+            const bool integerSourceCursor = ratio == 1.0 && fileStartFraction == 0.0;
+            const int integerSourceStart = readStartOffset;
+            const auto* const* sourceChannels = reusableFileBuffer.getArrayOfReadPointers();
+            jassert(!integerSourceCursor || integerSourceStart + outputSamples <= fileSamplesToRead);
+            const auto sourceSampleAt = [&] (int channel, int sample) noexcept
+            {
+                if (!allReadAheadReady) return 0.0f;
+                return integerSourceCursor
+                    ? sourceChannels[channel][integerSourceStart + sample]
+                    : sampleBufferCubic(reusableFileBuffer, channel, fileSamplesToRead,
+                                        bufferStartPosition + sample * ratio);
+            };
             for (int i = 0; i < outputSamples; ++i)
             {
-                const double filePos = bufferStartPosition + i * ratio;
                 const double sampleTimeInClip = chunkClipStart + (i / sampleRate);
                 float fadeGain = 1.0f;
                 if (clip.fadeIn > 0.0 && sampleTimeInClip < clip.fadeIn)
@@ -2547,16 +2806,11 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                 const float envGain = envPoints ? interpolateGainEnvelope (*envPoints, sampleTimeInClip) : 1.0f;
                 const float totalGain = clipGain * fadeGain * envGain;
 
-                if (expandMonoSourceToStereo)
+                if (mixMonoSource)
                 {
-                    const float sourceSample =
-                        allReadAheadReady
-                            ? sampleBufferCubic(
-                                reusableFileBuffer,
-                                0,
-                                fileSamplesToRead,
-                                filePos)
-                            : 0.0f;
+                    float sourceSample = sourceSampleAt(0, i);
+                    if (readerChannels > 1 && allReadAheadReady)
+                        sourceSample = 0.5f * (sourceSample + sourceSampleAt(1, i));
                     const float continuitySample =
                         streamingContinuity != nullptr
                             ? streamingContinuity
@@ -2569,24 +2823,14 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                         continuitySample * totalGain;
                     for (int ch = 0; ch < channelsToProcess; ++ch)
                     {
-                        playbackMix.addSample(
-                            ch,
-                            outputStart + i,
-                            mixedSample);
+                        mixChannels[ch][outputStart + i] += mixedSample;
                     }
                 }
                 else
                 {
                     for (int ch = 0; ch < channelsToProcess; ++ch)
                     {
-                        const float sourceSample =
-                            allReadAheadReady
-                                ? sampleBufferCubic(
-                                    reusableFileBuffer,
-                                    ch,
-                                    fileSamplesToRead,
-                                    filePos)
-                                : 0.0f;
+                        const float sourceSample = sourceSampleAt(ch, i);
                         const float continuitySample =
                             streamingContinuity != nullptr
                                 ? streamingContinuity
@@ -2597,10 +2841,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
                                 : sourceSample;
                         const float mixedSample =
                             continuitySample * totalGain;
-                        playbackMix.addSample(
-                            ch,
-                            outputStart + i,
-                            mixedSample);
+                        mixChannels[ch][outputStart + i] += mixedSample;
                     }
                 }
                 if (streamingContinuity != nullptr)
@@ -2658,7 +2899,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             }
 
             const double chunkClipStart = currentTime + (static_cast<double> (chunkStart) / sampleRate) - clip.startTime;
-            juce::File playbackFile = clip.audioFile;
+            const auto& playbackFile = activeSegment != nullptr ? activeSegment->audioFile : clip.audioFile;
             double playbackOffset = clip.offset + chunkClipStart;
             bool usingRenderedPreviewSegment = false;
             bool usingCorrectedSource = false;
@@ -2666,7 +2907,6 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
 
             if (activeSegment != nullptr)
             {
-                playbackFile = activeSegment->audioFile;
                 playbackOffset = activeSegment->fileOffsetSec + (chunkClipStart - activeSegment->startSec);
                 usingRenderedPreviewSegment = true;
                 readerKey = &activeSegment->readerKey;
@@ -2674,13 +2914,16 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             else if (clip.clipId.isNotEmpty())
             {
                 auto correctedIt = pitchCorrectedFiles.find (clip.clipId);
+                // Existence was validated before source publication. Never
+                // query the filesystem from a realtime callback; the prepared
+                // reader remains authoritative until the source is replaced.
                 usingCorrectedSource = correctedIt != pitchCorrectedFiles.end()
-                    && correctedIt->second.existsAsFile()
                     && playbackFile == correctedIt->second;
             }
 
             mixedAnyChunk = mixChunk (chunkStart, chunkEnd - chunkStart, playbackFile,
-                                      *readerKey, playbackOffset,
+                                      *readerKey, activeSegment != nullptr ? activeSegment->preparedSource : clip.preparedSource,
+                                      playbackOffset,
                                       usingRenderedPreviewSegment, usingCorrectedSource)
                 || mixedAnyChunk;
         }
@@ -2699,6 +2942,7 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
         outerLockContinuityRecoveryCount.fetch_add(
             1, std::memory_order_relaxed);
     }
+    auto* const* outputChannels = buffer.getArrayOfWritePointers();
     for (int sample = 0;
          sample < numSamples;
          ++sample)
@@ -2710,17 +2954,10 @@ void PlaybackEngine::fillTrackBuffer(const juce::String& trackId,
             const float continuousSample =
                 trackContinuity.processSample(
                     channel,
-                    playbackMix.getSample(
-                        channel, sample),
+                    mixChannels[channel][sample],
                     true);
-            playbackMix.setSample(
-                channel,
-                sample,
-                continuousSample);
-            buffer.addSample(
-                channel,
-                sample,
-                continuousSample);
+            mixChannels[channel][sample] = continuousSample;
+            outputChannels[channel][sample] += continuousSample;
         }
         trackContinuity.advanceFrame(true);
     }

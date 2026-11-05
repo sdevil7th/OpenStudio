@@ -26,6 +26,7 @@ export interface MIDINotePair {
 }
 
 export interface MIDINoteClipboardItem {
+  notePairId?: string;
   noteNumber: number;
   channel?: number;
   startTime: number;
@@ -73,8 +74,8 @@ export function clampMIDIVelocity(velocity: number): number {
   return Math.max(1, Math.min(127, Math.round(velocity)));
 }
 
-export function noteIdFor(clipId: string, timestamp: number, note: number): string {
-  return `${clipId}:${timestamp.toFixed(6)}:${note}`;
+export function noteIdFor(clipId: string, timestamp: number, note: number, pairId?: string): string {
+  return `${clipId}${pairId ? `:pair=${encodeURIComponent(pairId)}` : ""}:${timestamp.toFixed(6)}:${note}`;
 }
 
 export function parseNoteIdentity(noteId: string): { timestamp: number; note: number } | null {
@@ -91,6 +92,7 @@ export function noteIdentityMatches(
   timestamp: number,
   note: number,
 ): boolean {
+  if (noteId.includes(":pair=")) return false; // Explicit identities require an exact match.
   const parsed = parseNoteIdentity(noteId);
   return !!parsed && Math.abs(parsed.timestamp - timestamp) < 0.001 && parsed.note === note;
 }
@@ -129,7 +131,7 @@ export function applyNoteMetadataValueToEvents(
   const noteOffTime = pair.startTime + pair.duration;
   return events.map((event) => {
     const sameNote = event.note === pair.noteNumber && (event.channel ?? 1) === noteChannel;
-    if (!sameNote) return event;
+    if (!sameNote || event.notePairId !== pair.noteOff.notePairId) return event;
 
     if (
       type === "noteOffVelocity"
@@ -165,18 +167,86 @@ export function applyNoteMetadataValueToEvents(
 export function parseMIDINotePairs(events: MIDIEvent[] = [], clipId = ""): MIDINotePair[] {
   const pairs: MIDINotePair[] = [];
   const usedNoteOffs = new Set<number>();
+  // Onsets retain source order, even for unsorted/imported clips. Each onset
+  // consumes the earliest compatible release strictly after it, with source
+  // index breaking equal-time ties. Index releases once instead of scanning
+  // every event for every note when a long MIDI clip first enters the viewport.
+  type ReleaseQueue = { indices: number[]; next: number[] };
+  const releases = new Map<string, Map<number | undefined, ReleaseQueue>>();
+  // Explicit pairs must never consume a different note's release. Legacy clips
+  // keep their original earliest-release interpretation within the untagged set.
+  const releaseKey = (event: MIDIEvent) => JSON.stringify([event.note, event.notePairId ?? null]);
+  const indexed = events.every(event => Number.isFinite(event.timestamp)
+    && (event.note === undefined || Number.isFinite(event.note))
+    && (event.channel == null || Number.isFinite(event.channel)));
+  if (indexed) {
+    events.forEach((event, index) => {
+      if (event.type !== "noteOff" || event.note === undefined) return;
+      const key = releaseKey(event);
+      let channels = releases.get(key);
+      if (!channels) releases.set(key, channels = new Map());
+      const channel = event.channel ?? undefined;
+      let queue = channels.get(channel);
+      if (!queue) channels.set(channel, queue = { indices: [], next: [] });
+      queue.indices.push(index);
+    });
+    for (const channels of releases.values()) for (const queue of channels.values()) {
+      queue.indices.sort((a, b) => events[a].timestamp - events[b].timestamp || a - b);
+      queue.next = Array.from({ length: queue.indices.length + 1 }, (_, index) => index);
+    }
+  }
+  const available = (queue: ReleaseQueue, position: number): number => {
+    let next = position;
+    while (queue.next[next] !== next) next = queue.next[next];
+    while (position !== next) {
+      const previous = queue.next[position];
+      queue.next[position] = next;
+      position = previous;
+    }
+    return next;
+  };
 
   for (let onIndex = 0; onIndex < events.length; onIndex += 1) {
     const noteOn = events[onIndex];
     if (noteOn.type !== "noteOn" || noteOn.note === undefined) continue;
 
     let offIndex = -1;
-    for (let index = 0; index < events.length; index += 1) {
+    if (indexed) {
+      const channels = releases.get(releaseKey(noteOn));
+      let selectedQueue: ReleaseQueue | undefined;
+      let selectedPosition = -1;
+      const consider = (queue: ReleaseQueue | undefined) => {
+        if (!queue) return;
+        let low = 0, high = queue.indices.length;
+        while (low < high) {
+          const middle = (low + high) >>> 1;
+          if (events[queue.indices[middle]].timestamp <= noteOn.timestamp) low = middle + 1;
+          else high = middle;
+        }
+        const position = available(queue, low);
+        if (position === queue.indices.length) return;
+        const index = queue.indices[position];
+        if (offIndex < 0 || events[index].timestamp < events[offIndex].timestamp
+          || (events[index].timestamp === events[offIndex].timestamp && index < offIndex)) {
+          offIndex = index; selectedQueue = queue; selectedPosition = position;
+        }
+      };
+      const channel = noteOn.channel ?? undefined;
+      if (channel === undefined) {
+        // Legacy clips without a channel can pair with any channel's release.
+        if (channels) for (const queue of channels.values()) consider(queue);
+      } else {
+        consider(channels?.get(channel));
+        consider(channels?.get(undefined));
+      }
+      if (selectedQueue) selectedQueue.next[selectedPosition] = available(selectedQueue, selectedPosition + 1);
+    } else for (let index = 0; index < events.length; index += 1) {
       const candidate = events[index];
       if (
         usedNoteOffs.has(index) ||
         candidate.type !== "noteOff" ||
         candidate.note !== noteOn.note ||
+        candidate.notePairId !== noteOn.notePairId ||
         (candidate.channel ?? noteOn.channel ?? 1) !== (noteOn.channel ?? candidate.channel ?? 1) ||
         candidate.timestamp <= noteOn.timestamp
       ) {
@@ -189,11 +259,11 @@ export function parseMIDINotePairs(events: MIDIEvent[] = [], clipId = ""): MIDIN
     }
 
     if (offIndex === -1) continue;
-    usedNoteOffs.add(offIndex);
+    if (!indexed) usedNoteOffs.add(offIndex);
 
     const noteOff = events[offIndex];
     pairs.push({
-      id: noteIdFor(clipId, noteOn.timestamp, noteOn.note),
+      id: noteIdFor(clipId, noteOn.timestamp, noteOn.note, noteOn.notePairId),
       onIndex,
       offIndex,
       noteOn,
@@ -255,6 +325,7 @@ export function buildGluedSelectedMIDINotes(
       { ...first.noteOn, timestamp: startTime },
       {
         ...last.noteOff,
+        notePairId: first.noteOn.notePairId,
         timestamp: endTime,
         note: first.noteNumber,
         channel: first.channel ?? 1,
@@ -262,7 +333,7 @@ export function buildGluedSelectedMIDINotes(
         releaseVelocity,
       },
     );
-    nextIds.push(noteIdFor(clipId, startTime, first.noteNumber));
+    nextIds.push(noteIdFor(clipId, startTime, first.noteNumber, first.noteOn.notePairId));
   });
 
   if (additions.length === 0) return null;
@@ -349,7 +420,7 @@ export function rebuildMIDIEventsForNotes(
     };
 
     additions.push(noteOn, noteOff);
-    const nextId = noteIdFor(clipId, nextStart, nextNote);
+    const nextId = noteIdFor(clipId, nextStart, nextNote, pair.noteOn.notePairId);
     nextIds.push(nextId);
     auditionPair ||= {
       ...pair,
@@ -380,6 +451,7 @@ export function clipboardItemsFromPairs(pairs: MIDINotePair[]): MIDINoteClipboar
   if (pairs.length === 0) return [];
   const earliest = Math.min(...pairs.map((pair) => pair.startTime));
   return pairs.map((pair) => ({
+    ...(pair.noteOn.notePairId ? { notePairId: pair.noteOn.notePairId } : {}),
     noteNumber: pair.noteNumber,
     channel: pair.channel,
     startTime: pair.startTime - earliest,
@@ -408,6 +480,7 @@ export function eventsFromClipboardItems(
   const ids: string[] = [];
 
   for (const item of items) {
+    const identity = item.notePairId ? { notePairId: crypto.randomUUID() } : {};
     const start = Math.max(0, Math.min(clipDuration - MIDI_NOTE_MIN_DURATION, pasteTime + item.startTime));
     const duration = Math.max(
       MIDI_NOTE_MIN_DURATION,
@@ -416,6 +489,7 @@ export function eventsFromClipboardItems(
     const note = clampMIDINote(item.noteNumber);
     const velocity = clampMIDIVelocity(item.velocity);
     const noteOff: MIDIEvent = {
+      ...identity,
       timestamp: start + duration,
       type: "noteOff",
       note,
@@ -427,6 +501,7 @@ export function eventsFromClipboardItems(
 
     events.push(
       {
+        ...identity,
         timestamp: start,
         type: "noteOn",
         note,
@@ -444,7 +519,7 @@ export function eventsFromClipboardItems(
       },
       noteOff,
     );
-    ids.push(noteIdFor(clipId, start, note));
+    ids.push(noteIdFor(clipId, start, note, identity.notePairId));
   }
 
   return { events: sortMIDIEvents(events), ids };

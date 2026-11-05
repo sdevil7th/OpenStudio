@@ -18,6 +18,15 @@ import {
 type SetFn = (...args: any[]) => void;
 
 export const uiStateActions = (set: SetFn) => ({
+  setMixerHeight: (height: number, persist = true) => {
+    if (!Number.isFinite(height)) return;
+    const mixerHeight = Math.max(96, Math.min(1200, Math.round(height)));
+    set({ mixerHeight });
+    if (persist) {
+      try { if (typeof localStorage !== "undefined") localStorage.setItem("openstudio_mixerHeight", JSON.stringify(mixerHeight)); }
+      catch { /* An unavailable preference store must not interrupt resizing. */ }
+    }
+  },
   toggleMixer: () => set((state: any) => ({ showMixer: !state.showMixer })),
   toggleMasterTrackInTCP: () => set((state: any) => ({ showMasterTrackInTCP: !state.showMasterTrackInTCP })),
   openSettings: () => set({ showSettings: true }),

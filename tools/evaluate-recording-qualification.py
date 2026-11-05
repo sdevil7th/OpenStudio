@@ -8,7 +8,8 @@ from pathlib import Path
 import wave
 
 COUNTERS = ("recordingWriteLockMissCount", "recordingWriterBufferOverflowCount", "audioDeviceXRunCount",
-            "audioDeviceStopCount", "audioDeviceErrorCount", "audioCallbackArrivalGapCount")
+            "audioDeviceStopCount", "audioDeviceErrorCount", "audioCallbackArrivalGapCount",
+            "audioCallbackDeadlineMissCount")
 
 
 def evaluate(before: dict, after: dict, audio: Path, seconds: float) -> dict:
@@ -19,6 +20,9 @@ def evaluate(before: dict, after: dict, audio: Path, seconds: float) -> dict:
         start, end = before.get(counter), after.get(counter)
         known = all(isinstance(value, (int, float)) and not isinstance(value, bool)
                     and math.isfinite(value) and value >= 0 for value in (start, end))
+        if counter in ("audioCallbackArrivalGapCount", "audioCallbackDeadlineMissCount"):
+            known = known and all(snapshot.get("audioCallbackTimingAvailable") is not False
+                                  for snapshot in (before, after))
         delta = end - start if known else None
         checks.append({"id": counter, "status": "not_asserted" if not known else "pass" if delta == 0 else "fail",
                        "delta": delta, "detail": "unsupported/missing" if not known else "counter reset" if delta < 0 else "measured"})

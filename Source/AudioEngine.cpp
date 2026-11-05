@@ -1,11 +1,27 @@
+#include "MixerGain.h"
+#include "EditingWorkflowRegression.h"
 #include "PluginAutomationDelivery.h"
 #include "OfflinePluginTransport.h"
 #include "OfflineHostedControl.h"
+#include "OfflineVorbisEncoder.h"
 #include "BuiltInAllPassFit.h"
 #include "BuiltInSpectralPhaseFit.h"
 #include "BuiltInInstrumentPreviewBindings.h"
 #include "RuntimeLocation.h"
 #include "AudioEngine.h"
+#include "ClipSourceDescriptor.h"
+#include "AudioXRunTelemetry.h"
+#include "ClipTempoAnalyzer.h"
+#include "AudioFileConversionRegression.h"
+#include "TempoDetectionRegression.h"
+#include "RealtimeSourceReadWindowRegression.h"
+#include "PlaybackTinyBlockRegression.h"
+#include "RealtimeCallbackTraceRegression.h"
+#include "RecordingDiskWriterRegression.h"
+#include "InlineEQDryRegression.h"
+#include "IntegerPDCRegression.h"
+#include "PackedWaveformPeaksRegression.h"
+#include "PeakCacheGenerationRegression.h"
 #include "RegressionMessagePump.h"
 #include "PluginParameterIdentity.h"
 #include "MicrophoneAccess.h"
@@ -59,6 +75,58 @@
 
 namespace
 {
+void publishCallbackDiagnosticsAvailability(juce::DynamicObject& object)
+{
+    object.setProperty("audioCallbackTimingAvailable", OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS != 0);
+#if !OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    object.setProperty("audioCallbackTimingStatus", "not_collected_in_this_build");
+    for (const auto* name : {
+        "lastAudioCallbackProcessMs", "maxAudioCallbackProcessMs",
+        "audioCallbackDeadlineMissCount", "lifetimeAudioCallbackDeadlineMissCount",
+        "audioCallbackArrivalGapCount", "lastAudioCallbackArrivalGapCounter",
+        "lastAudioCallbackArrivalGapMs", "maxAudioCallbackArrivalGapMs",
+        "audioCallbackDeadlineMissBurstCount", "lastAudioCallbackDeadlineMissCounter",
+        "lastAudioCallbackDeadlineMissProcessMs", "lastAudioCallbackDeadlineMissWhileRecording",
+        "audioCallbackScopedNoDenormalsCount", "lastDeviceOutputDiscontinuityDeadlineMissCount",
+        "postTrackPlaybackPeak", "postMonitoringInputPeak", "postMasterFxPeak",
+        "postMonitoringFxPeak", "finalOutputPeak",
+        "signalChainDiagnosticPeakSampleIntervalCallbacks", "signalChainDiagnosticPeaksPreserveLastSample" })
+        object.removeProperty(name);
+#endif
+}
+
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+struct CallbackTraceThreadSample
+{
+    std::uint64_t threadId = 0, cycles = 0;
+    std::uint32_t processorGroup = 0, processorNumber = 0;
+    bool processorAvailable = false, cyclesValid = false;
+};
+
+CallbackTraceThreadSample captureCallbackTraceThread(bool includeCycles) noexcept
+{
+    CallbackTraceThreadSample sample;
+#if JUCE_WINDOWS
+    sample.threadId = static_cast<std::uint64_t>(::GetCurrentThreadId());
+    PROCESSOR_NUMBER processor {};
+    ::GetCurrentProcessorNumberEx(&processor);
+    sample.processorGroup = static_cast<std::uint32_t>(processor.Group);
+    sample.processorNumber = static_cast<std::uint32_t>(processor.Number);
+    sample.processorAvailable = true;
+    if (includeCycles)
+    {
+        ULONG64 cycles = 0;
+        sample.cyclesValid = ::QueryThreadCycleTime(::GetCurrentThread(), &cycles) != FALSE;
+        sample.cycles = static_cast<std::uint64_t>(cycles);
+    }
+#else
+    juce::ignoreUnused(includeCycles);
+    sample.threadId = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(juce::Thread::getCurrentThreadId()));
+#endif
+    return sample;
+}
+
+#endif
 juce::String builtInInstanceIdentity(const std::shared_ptr<juce::AudioProcessor>& processor);
 void registerBuiltInInstanceIdentity(const std::shared_ptr<juce::AudioProcessor>&, const juce::String&);
 // Called by control/state workers with the route publication lease held.
@@ -81,6 +149,7 @@ bool restorePreparedProcessorState(juce::AudioProcessor& processor, const juce::
     return !isolated || isolated->isHealthy();
 }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
 constexpr std::uint64_t packEpochValue(
     std::uint32_t epoch,
     std::uint32_t value) noexcept
@@ -129,6 +198,7 @@ void updateEpochMaximum(
         maximum.store(packEpochValue(epoch, value), std::memory_order_relaxed);
 }
 
+#endif
 void addMonoHardwareInputToStereoProcessingPath(
     juce::AudioBuffer<float>& processingBuffer,
     const float* monoInput,
@@ -2694,6 +2764,9 @@ static void logPitchEditorFormant(const juce::String& msg)
 #ifndef OPENSTUDIO_AUDIO_PATH_DEBUG
  #define OPENSTUDIO_AUDIO_PATH_DEBUG 0
 #endif
+#if OPENSTUDIO_AUDIO_PATH_DEBUG && !OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+ #error Audio-path logging requires an explicit diagnostic build.
+#endif
 static constexpr bool kAudioPathDebugLogs = OPENSTUDIO_AUDIO_PATH_DEBUG != 0;
 
 static void logAudioTransport(const juce::String& msg)
@@ -3897,6 +3970,7 @@ void AudioEngine::rebuildRealtimeProcessingSnapshots()
 
         RealtimeTrackEntry entry;
         entry.id = trackId;
+        entry.playbackContinuityKey = PlaybackEngine::prepareTrackContinuityKey(trackId);
         entry.node = nodeIt->second;
         entry.processor =
             dynamic_cast<TrackProcessor*>(entry.node->getProcessor());
@@ -4330,6 +4404,7 @@ void AudioEngine::requestAudioInputAccess(std::function<void(bool)> completion)
 
 void AudioEngine::resetAudioCallbackWindowTelemetry() noexcept
 {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     for (auto& cell : audioCallbackDurationHistogram)
         cell.store(0, std::memory_order_relaxed);
     for (auto& cell : audioCallbackWindowMissCounts)
@@ -4345,8 +4420,10 @@ void AudioEngine::resetAudioCallbackWindowTelemetry() noexcept
     }
     firstAudioCallbackTelemetryWallTimeMs.store(
         0.0, std::memory_order_relaxed);
+#endif
 }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
 void AudioEngine::recordAudioCallbackTiming(
     double callbackProcessMs,
     double callbackEndWallTimeMs,
@@ -4493,6 +4570,7 @@ void AudioEngine::recordAudioCallbackStageTiming(
                 durationNanoseconds + 0.5));
     }
 }
+#endif
 
 #if JUCE_WINDOWS
 void AudioEngine::registerWindowsAudioCallbackMMCSS() noexcept
@@ -4856,37 +4934,48 @@ bool AudioEngine::setProbeRecordingDirectory(const juce::File& directory)
     return true;
 }
 
-void AudioEngine::recordQuarantinedTrackInput(const RealtimeTrackEntry& entry,
+void AudioEngine::recordTrackHardwareInput(const RealtimeTrackEntry& entry,
     const float* const* inputs, int inputCount, int samples, juce::int64 blockPosition)
 {
-    // This is a recorder-only lane. It never accesses DSP buffers, MIDI queues,
-    // position setters, meters or any other worker-owned TrackProcessor state.
-    if (!isPlaying.load() || !isRecordMode.load() || recordingDeviceInterrupted.load()) return;
-    const double position = static_cast<double>(blockPosition) / juce::jmax(1.0, currentSampleRate);
-    if (punchEnabled.load() && (position < punchStartTime.load() || position >= punchEndTime.load())) return;
-    const double compensated = juce::jmax(0.0, static_cast<double>(blockPosition - inputLatencySamples)
-                                              / juce::jmax(1.0, currentSampleRate));
+    // Called only for a playing/recording callback snapshot. This scratch belongs
+    // to the callback, never to a worker: capture selected hardware before any
+    // clip, send, track gain or FX contribution is mixed into processing buffers.
     auto* track = entry.processor;
-    if (track == nullptr || !track->getRecordArmed() || track->getTrackType() != TrackType::Audio) return;
+    if (!isPlaying.load(std::memory_order_acquire) || !isRecordMode.load(std::memory_order_acquire)
+        || recordingDeviceInterrupted.load(std::memory_order_acquire) || track == nullptr
+        || !track->getRecordArmed() || track->getTrackType() != TrackType::Audio) return;
     const int start = track->getInputStartChannel();
-    const int channels = juce::jmin(track->getInputChannelCount(), reusableTrackBuffer.getNumChannels());
-    if (start < 0 || start >= inputCount || channels <= 0) return;
-    reusableTrackBuffer.clear(0, samples);
-    // A newer routing snapshot may add an incoming send after this processor
-    // entered the old, isolated batch. Only the callback writes this current
-    // accumulator; preserve its contribution without touching owned DSP data.
-    if (entry.sendAccumBuffer != nullptr && entry.sendAccumBuffer->getNumSamples() >= samples)
-        for (int channel = 0; channel < juce::jmin(2, reusableTrackBuffer.getNumChannels(),
-                                                  entry.sendAccumBuffer->getNumChannels()); ++channel)
-            reusableTrackBuffer.addFrom(channel, 0, *entry.sendAccumBuffer, channel, 0, samples);
-    playbackEngine.fillTrackBuffer(entry.id, reusableTrackBuffer,
-        position - track->getPlaybackOffset() / 1000.0, samples, currentSampleRate);
-    const bool automationCanUnmute = track->getMuteAutomation().shouldPlayback()
-        && track->getMuteAutomation().hasPlaybackData();
-    if (!track->getMute() || automationCanUnmute)
-        for (int channel = 0; channel < channels && start + channel < inputCount; ++channel)
-            reusableTrackBuffer.addFrom(channel, 0, inputs[start + channel], samples);
-    audioRecorder.writeBlock(entry.id, reusableTrackBuffer, samples, compensated);
+    const int channels = track->getInputChannelCount();
+    if (start < 0 || start >= inputCount || channels <= 0 || samples <= 0) return;
+    if (samples > reusableTrackBuffer.getNumSamples() || channels > reusableTrackBuffer.getNumChannels())
+    {
+        OpenStudioCrashDiagnostics::recordRealtimeFault(OpenStudioCrashDiagnostics::RealtimeFault::recordingBufferContract);
+        return;
+    }
+    int first = 0, last = samples;
+    if (punchEnabled.load(std::memory_order_acquire))
+    {
+        const double startInBlock = punchStartTime.load(std::memory_order_relaxed) * currentSampleRate - static_cast<double>(blockPosition);
+        const double endInBlock = punchEndTime.load(std::memory_order_relaxed) * currentSampleRate - static_cast<double>(blockPosition);
+        if (!std::isfinite(startInBlock) || !std::isfinite(endInBlock)) return;
+        const auto boundary = [samples](double position) {
+            const double nearest = std::round(position);
+            if (std::abs(position - nearest) <= 1.0e-6) position = nearest;
+            return static_cast<int>(juce::jlimit(0.0, static_cast<double>(samples), std::ceil(position)));
+        };
+        first = boundary(startInBlock); last = boundary(endInBlock);
+    }
+    const int count = last - first;
+    if (count <= 0) return;
+    for (int channel = 0; channel < channels; ++channel)
+    {
+        if (start + channel < inputCount && inputs[start + channel] != nullptr)
+            reusableTrackBuffer.copyFrom(channel, 0, inputs[start + channel] + first, count);
+        else reusableTrackBuffer.clear(channel, 0, count);
+    }
+    const double compensated = juce::jmax(0.0,
+        static_cast<double>(blockPosition + first - inputLatencySamples) / juce::jmax(1.0, currentSampleRate));
+    audioRecorder.writeBlock(entry.id, reusableTrackBuffer, count, compensated);
 }
 
 void AudioEngine::audioDeviceError(
@@ -6238,7 +6327,7 @@ void AudioEngine::applyMasterGainPanMono (float* const* outputChannelData,
     for (int sample = 0; sample < numSamples; ++sample)
     {
         const float db = volumeRead ? reusableMasterAutomationBuffer.getSample(0, sample) : 0.0f;
-        const float volume = volumeRead ? (db <= -60.0f ? 0.0f : juce::Decibels::decibelsToGain(db)) : manualVolume;
+        const float volume = volumeRead ? MixerGain::fromDecibels(db) : manualVolume;
         const float trim = trimRead ? juce::Decibels::decibelsToGain(juce::jlimit(-60.0f, 12.0f, reusableMasterAutomationBuffer.getSample(2, sample))) : manualTrim;
         if (panRead) computePanLawGains(currentPanLaw.load(std::memory_order_acquire), reusableMasterAutomationBuffer.getSample(1, sample), 1.0f, left, right);
         for (int channel = 0; channel < numOutputChannels; ++channel)
@@ -6389,14 +6478,23 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     int numSamples,
                                                     const juce::AudioIODeviceCallbackContext& context)
 {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    const auto traceOptions = realtimeCallbackTrace.getOptions();
+    const bool tracingCallback = (traceOptions & RealtimeCallbackTrace::enabledFlag) != 0;
+    const auto callbackEntryTicks = tracingCallback ? juce::Time::getHighResolutionTicks() : 0;
+#endif
+    const double callbackStartWallTimeMs = juce::Time::getMillisecondCounterHiRes();
 #if JUCE_WINDOWS
     registerWindowsAudioCallbackMMCSS();
 #endif
     juce::ScopedNoDenormals noDenormals;
     juce::ignoreUnused(context);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     audioCallbackScopedNoDenormalsCount.fetch_add (1, std::memory_order_relaxed);
+#endif
     const uint64 callbackCounter = audioCallbackCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
-    const bool shouldSampleAudioCallbackStages =
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    const bool shouldSampleAudioCallbackStages = tracingCallback ||
         (callbackCounter
          % audioCallbackStageSampleInterval) == 0;
     std::int64_t sampledPlaybackTicks = 0;
@@ -6404,12 +6502,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     std::int64_t sampledTrackPlaybackTicks = 0;
     std::int64_t sampledMasterMonitoringTicks = 0;
     std::int64_t sampledMeteringSyncTicks = 0;
+#endif
     lastAudioCallbackCounter.store(callbackCounter, std::memory_order_relaxed);
-    const bool firstCallbackAfterTransportStart = firstCallbackAfterTransportStartPending.exchange(false, std::memory_order_acq_rel);
+    // One transport snapshot owns the entire block. A prepared start published
+    // midway through a stopped callback must not advance that unrecorded block.
+    const bool callbackPlaying = isPlaying.load(std::memory_order_acquire);
+    const bool callbackRecording = isRecordMode.load(std::memory_order_acquire);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    const bool firstCallbackAfterTransportStart = callbackPlaying
+        && firstCallbackAfterTransportStartPending.exchange(false, std::memory_order_acq_rel);
+#endif
     const bool callbackStartedWhileRecording =
-        isPlaying.load(std::memory_order_relaxed)
-        && isRecordMode.load(std::memory_order_relaxed);
-    const double callbackStartWallTimeMs = juce::Time::getMillisecondCounterHiRes();
+        callbackPlaying
+        && callbackRecording;
     lastAudioBlockWallTimeMs.store(callbackStartWallTimeMs, std::memory_order_release);
     lastCallbackInputChannels.store(numInputChannels, std::memory_order_relaxed);
     lastCallbackOutputChannels.store(numOutputChannels, std::memory_order_relaxed);
@@ -6421,11 +6526,64 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                / currentSampleRate)
                   * 1000.0
             : 0.0;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    std::optional<RealtimeCallbackTraceEvent> pairedTrace;
+    if (tracingCallback)
+    {
+        auto& event = pairedTrace.emplace();
+        event.callbackCounter = callbackCounter;
+        event.startQpcTicks = callbackEntryTicks;
+        event.startSamplePosition = currentSamplePosition.load(std::memory_order_acquire);
+        event.startWallTimeMs = callbackStartWallTimeMs;
+        event.budgetMs = callbackBlockDurationMs;
+        event.sampleRate = currentSampleRate;
+        event.blockSize = numSamples;
+        event.playing = callbackPlaying;
+        event.recording = callbackRecording;
+        event.threadCyclesRequested = (traceOptions & RealtimeCallbackTrace::threadCyclesFlag) != 0;
+        const auto thread = captureCallbackTraceThread(event.threadCyclesRequested);
+        event.threadId = thread.threadId;
+        event.threadCycleDelta = thread.cycles; // Start value until the end sample.
+        event.threadCyclesValid = thread.cyclesValid;
+        event.processorIdsAvailable = thread.processorAvailable;
+        event.processorGroupStart = thread.processorGroup;
+        event.processorNumberStart = thread.processorNumber;
+    }
+    const auto finishCallbackTraceClock = [&]() noexcept
+    {
+        if (pairedTrace)
+        {
+            auto& event = *pairedTrace;
+            const auto thread = captureCallbackTraceThread(event.threadCyclesRequested);
+            event.processorIdsAvailable = event.processorIdsAvailable && thread.processorAvailable;
+            event.processorGroupEnd = thread.processorGroup;
+            event.processorNumberEnd = thread.processorNumber;
+            event.threadCyclesValid = event.threadCyclesValid && thread.cyclesValid
+                && thread.cycles >= event.threadCycleDelta;
+            event.threadCycleDelta = event.threadCyclesValid ? thread.cycles - event.threadCycleDelta : 0;
+            event.endQpcTicks = juce::Time::getHighResolutionTicks();
+        }
+        // Optional CPU queries are included in the measured wall interval.
+        // Telemetry publication below remains outside it, as before tracing.
+        return juce::Time::getMillisecondCounterHiRes();
+    };
+    const auto publishCallbackTrace = [&](double endWallTimeMs, const std::array<double, 5>* stages) noexcept
+    {
+        if (!pairedTrace) return;
+        auto& event = *pairedTrace;
+        event.measuredWallMs = endWallTimeMs - callbackStartWallTimeMs;
+        if (!RealtimeCallbackTrace::shouldPublish(traceOptions, callbackCounter, event.measuredWallMs, event.budgetMs)) return;
+        event.stageTimingsAvailable = stages != nullptr;
+        if (stages != nullptr) event.stageMs = *stages;
+        realtimeCallbackTrace.tryPush(event);
+    };
+#endif
     if (callbackBlockDurationMs > 0.0)
         lastAudioBlockDurationMs.store(
             callbackBlockDurationMs,
             std::memory_order_release);
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     // Processing-duration telemetry cannot detect a callback that the driver
     // delivered late. Use the already-read callback timestamp to separately
     // retain arrival-gap evidence without another clock query.
@@ -6466,6 +6624,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
+#endif
     // Clear outputs first
     for (int i = 0; i < numOutputChannels; ++i)
         juce::FloatVectorOperations::clear (outputChannelData[i], numSamples);
@@ -6496,14 +6655,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             oversizedAudioCallbackCount.fetch_add(
                 1, std::memory_order_relaxed);
         }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         const double callbackEndWallTimeMs =
-            juce::Time::getMillisecondCounterHiRes();
+            finishCallbackTraceClock();
         recordAudioCallbackTiming(
             callbackEndWallTimeMs - callbackStartWallTimeMs,
             callbackEndWallTimeMs,
             callbackBlockDurationMs,
             callbackCounter,
             callbackStartedWhileRecording);
+        publishCallbackTrace(callbackEndWallTimeMs, nullptr);
+#endif
         return;
     }
 
@@ -6520,8 +6682,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 numSamples,
                 tunerRouteGeneration(route));
         }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         const double callbackEndWallTimeMs =
-            juce::Time::getMillisecondCounterHiRes();
+            finishCallbackTraceClock();
         const double callbackDurationMs =
             callbackEndWallTimeMs - callbackStartWallTimeMs;
         recordAudioCallbackTiming(
@@ -6530,6 +6693,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             lastAudioBlockDurationMs.load(std::memory_order_relaxed),
             callbackCounter,
             callbackStartedWhileRecording);
+        publishCallbackTrace(callbackEndWallTimeMs, nullptr);
+#endif
         return;
     }
 
@@ -6591,13 +6756,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             std::memory_order_seq_cst);
     jassert(rtTracks != nullptr);
     if (rtTracks == nullptr)
+    {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+        if (pairedTrace) publishCallbackTrace(finishCallbackTraceClock(), nullptr);
+#endif
         return;
+    }
     const auto blockCaptureEpoch = pluginAutomationClock->epoch.load(std::memory_order_acquire);
     const auto blockStartSamplePosition =
         currentSamplePosition.load(
             std::memory_order_acquire);
-    pluginAutomationClock->update(static_cast<double>(blockStartSamplePosition) / juce::jmax(1.0, currentSampleRate), currentSampleRate, isPlaying.load(std::memory_order_acquire));
-    const ScopedPluginAutomationProcessing blockCaptureContext(static_cast<double>(blockStartSamplePosition) / juce::jmax(1.0, currentSampleRate), currentSampleRate, blockCaptureEpoch, isPlaying.load(std::memory_order_acquire));
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    if (pairedTrace) pairedTrace->startSamplePosition = blockStartSamplePosition;
+#endif
+    pluginAutomationClock->update(static_cast<double>(blockStartSamplePosition) / juce::jmax(1.0, currentSampleRate), currentSampleRate, callbackPlaying);
+    const ScopedPluginAutomationProcessing blockCaptureContext(static_cast<double>(blockStartSamplePosition) / juce::jmax(1.0, currentSampleRate), currentSampleRate, blockCaptureEpoch, callbackPlaying);
     // Every routed buffer represents exactly one callback. Clearing at the
     // callback boundary prevents a skipped source/destination from replaying
     // stale sidechain or send audio on the next block.
@@ -6618,11 +6791,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         clearRealtimeBuffer(entry.sidechainOutputBuffer);
         clearRealtimeBuffer(entry.sendAccumBuffer);
     }
+#if OPENSTUDIO_AUDIO_PATH_DEBUG
     const bool shouldLogCallbackSummary = kAudioPathDebugLogs
-        && (((callbackCounter % 50) == 1) || ((isPlaying || isRecordMode) && firstCallbackAfterTransportStart));
+        && (((callbackCounter % 50) == 1) || ((callbackPlaying || callbackRecording) && firstCallbackAfterTransportStart));
+#else
+    constexpr bool shouldLogCallbackSummary = false;
+#endif
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const bool shouldSampleSignalChainPeaks =
         shouldSampleAudioCallbackStages
         || kAudioPathDebugLogs;
+#else
+    constexpr bool shouldSampleSignalChainPeaks = kAudioPathDebugLogs;
+#endif
     float postTrackPlaybackPeak = 0.0f;
     float postMonitoringInputPeak = 0.0f;
     // preTrackPeak is only ever used in logging — compute it only when logging is active.
@@ -6632,8 +6813,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     {
         preTrackPeak = peakFromFloatChannels(outputChannelData, numOutputChannels, numSamples);
         OPENSTUDIO_LOG_AUDIO_ENGINE_PLAYBACK("callback start #" + juce::String(static_cast<juce::int64>(callbackCounter))
-            + " isPlaying=" + juce::String(isPlaying.load() ? "true" : "false")
-            + " isRecordMode=" + juce::String(isRecordMode.load() ? "true" : "false")
+            + " isPlaying=" + juce::String(callbackPlaying ? "true" : "false")
+            + " isRecordMode=" + juce::String(callbackRecording ? "true" : "false")
             + " inputChannels=" + juce::String(numInputChannels)
             + " outputChannels=" + juce::String(numOutputChannels)
             + " sampleRate=" + juce::String(currentSampleRate, 2)
@@ -6653,10 +6834,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // position for the samples being output right now.  The increment is at the
     // very end of the callback (search "Advance transport position").
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledPlaybackSetupStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
 
     // The common no-marker path is lock-free. Reuse this block's resolved
     // tempo for every downstream timing consumer.
@@ -6679,14 +6862,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 blockStartSamplePosition),
             // Record mode can be armed before the transport advances. A parked
             // record latch must not repeatedly restart the click at one position.
-            isPlaying.load(std::memory_order_relaxed));
+            callbackPlaying);
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledPlaybackTicks +=
             juce::Time::getHighResolutionTicks()
             - sampledPlaybackSetupStartTicks;
     }
+#endif
 
     const bool useHybrid64Summing = processingPrecisionMode == ProcessingPrecisionMode::Hybrid64
                                  && reusableMasterBufferDouble.getNumChannels() >= numOutputChannels
@@ -6707,14 +6892,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // Use cached solo state (updated when solo changes, avoids scanning every callback)
     bool anySoloed = cachedAnySoloed.load();
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledTrackStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
 
     // Both execution modes share input preparation, raw recording and final
     // reduction. Only the independent per-track DSP runs on audio workers.
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     bool anyActiveARAInCallback = false;
+#endif
     const auto prepareTrack = [&](const RealtimeTrackEntry& trackEntry,
                                   RealtimeTrackWork& work) -> bool
     {
@@ -6724,6 +6913,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             return false;
 
         const bool hasActiveARA = track->hasActiveARA();
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         if (hasActiveARA)
         {
             anyActiveARAInCallback = true;
@@ -6736,8 +6926,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             }
         }
 
+#endif
         const bool excludedBySolo = anySoloed && !track->getSolo() && !track->getSoloSafe();
-        const bool hasActiveAudioRecording = isRecordMode.load(std::memory_order_relaxed)
+        const bool hasActiveAudioRecording = callbackRecording
             && track->getRecordArmed()
             && track->getTrackType() == TrackType::Audio;
         const bool needsRecordingPath = track->getRecordArmed() || hasActiveAudioRecording;
@@ -6779,7 +6970,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // Skip this track if it's not playing clips and not eligible for live input.
         // Armed audio tracks should still be processed while stopped so hardware
         // monitoring works before recording starts.
-        if (!isPlaying
+        if (!callbackPlaying
             && !shouldReadHardwareInput
             && !trackEntry.hasIncomingSends
             && !track->needsProcessing(
@@ -6820,7 +7011,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // reads audio directly from its audio source via readAudioSamples().
         // PlaybackEngine output would be overwritten by the plugin anyway, and
         // the redundant disk I/O causes severe contention (~300ms per block).
-        if (isPlaying && !hasActiveARA)
+        if (callbackPlaying && !hasActiveARA)
         {
             // Apply per-track playback offset (ms → seconds)
             double trackOffsetSec = track->getPlaybackOffset() / 1000.0;
@@ -6831,17 +7022,22 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 - trackOffsetSec;
 
             // Fill buffer with playback audio from clips
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
             const auto sampledClipPlaybackStartTicks =
                 shouldSampleAudioCallbackStages
                     ? juce::Time::getHighResolutionTicks()
                     : 0;
+#endif
             playbackEngine.fillTrackBuffer(
                 trackId,
                 trackBuffer,
                 adjustedTime,
                 numSamples,
-                currentSampleRate
+                currentSampleRate,
+                track->getTrackChannelCount() == 1,
+                trackEntry.playbackContinuityKey
             );
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
             if (shouldSampleAudioCallbackStages)
             {
                 const auto elapsedTicks =
@@ -6850,6 +7046,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 sampledPlaybackTicks += elapsedTicks;
                 sampledTrackPlaybackTicks += elapsedTicks;
             }
+#endif
+
             if (shouldSampleSignalChainPeaks)
             {
                 postTrackPlaybackPeak = juce::jmax(
@@ -6875,7 +7073,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                         < numInputChannels;
                  ++ch)
             {
-                if (isPlaying || trackEntry.hasIncomingSends)
+                if (callbackPlaying || trackEntry.hasIncomingSends)
                 {
                     // Preserve accumulated sends while monitoring stopped,
                     // and playback material while overdubbing.
@@ -6901,40 +7099,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             }
         }
 
-        // ========== RECORD RAW AUDIO (BEFORE FX) ==========
-        // Write to recorder if transport is playing AND in record mode
-        // This captures the raw input BEFORE any FX processing
-        if (isPlaying && isRecordMode.load() && hasActiveAudioRecording)
-        {
-            // Punch recording: only write audio within punch range
-            bool shouldWrite = true;
-            if (punchEnabled.load(std::memory_order_acquire))
-            {
-                double posSeconds =
-                    static_cast<double>(
-                        blockStartSamplePosition)
-                    / currentSampleRate;
-                double punchStart = punchStartTime.load(std::memory_order_relaxed);
-                double punchEnd = punchEndTime.load(std::memory_order_relaxed);
-                shouldWrite = (posSeconds >= punchStart && posSeconds < punchEnd);
-            }
-
-            if (shouldWrite)
-            {
-                const double compensatedBlockStart = juce::jmax(
-                    0.0,
-                    (static_cast<double>(
-                        blockStartSamplePosition)
-                     - inputLatencySamples)
-                        / juce::jmax(1.0, currentSampleRate));
-                if (!recordingDeviceInterrupted.load(std::memory_order_acquire))
-                audioRecorder.writeBlock(
-                    trackId,
-                    trackBuffer,
-                    numSamples,
-                    compensatedBlockStart);
-            }
-        }
+        // Record only the selected hardware input. The monitoring buffer above
+        // already contains playback/sends, and must never be the default take.
+        if (callbackPlaying && hasActiveAudioRecording)
+            recordTrackHardwareInput(trackEntry, inputChannelData, numInputChannels,
+                                     numSamples, blockStartSamplePosition);
 
         // Keep the recorder tap above faithful to the selected hardware route.
         // For monitoring and FX, centre a one-channel input by adding that same
@@ -6968,7 +7137,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                blockStartTimeSeconds,
                                numSamples,
                                currentSampleRate,
-                               isPlaying.load());
+                               callbackPlaying);
         auto& midiMessages = work.midi;
         int prevMidiMax = midiMaxEventsPerBlock.load(std::memory_order_relaxed);
         while (midiMessages.getNumEvents() > prevMidiMax
@@ -6983,7 +7152,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         work.position = blockStartTimeSeconds;
         work.rate = currentSampleRate;
         work.automationEpoch = blockCaptureEpoch;
-        work.playing = isPlaying.load(std::memory_order_acquire);
+        work.playing = callbackPlaying;
         return true;
     };
     const auto reduceTrack = [&](const RealtimeTrackEntry& trackEntry,
@@ -6997,14 +7166,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         const bool shouldReadHardwareInput = work.shouldReadHardwareInput;
         const bool hasActiveARA = work.hasActiveARA;
         juce::ignoreUnused(trackId, shouldReadHardwareInput, hasActiveARA);
-        if (shouldLogCallbackSummary && isPlaying.load())
+        if (shouldLogCallbackSummary && callbackPlaying)
         {
             OPENSTUDIO_LOG_AUDIO_ENGINE_PLAYBACK("track stage track=" + trackId
                 + " muted=" + juce::String(track->getMute() ? "true" : "false")
                 + " solo=" + juce::String(track->getSolo() ? "true" : "false")
                 + " masterSend=" + juce::String(track->getMasterSendEnabled() ? "true" : "false")
                 + " shouldReadHardwareInput=" + juce::String(shouldReadHardwareInput ? "true" : "false")
-                + " clipPlaybackRequested=" + juce::String((isPlaying && !hasActiveARA) ? "true" : "false")
+                + " clipPlaybackRequested=" + juce::String((callbackPlaying && !hasActiveARA) ? "true" : "false")
                 + " trackBufferPeak=" + juce::String(
                     peakFromFloatBuffer(trackBuffer, numSamples), 4));
         }
@@ -7122,8 +7291,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 { return pendingEntry.processor == entry.processor && pendingEntry.work->jobIndex >= 0; });
             if (ownedByPendingBatch)
             {
-                recordQuarantinedTrackInput(entry, inputChannelData, numInputChannels,
-                                           numSamples, blockStartSamplePosition);
+                if (callbackStartedWhileRecording)
+                    recordTrackHardwareInput(entry, inputChannelData, numInputChannels,
+                                               numSamples, blockStartSamplePosition);
                 continue;
             }
             // Keep unrelated sends, sidechains and recorder taps in their
@@ -7187,7 +7357,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // This is a collection target, not a guarantee for the remaining
             // serial/master work. The full callback deadline meter includes
             // those stages and reports any overrun independently.
-            const double remainingMs = juce::jmax(0.0, callbackBlockDurationMs - 0.012 - elapsedMs);
+            const double collectionBudgetMs = deviceStartupMode == DeviceStartup::offline
+                && regressionTrackCollectionBudgetMs > 0.0
+                    ? regressionTrackCollectionBudgetMs : callbackBlockDurationMs;
+            const double remainingMs = juce::jmax(0.0, collectionBudgetMs - 0.012 - elapsedMs);
             const auto cutoff = now + static_cast<juce::int64>(remainingMs * 0.001
                 * static_cast<double>(juce::Time::getHighResolutionTicksPerSecond()));
             const auto hardCutoff = cutoff
@@ -7236,6 +7409,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledTrackTicks =
@@ -7245,12 +7419,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     - sampledTrackStartTicks
                     - sampledTrackPlaybackTicks);
     }
+#endif
 
     // ========== FX Chains (extracted helpers) ==========
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledPitchScrubStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
     if (playbackEngine.mayRenderPitchScrubPreview())
     {
         const bool pitchScrubBufferReady =
@@ -7295,12 +7472,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             }
         }
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledPlaybackTicks +=
             juce::Time::getHighResolutionTicks()
             - sampledPitchScrubStartTicks;
     }
+#endif
 
     // Isolated instrument audition joins only the live monitor/master path.
     // Track recording queues and offline rendering never see these notes.
@@ -7317,10 +7496,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 else outputChannelData[ch][i] += reusablePitchScrubBuffer.getSample(ch, i);
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledMasterMonitoringStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
     if (shouldSampleSignalChainPeaks)
     {
         lastPostTrackPlaybackPeak.store(
@@ -7399,17 +7580,20 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             finalOutputPeak,
             std::memory_order_relaxed);
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledMasterMonitoringTicks =
             juce::Time::getHighResolutionTicks()
             - sampledMasterMonitoringStartTicks;
     }
+#endif
+
     // Silence-detection log: only fires when kAudioPathDebugLogs is on.
     // Previously also fired unconditionally in release builds; removed because
     // it calls FileLogger (disk write + mutex) from the audio thread.
     if (kAudioPathDebugLogs
-        && (shouldLogCallbackSummary || (((isPlaying || isRecordMode) && finalOutputPeak <= 0.0001f)
+        && (shouldLogCallbackSummary || (((callbackPlaying || callbackRecording) && finalOutputPeak <= 0.0001f)
             && ((callbackCounter % 15) == 1))))
     {
         if (preTrackPeak == 0.0f)
@@ -7423,10 +7607,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             + " finalOutputPeak=" + juce::String(finalOutputPeak, 4));
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const auto sampledMeteringSyncStartTicks =
         shouldSampleAudioCallbackStages
             ? juce::Time::getHighResolutionTicks()
             : 0;
+#endif
 
     // ========== Metering & Analysis (extracted helpers) ==========
     updateMasterMetering (outputChannelData, numOutputChannels, numSamples);
@@ -7436,7 +7622,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     timecodeSyncManager.processBlock(numSamples, currentSampleRate, callbackTempo,
                                       static_cast<double>(blockStartSamplePosition)
                                           / currentSampleRate,
-                                      isPlaying.load());
+                                      callbackPlaying);
 
     // ========== Clip Launch / Trigger Engine (Phase 4.1) ==========
     {
@@ -7448,19 +7634,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         triggerEngine.processBlock(
             numSamples, currentSampleRate, callbackTempo, currentBeat);
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (shouldSampleAudioCallbackStages)
     {
         sampledMeteringSyncTicks =
             juce::Time::getHighResolutionTicks()
             - sampledMeteringSyncStartTicks;
     }
+#endif
 
     // ========== Advance transport position ==========
     // IMPORTANT: This is intentionally AFTER all processing (metronome, playback,
     // recording) so they use the position corresponding to the samples being
     // output in this callback.  Previously this was at the top of the callback,
     // causing a systematic one-buffer-length delay.
-    if (isPlaying.load(std::memory_order_relaxed))
+    if (callbackPlaying)
     {
         auto expectedPosition =
             blockStartSamplePosition;
@@ -7477,6 +7665,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             std::memory_order_relaxed);
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     // Only measure callback duration when an ARA plugin is active — the QPC call is
     // non-trivial at 32-sample block sizes (1500/sec) and the result is only used for
     // ARA slow-block diagnostics.
@@ -7492,7 +7681,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 + juce::String(
                     rtTracks->processingOrderCount)
                 + " numSamples=" + juce::String(numSamples)
-                + " transportPlaying=" + juce::String(isPlaying.load() ? "true" : "false")
+                + " transportPlaying=" + juce::String(callbackPlaying ? "true" : "false")
                 + " currentPositionSeconds="
                 + juce::String(
                     currentSampleRate > 0.0
@@ -7504,9 +7693,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     3));
         }
     }
+#endif
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const double callbackEndWallTimeMs =
-        juce::Time::getMillisecondCounterHiRes();
+        finishCallbackTraceClock();
     const double callbackProcessMs =
         callbackEndWallTimeMs - callbackStartWallTimeMs;
     const double expectedBlockMs = lastAudioBlockDurationMs.load (std::memory_order_relaxed);
@@ -7543,6 +7734,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         recordAudioCallbackStageTiming(
             stageProcessMs,
             callbackEndWallTimeMs);
+        publishCallbackTrace(callbackEndWallTimeMs, &stageProcessMs);
     }
     recordAudioCallbackTiming(
         callbackProcessMs,
@@ -7562,6 +7754,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 std::memory_order_relaxed),
             std::memory_order_relaxed);
     }
+#endif
+
 }
 
 juce::String AudioEngine::addTrack(const juce::String& explicitId, const juce::String& initialType)
@@ -9434,14 +9628,15 @@ void AudioEngine::setTransportPlaying(bool playing)
     if (isPlaying == playing)
         return; // No change
 
-    isPlaying = playing;
+    // Stop is immediate. Start is published only after deferred sources and
+    // control-side ARA notifications are ready, so callbacks cannot outrun setup.
+    if (!playing) isPlaying.store(false, std::memory_order_release);
     if (playing) pluginAutomationClock->epoch.fetch_add(1, std::memory_order_acq_rel);
     pluginAutomationClock->update(getTransportPosition(), currentSampleRate, playing);
 
     if (playing)
     {
         playbackEngine.commitAllDeferredClipAudioFiles();
-        firstCallbackAfterTransportStartPending.store(true, std::memory_order_release);
 
         logToDisk("Transport PLAY. SampleRate: " + juce::String(currentSampleRate) +
                  " Position: " + juce::String(getTransportPosition()) + "s");
@@ -9452,6 +9647,7 @@ void AudioEngine::setTransportPlaying(bool playing)
     }
     else
     {
+        if (!isRecordMode) OpenStudioCrashDiagnostics::flushRealtimeFaults();
         logToDisk("Transport STOP at position: " + juce::String(getTransportPosition()) + "s");
         const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
         queueAllNotesOffForAllTracks();
@@ -9471,6 +9667,7 @@ void AudioEngine::setTransportPlaying(bool playing)
         // Don't reset position here - let the stop() action control that
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const double currentPositionSeconds =
         getTransportPosition();
     const auto focusedEditorTarget = pluginWindowManager.getFocusedEditorTarget();
@@ -9490,6 +9687,14 @@ void AudioEngine::setTransportPlaying(bool playing)
             track->noteARATransportPlaybackStateChanged(trackId, playing, currentPositionSeconds,
                                                         editorFocusedAtPlayStart);
         }
+    }
+#endif
+    if (playing)
+    {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+        firstCallbackAfterTransportStartPending.store(true, std::memory_order_release);
+#endif
+        isPlaying.store(true, std::memory_order_release);
     }
 }
 
@@ -9537,7 +9742,9 @@ void AudioEngine::rolloverLoopRecordings(double newTakeStartSeconds)
                                             outputFile,
                                             currentSampleRate,
                                             track->getInputChannelCount(),
-                                            newTakeStartSeconds,
+                                            punchEnabled.load(std::memory_order_acquire)
+                                                ? juce::jmax(newTakeStartSeconds, punchStartTime.load(std::memory_order_relaxed))
+                                                : newTakeStartSeconds,
                                             previousTake))
         {
             if (previousTake.file.existsAsFile())
@@ -9628,6 +9835,48 @@ void AudioEngine::setTransportRecordingAsync(bool recording, std::function<void(
     else apply(true);
 }
 
+void AudioEngine::startPreparedRecordingAsync(std::function<void(bool)> completion,
+                                              std::function<bool()> isCurrentRequest)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const auto generation = ++recordingRequestGeneration;
+    const auto requestedPosition = currentSamplePosition.load(std::memory_order_acquire);
+    auto apply = [this, generation, requestedPosition, completion = std::move(completion),
+                  isCurrentRequest = std::move(isCurrentRequest)](bool allowed) mutable
+    {
+        const auto current = [&] {
+            return generation == recordingRequestGeneration
+                && (!isCurrentRequest || isCurrentRequest());
+        };
+        if (!allowed || !current() || isPlaying.load(std::memory_order_acquire)
+            || isRecordMode.load(std::memory_order_acquire)
+            || currentSamplePosition.load(std::memory_order_acquire) != requestedPosition)
+        { if (completion) completion(false); return; }
+
+        // This creates/flushes writers and recovery journals on the control
+        // thread. Stopped callbacks keep monitoring but never capture or move.
+        setTransportRecording(true);
+        const auto preparedGeneration = recordingRequestGeneration;
+        const bool accepted = isRecordMode.load(std::memory_order_acquire)
+            && (!isCurrentRequest || isCurrentRequest())
+            && currentSamplePosition.load(std::memory_order_acquire) == requestedPosition;
+        if (!accepted)
+        {
+            if (recordingRequestGeneration == preparedGeneration
+                && isRecordMode.load(std::memory_order_acquire)) setTransportRecording(false);
+            if (completion) completion(false);
+            return;
+        }
+        setTransportPlaying(true);
+        if (completion) completion(isPlaying.load(std::memory_order_acquire)
+                                    && isRecordMode.load(std::memory_order_acquire));
+    };
+    // Offline fixtures supply explicit PCM and must never request/open hardware.
+    if (deviceStartupMode != DeviceStartup::offline && recordingRequiresAudioInput())
+        requestAudioInputAccess(std::move(apply));
+    else apply(true);
+}
+
 bool AudioEngine::finalizeInterruptedRecording()
 {
     if (!recordingDeviceInterrupted.load(std::memory_order_acquire)) return false;
@@ -9648,7 +9897,8 @@ void AudioEngine::setTransportRecording(bool recording)
         return; // No change
 
     if (recording && recordingDeviceInterrupted.load(std::memory_order_acquire)) return;
-    if (recording && recordingRequiresAudioInput() && !isMicrophonePermissionGrantedForInput())
+    if (recording && deviceStartupMode != DeviceStartup::offline
+        && recordingRequiresAudioInput() && !isMicrophonePermissionGrantedForInput())
     {
         juce::Logger::writeToLog("Recording requires microphone authorization; no recording state was changed.");
         return;
@@ -9730,7 +9980,9 @@ void AudioEngine::setTransportRecording(bool recording)
                     {
                         audioRecorder.setRecordingStartTime(
                             trackId,
-                            getTransportPosition());
+                            punchEnabled.load(std::memory_order_acquire)
+                                ? juce::jmax(getTransportPosition(), punchStartTime.load(std::memory_order_relaxed))
+                                : getTransportPosition());
                         anyAudioStarted = true;
                     }
 
@@ -9771,6 +10023,7 @@ void AudioEngine::setTransportRecording(bool recording)
         lastCompletedClips.insert(lastCompletedClips.end(),
                                   std::make_move_iterator(completedAudioTakes.begin()),
                                   std::make_move_iterator(completedAudioTakes.end()));
+        OpenStudioCrashDiagnostics::flushRealtimeFaults();
         logToDisk("Recordings stopped. Completed " + juce::String(lastCompletedClips.size()) + " audio clips.");
         logAudioRecord("record stop completedAudio=" + juce::String(static_cast<int>(lastCompletedClips.size()))
             + " completedMidi=" + juce::String(static_cast<int>(lastCompletedMIDIClips.size())));
@@ -50599,10 +50852,15 @@ juce::var AudioEngine::runNAMRackRegression()
             && getNumber(secondSnapshot, "sampleRate", 0.0) > 0.0;
         const bool blockSizeSane = isFiniteProperty(secondSnapshot, "blockSize")
             && getNumber(secondSnapshot, "blockSize", 0.0) > 0.0;
-        const bool callbackMsSane = isFiniteProperty(secondSnapshot, "lastAudioCallbackProcessMs")
-            && getNumber(secondSnapshot, "lastAudioCallbackProcessMs", -1.0) >= 0.0;
-        const bool deadlineMissesSane = isFiniteProperty(secondSnapshot, "audioCallbackDeadlineMissCount")
-            && getNumber(secondSnapshot, "audioCallbackDeadlineMissCount", -1.0) >= 0.0;
+        const bool timingAvailable = static_cast<bool>(secondSnapshot.getProperty("audioCallbackTimingAvailable", false));
+        const bool callbackMsSane = timingAvailable
+            ? isFiniteProperty(secondSnapshot, "lastAudioCallbackProcessMs")
+                && getNumber(secondSnapshot, "lastAudioCallbackProcessMs", -1.0) >= 0.0
+            : secondSnapshot.getProperty("lastAudioCallbackProcessMs", {}).isVoid();
+        const bool deadlineMissesSane = timingAvailable
+            ? isFiniteProperty(secondSnapshot, "audioCallbackDeadlineMissCount")
+                && getNumber(secondSnapshot, "audioCallbackDeadlineMissCount", -1.0) >= 0.0
+            : secondSnapshot.getProperty("audioCallbackDeadlineMissCount", {}).isVoid();
         const bool tunerFieldsSane = isFiniteProperty(secondSnapshot, "tunerFrequencyHz")
             && isFiniteProperty(secondSnapshot, "tunerCents")
             && isFiniteProperty(secondSnapshot, "tunerConfidence")
@@ -66704,14 +66962,17 @@ bool AudioEngine::addTrackBuiltInFX(const juce::String& trackId, const juce::Str
         auto it = trackMap.find(trackId);
         if (it != trackMap.end() && it->second)
         {
+            // The track applies its per-processor preparation policy. Preserve
+            // the device capacity here so native NAM does not inherit the
+            // compatibility reserve used for the initial generic preparation.
             if (isInputFX)
             {
-                success = it->second->addInputFX(std::move(plugin), sr, bs);
+                success = it->second->addInputFX(std::move(plugin), sr, currentBlockSize);
 
             }
             else
             {
-                success = it->second->addTrackFX(std::move(plugin), sr, bs);
+                success = it->second->addTrackFX(std::move(plugin), sr, currentBlockSize);
 
             }
         }
@@ -71324,12 +71585,13 @@ juce::var AudioEngine::getActiveRecordingMIDIPreviews(const juce::var& requests)
 
 void AudioEngine::addPlaybackClip(const juce::String& trackId, const juce::String& filePath, double startTime, double duration,
                                    double offset, double volumeDB, double fadeIn, double fadeOut, const juce::String& clipId,
-                                   const juce::String& pitchCorrectionSourceFilePath, double pitchCorrectionSourceOffset)
+                                   const juce::String& pitchCorrectionSourceFilePath, double pitchCorrectionSourceOffset,
+                                   int fadeInCurve, int fadeOutCurve)
 {
     juce::File audioFile(filePath);
     juce::File sourceAudioFile(pitchCorrectionSourceFilePath);
     playbackEngine.addClip(audioFile, startTime, duration, trackId, offset, volumeDB, fadeIn, fadeOut, clipId,
-                           sourceAudioFile, pitchCorrectionSourceOffset);
+                           sourceAudioFile, pitchCorrectionSourceOffset, fadeInCurve, fadeOutCurve);
     juce::Logger::writeToLog("AudioEngine: Added playback clip to track " + trackId +
                            " (offset=" + juce::String(offset) + "s, vol=" + juce::String(volumeDB) + "dB)");
     OPENSTUDIO_LOG_AUDIO_ENGINE_PLAYBACK("addPlaybackClip track=" + trackId
@@ -71368,7 +71630,8 @@ void AudioEngine::addPlaybackClipsBatch(const juce::String& clipsJSON)
             juce::File audioFile (fp);
             juce::File sourceAudioFile (sourcePath);
             playbackEngine.addClip (audioFile, startTime, dur, trackId, off, vol, fi, fo, cId,
-                                    sourceAudioFile, sourceOffset);
+                                    sourceAudioFile, sourceOffset,
+                                    static_cast<int>(item["fadeInCurve"]), static_cast<int>(item["fadeOutCurve"]));
             OPENSTUDIO_LOG_AUDIO_ENGINE_PLAYBACK("addPlaybackClipsBatch clip track=" + trackId
                 + " clipId=" + cId
                 + " file=" + fp
@@ -71408,7 +71671,38 @@ void AudioEngine::clearTrackPlaybackClips(const juce::String& trackId)
 
 
 
-juce::var AudioEngine::getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels)
+juce::var AudioEngine::analyzeClipTempo(const juce::String& trackId, const juce::String& clipId,
+                                      double rangeStartSeconds, double rangeDurationSeconds, const juce::var& source, const std::atomic<bool>* cancelled) const
+{
+    const auto snapshot = resolveReadOnlyClipSource(playbackEngine, trackId, clipId, source);
+    if (snapshot)
+        {
+            const auto& clip = *snapshot;
+            const double start = std::isfinite(rangeStartSeconds) ? juce::jlimit(0.0, clip.duration, rangeStartSeconds) : 0.0;
+            const double duration = rangeDurationSeconds > 0.0 && std::isfinite(rangeDurationSeconds)
+                ? juce::jmin(rangeDurationSeconds, clip.duration - start) : clip.duration - start;
+            auto result = ClipTempoAnalyzer::analyze(clip.audioFile, clip.offset + start, duration, cancelled);
+            if (auto* object = result.getDynamicObject())
+            {
+                if (result.hasProperty("analysisStartSeconds")) object->setProperty("analysisStartSeconds", start + static_cast<double>(result["analysisStartSeconds"]));
+                if (auto* segments = result["segments"].getArray())
+                    for (auto& segment : *segments)
+                        if (auto* values = segment.getDynamicObject()) values->setProperty("startSeconds", start + static_cast<double>(segment["startSeconds"]));
+                if (result.hasProperty("beatOffsetSeconds") && static_cast<double>(result["bpm"]) > 0.0)
+                    object->setProperty("beatOffsetSeconds", std::fmod(start + static_cast<double>(result["beatOffsetSeconds"]), 60.0 / static_cast<double>(result["bpm"])));
+            }
+            return result;
+        }
+    auto* result = new juce::DynamicObject();
+    result->setProperty("error", "The audio clip is no longer available.");
+    result->setProperty("confidence", 0.0);
+    result->setProperty("source", "audio");
+    result->setProperty("candidates", juce::Array<juce::var>());
+    return juce::var(result);
+}
+
+juce::var AudioEngine::getWaveformPeaks(const juce::String& filePath, int samplesPerPixel, int startSample, int numPixels,
+                                       juce::int64 sourceRangeStartSample, juce::int64 sourceRangeEndSample)
 {
     // REAPER-inspired: read from pre-computed peak cache (.ospeaks) instead of audio file.
     // If cache doesn't exist, kick off async generation and return empty.
@@ -71435,7 +71729,8 @@ juce::var AudioEngine::getWaveformPeaks(const juce::String& filePath, int sample
     }
 
     // Read from peak cache (instant — memory-cached mipmap lookup)
-    return peakCache.getPeaks(audioFile, samplesPerPixel, startSample, numPixels);
+    return peakCache.getPeaks(audioFile, samplesPerPixel, startSample, numPixels,
+                              sourceRangeStartSample, sourceRangeEndSample);
 }
 
 double AudioEngine::getAudioPeakAmplitude(const juce::String& filePath,
@@ -72270,9 +72565,7 @@ juce::var AudioEngine::getRealtimeAudioTelemetry() const
     root->setProperty(
         "namRackOversamplingFactor",
         getNAMRackOversamplingFactor());
-    root->setProperty(
-        "audioDeviceXRunCount",
-        deviceManager.getXRunCount());
+    AudioXRunTelemetry::publish(*root, AudioXRunTelemetry::capture(deviceManager));
     root->setProperty(
         "activeOutputChannels",
         lastActiveOutputChannels.load(
@@ -72615,6 +72908,7 @@ juce::var AudioEngine::getRealtimeAudioTelemetry() const
     root->setProperty(
         "playbackTracks",
         juce::Array<juce::var>());
+    publishCallbackDiagnosticsAvailability(*root);
     return juce::var(root);
 }
 
@@ -72663,9 +72957,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty(
         "namRackOversamplingFactor",
         getNAMRackOversamplingFactor());
-    const auto xruns = deviceManager.getXRunCount();
-    root->setProperty("audioDeviceXRunCount", xruns);
-    root->setProperty("audioDeviceXRunTelemetrySupported", xruns >= 0);
+    AudioXRunTelemetry::publish(*root, AudioXRunTelemetry::capture(deviceManager));
     root->setProperty("recordingDeviceInterrupted", recordingDeviceInterrupted.load(std::memory_order_acquire));
 #if JUCE_WINDOWS
     const auto cpuUsagePercent = getProcessCpuUsagePercent();
@@ -72679,6 +72971,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("lastCallbackCounter", static_cast<int64>(lastAudioCallbackCounter.load(std::memory_order_relaxed)));
     root->setProperty("lastAudioCallbackProcessMs", lastAudioCallbackProcessMs.load(std::memory_order_relaxed));
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const double callbackTelemetryNowMs =
         juce::Time::getMillisecondCounterHiRes();
     const auto currentWindowEpoch = static_cast<std::uint32_t>(
@@ -73095,6 +73388,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty(
         "audioCallbackStageTimings",
         stageTimings);
+#endif
     root->setProperty("audioCallbackDeadlineMissCount", static_cast<int64>(audioCallbackDeadlineMissCount.load(std::memory_order_relaxed)));
     root->setProperty(
         "lifetimeAudioCallbackDeadlineMissCount",
@@ -73154,9 +73448,12 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("lastAudioCallbackDeadlineMissCounter", static_cast<int64>(lastAudioCallbackDeadlineMissCounter.load(std::memory_order_relaxed)));
     // Backward-compatible name used by the current warning UI. It is now the
     // actual rolling-window count, not an indefinitely growing miss cluster.
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     root->setProperty(
         "audioCallbackDeadlineMissBurstCount",
         static_cast<int64>(windowDeadlineMissCount));
+#endif
+
     root->setProperty("lastAudioCallbackDeadlineMissProcessMs", lastAudioCallbackDeadlineMissProcessMs.load(std::memory_order_relaxed));
     root->setProperty("lastAudioCallbackDeadlineMissWhileRecording", lastAudioCallbackDeadlineMissWhileRecording.load(std::memory_order_relaxed));
     root->setProperty(
@@ -73351,6 +73648,9 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("playbackAudioDataCacheMissCount", playbackEngine.getAudioDataCacheMissCount());
     root->setProperty("playbackAudioDataCachedFileCount", playbackEngine.getAudioDataCachedFileCount());
     root->setProperty("playbackReadAheadUnderrunCount", playbackEngine.getAudioDataCacheMissCount());
+    root->setProperty("playbackStreamingWindowHits", static_cast<juce::int64>(playbackEngine.getStreamingWindowHits()));
+    root->setProperty("playbackStreamingWindowReads", static_cast<juce::int64>(playbackEngine.getStreamingWindowReads()));
+    root->setProperty("playbackStreamingWindowFallbacks", static_cast<juce::int64>(playbackEngine.getStreamingWindowFallbacks()));
     root->setProperty("playbackStreamingReaderCount", playbackEngine.getAudioDataCachedFileCount());
     root->setProperty("playbackStreamingReadAheadCapacityBytes",
                       playbackEngine.getStreamingReadAheadCapacityBytes());
@@ -73389,6 +73689,7 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("pitchRouteScrubPreviewActive", pitchRouting.scrubPreviewActive);
     root->setProperty("pitchRouteCorrectedSourceActive", pitchRouting.correctedSourceActive);
     root->setProperty("playbackTracks", playbackTracks);
+    publishCallbackDiagnosticsAvailability(*root);
     return juce::var(root);
 }
 
@@ -73840,6 +74141,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     if (!clearAutomationPreviews()) return false;
     if (keepRunning && !keepRunning()) return false;
     const juce::ScopedLock offlineRenderTransaction(offlineRenderTransactionLock);
+    lastOfflineRenderSourceReadMisses.store(0);
+    lastOfflineRenderSourceReadFailed.store(false);
     if (keepRunning && !keepRunning()) return false;
     // Consume the request at transaction entry so invalid ranges, unsupported
     // formats, and unwritable paths cannot leak dither into the next render.
@@ -73873,7 +74176,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     juce::String formatLower = format.toLowerCase();
     bool isLossyFormat = (formatLower == "mp3" || formatLower == "ogg");
     const bool isRawFormat = formatLower == "raw";
-    bool needsFFmpegPostProcess = isLossyFormat || isRawFormat;
+    bool needsExportPostProcess = isLossyFormat || isRawFormat;
 
     // For lossy formats, bitDepth holds codec quality:
     //   MP3: bitrate in kbps (128, 192, 256, 320)
@@ -74043,6 +74346,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         juce::String id;
         float volumeDB;
         float pan;
+        double playbackOffsetSeconds = 0.0;
+        bool monoSource = false;
         bool muted;
         bool soloed;
         bool soloSafe;
@@ -74076,6 +74381,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             snap.id = trackId;
             snap.volumeDB = track->getVolume();
             snap.pan = track->getPan();
+            snap.playbackOffsetSeconds = track->getPlaybackOffset() / 1000.0;
+            snap.monoSource = track->getTrackChannelCount() == 1;
             snap.muted = track->getMute();
             snap.soloed = track->getSolo();
             snap.soloSafe = track->getSoloSafe();
@@ -74109,6 +74416,10 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 || snap.sendCount > 0
                 || snap.sidechainSourceCount > 0
                 || snap.hasTrackAutomation
+                || track->getTrimVolume() != 0.0f
+                || track->getPhaseInvert()
+                || std::abs(track->getStereoWidth() - 100.0f) > 0.01f
+                || track->getChannelStripEQEnabled()
                 || (!isStemRender && !snap.masterSendEnabled);
             if (snap.soloed) anySoloed = true;
             trackSnapshots.push_back(snap);
@@ -74179,7 +74490,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                       + " so FFmpeg handles final SRC to "
                       + juce::String(requestedOutputSampleRate));
             actualSampleRate = includedClipSampleRate;
-            needsFFmpegPostProcess = true;
+            needsExportPostProcess = true;
         }
     }
 
@@ -74209,7 +74520,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     }
 
     const bool quantizeExport = (ditherMode > 0 || reducedPrecision > 0) && !isLossyFormat && bitDepth < 32;
-    const bool quantizeAfterSRC = quantizeExport && needsFFmpegPostProcess;
+    const bool quantizeAfterSRC = quantizeExport && needsExportPostProcess;
 
     // ========== 5. Create format writer ==========
     // For lossy formats (mp3/ogg) or sample rate conversion, render to temp WAV first
@@ -74221,7 +74532,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 + "_intermediate.wav"));
     juce::File renderFile = stagedOutput.getFile();
 
-    if (needsFFmpegPostProcess)
+    if (needsExportPostProcess)
     {
         // Render an intermediate WAV while the final encoded file is staged
         // separately. Neither temporary can replace an existing user file
@@ -74230,7 +74541,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
     }
 
     std::unique_ptr<juce::AudioFormat> audioFormat;
-    juce::String renderFormatLower = needsFFmpegPostProcess ? "wav" : formatLower;
+    juce::String renderFormatLower = needsExportPostProcess ? "wav" : formatLower;
 
     if (renderFormatLower == "wav")
         audioFormat = std::make_unique<juce::WavAudioFormat>();
@@ -74737,7 +75048,9 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         root->setProperty("format", format);
         root->setProperty("requestedOutputSampleRate", requestedOutputSampleRate);
         root->setProperty("actualSampleRate", actualSampleRate);
-        root->setProperty("ffmpegPostProcess", needsFFmpegPostProcess);
+        root->setProperty("ffmpegPostProcess", needsExportPostProcess
+            && (formatLower != "ogg" || std::abs(actualSampleRate - requestedOutputSampleRate) > 1.0));
+        root->setProperty("oggEncoder", formatLower == "ogg" ? "native_libvorbis" : "not_applicable");
         root->setProperty("lossyIntermediateRender", isLossyFormat);
         root->setProperty("bitDepth", bitDepth);
         root->setProperty("channels", numChannels);
@@ -74950,12 +75263,18 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
         // Create fresh offline playback engine for each pass (deterministic reads)
         PlaybackEngine passPlayback;
+        passPlayback.setOfflineSourceReads(true);
         // The Lagrange render SRC path is stateful across blocks and currently
         // unsafe for arbitrary render offsets/ranges.  Keep exports on the
         // exact-position stateless interpolation path unless explicitly opted in.
         passPlayback.setRenderMode(useRenderLagrangeSrc);
+        std::set<juce::String> offlineClipIds;
+        for (const auto& clip : clipSnapshot)
+            if (clip.isActive && renderProcessingTrackIds.count(clip.trackId) != 0)
+                offlineClipIds.insert(clip.clipId);
         for (const auto& entry : renderedPreviewSegmentSnapshot)
         {
+            if (offlineClipIds.count(entry.first) == 0) continue;
             for (const auto& segment : entry.second)
             {
                 passPlayback.setClipRenderedPreviewSegment(entry.first,
@@ -74967,10 +75286,17 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         }
         for (const auto& clip : clipSnapshot)
         {
-            passPlayback.addClip(clip.audioFile, clip.startTime, clip.duration,
-                                 clip.trackId, clip.offset, clip.volumeDB,
-                                 clip.fadeIn, clip.fadeOut, clip.clipId,
-                                 clip.originalAudioFile, clip.originalOffset);
+            if (clip.isActive && renderProcessingTrackIds.count(clip.trackId) != 0)
+                passPlayback.addClipFromSnapshot(clip);
+        }
+        if (passPlayback.hasOfflineSourceReadFailure())
+        {
+            lastOfflineRenderSourceReadFailed.store(true);
+            lastOfflineRenderSourceReadMisses.fetch_add(passPlayback.getAudioDataCacheMissCount());
+            logToDisk("renderProject: FAIL - could not open an offline source");
+            writer.reset();
+            restorePreparedTracksForRealtime();
+            return false;
         }
 
         // Create fresh metronome for each pass
@@ -75032,6 +75358,10 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
             }
             int samplesThisBlock = (int)std::min((juce::int64)blockSize, samplesRemaining);
             const juce::int64 renderBlockStartSample = processingTotalSamples - samplesRemaining;
+            // Derive the clock from integer frames. Repeatedly adding block
+            // durations drifts across long renders and can admit a frame at
+            // an otherwise exact clip/source end boundary.
+            currentTimeSeconds = startTime + static_cast<double>(renderBlockStartSample) / actualSampleRate;
             const auto outputWindow = getOfflineRenderBlockWindow(offlineRenderPlan,
                                                                    renderBlockStartSample,
                                                                    samplesThisBlock);
@@ -75110,8 +75440,8 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
                     juce::AudioBuffer<float> trackBuffer(2, samplesThisBlock);
                     trackBuffer.clear();
-                    passPlayback.fillTrackBuffer(snap.id, trackBuffer, currentTimeSeconds,
-                                                 samplesThisBlock, actualSampleRate);
+                    passPlayback.fillTrackBuffer(snap.id, trackBuffer, currentTimeSeconds - snap.playbackOffsetSeconds,
+                                                 samplesThisBlock, actualSampleRate, snap.monoSource);
                     if (admittedSourceSamples < samplesThisBlock)
                         trackBuffer.clear(admittedSourceSamples,
                                           samplesThisBlock - admittedSourceSamples);
@@ -75129,7 +75459,7 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                         }
                     }
 
-                    const float volumeGain = juce::Decibels::decibelsToGain(snap.volumeDB);
+                    const float volumeGain = MixerGain::fromDecibels(snap.volumeDB);
                     float leftGain = 1.0f;
                     float rightGain = 1.0f;
                     computePanLawGains(
@@ -75204,8 +75534,9 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                     {
                         juce::AudioBuffer<float> playbackBuffer(2, samplesThisBlock);
                         playbackBuffer.clear();
-                        passPlayback.fillTrackBuffer(trackEntry.id, playbackBuffer, currentTimeSeconds,
-                                                     samplesThisBlock, actualSampleRate);
+                        passPlayback.fillTrackBuffer(trackEntry.id, playbackBuffer,
+                                                     currentTimeSeconds - track->getPlaybackOffset() / 1000.0,
+                                                     samplesThisBlock, actualSampleRate, snapshotIt->second.monoSource);
                         if (admittedSourceSamples < samplesThisBlock)
                             playbackBuffer.clear(admittedSourceSamples,
                                                  samplesThisBlock - admittedSourceSamples);
@@ -75371,6 +75702,16 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 }
             }
 
+            if (passPlayback.hasOfflineSourceReadFailure())
+            {
+                lastOfflineRenderSourceReadFailed.store(true);
+                lastOfflineRenderSourceReadMisses.fetch_add(passPlayback.getAudioDataCacheMissCount());
+                logToDisk("renderProject: FAIL - offline source read failed; no concealed audio accepted");
+                writer.reset();
+                restorePreparedTracksForRealtime();
+                return false;
+            }
+
             // Measure only the aligned output window. Startup latency is rendered
             // to warm/flush the chain, but must not influence normalization.
             if (outputWindow.numSamples > 0)
@@ -75481,7 +75822,6 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
 
             alignedSamplesVisited += outputWindow.numSamples;
 
-            currentTimeSeconds += (double)samplesThisBlock / actualSampleRate;
             samplePositionForMetronome += samplesThisBlock;
             samplesRemaining -= samplesThisBlock;
         }
@@ -75589,20 +75929,33 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
         logToDisk ("renderProject: signal-chain debug report=" + reportFile.getFullPathName());
     }
 
-    // ========== 9. FFmpeg post-processing (encoding or final SRC) ==========
-    if (needsFFmpegPostProcess)
+    // ========== 9. Offline encoding or final SRC ==========
+    if (needsExportPostProcess)
     {
-        logToDisk("renderProject: Starting FFmpeg post-processing (encoding/final SRC)...");
-        bool ffmpegOk = false;
-        if (quantizeAfterSRC)
+        logToDisk("renderProject: Starting post-processing (encoding/final SRC)...");
+        bool postProcessOk = false;
+        if (formatLower == "ogg")
+        {
+            // System FFmpeg builds need not include libvorbis (including current
+            // macOS builds). Keep existing final SRC, then encode with bundled
+            // libvorbis. Both paths stay within the export publication transaction.
+            juce::TemporaryFile resampled(outputFile.getSiblingFile("vorbis-src.wav"));
+            const bool needsSRC = std::abs(actualSampleRate - requestedOutputSampleRate) > 1.0;
+            postProcessOk = !needsSRC || convertWithFFmpeg(renderFile, resampled.getFile(), "wav",
+                requestedOutputSampleRate, 0, 32, numChannels, keepRunning);
+            if (postProcessOk)
+                postProcessOk = encodeOfflineVorbis(needsSRC ? resampled.getFile() : renderFile,
+                    stagedOutput.getFile(), codecQuality, keepRunning);
+        }
+        else if (quantizeAfterSRC)
         {
             // SRC must precede the sole integer quantizer. Retain float precision
             // through FFmpeg; raw PCM only needs a lossless container removal afterwards.
             juce::TemporaryFile resampled(outputFile.getSiblingFile("quantizer-src.wav"));
             juce::TemporaryFile quantizedRaw(outputFile.getSiblingFile("quantizer-raw.wav"));
-            ffmpegOk = convertWithFFmpeg(renderFile, resampled.getFile(), "wav",
+            postProcessOk = convertWithFFmpeg(renderFile, resampled.getFile(), "wav",
                 requestedOutputSampleRate, 0, 32, numChannels, keepRunning);
-            if (ffmpegOk)
+            if (postProcessOk)
             {
                 juce::AudioFormatManager manager; manager.registerBasicFormats();
                 std::unique_ptr<juce::AudioFormatReader> reader(manager.createReaderFor(resampled.getFile()));
@@ -75614,32 +75967,32 @@ bool AudioEngine::renderProject(const juce::String& source, double startTime, do
                 std::unique_ptr<juce::OutputStream> stream = target.createOutputStream();
                 auto finalWriter = finalFormat->createWriterFor(stream, juce::AudioFormatWriterOptions()
                     .withSampleRate(requestedOutputSampleRate).withNumChannels(numChannels).withBitsPerSample(bitDepth));
-                ffmpegOk = reader != nullptr && finalWriter != nullptr;
+                postProcessOk = reader != nullptr && finalWriter != nullptr;
                 juce::AudioBuffer<float> block(numChannels, 4096);
-                if (ffmpegOk)
-                    for (juce::int64 offset = 0; offset < reader->lengthInSamples && ffmpegOk; offset += 4096)
+                if (postProcessOk)
+                    for (juce::int64 offset = 0; offset < reader->lengthInSamples && postProcessOk; offset += 4096)
                     {
                         const int count = static_cast<int>(juce::jmin(juce::int64{4096}, reader->lengthInSamples - offset));
-                        ffmpegOk = (!keepRunning || keepRunning())
+                        postProcessOk = (!keepRunning || keepRunning())
                             && reader->read(&block, 0, count, offset, true, numChannels > 1)
                             && exportQuantizer.write(*finalWriter, block, 0, count);
                     }
                 finalWriter.reset();
-                if (ffmpegOk && isRawFormat)
-                    ffmpegOk = convertWithFFmpeg(target, stagedOutput.getFile(), "raw",
+                if (postProcessOk && isRawFormat)
+                    postProcessOk = convertWithFFmpeg(target, stagedOutput.getFile(), "raw",
                         requestedOutputSampleRate, 0, bitDepth, numChannels, keepRunning);
             }
         }
         else
-            ffmpegOk = convertWithFFmpeg(renderFile, stagedOutput.getFile(), formatLower,
+            postProcessOk = convertWithFFmpeg(renderFile, stagedOutput.getFile(), formatLower,
                 requestedOutputSampleRate, codecQuality, bitDepth, numChannels, keepRunning);
 
         // Clean up temp file
         renderFile.deleteFile();
 
-        if (!ffmpegOk)
+        if (!postProcessOk)
         {
-            logToDisk("renderProject: FAIL - FFmpeg post-processing failed");
+            logToDisk("renderProject: FAIL - export post-processing failed");
             restorePreparedTracksForRealtime();
             return false;
         }
@@ -75833,22 +76186,26 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
 {
     juce::Array<juce::var> checks;
     juce::Array<juce::var> artifacts;
+    juce::StringArray checkIdentifiers;
     bool overallPass = true;
     const auto addCheck = [&] (const juce::String& id,
                                bool pass,
                                const juce::String& detail,
                                const juce::var& diagnostic = {})
     {
+        const bool validIdentifier = id.trim().isNotEmpty() && !checkIdentifiers.contains(id);
+        const bool checkPassed = pass && validIdentifier;
+        if (validIdentifier) checkIdentifiers.add(id);
         auto* check = new juce::DynamicObject();
-        check->setProperty("id", id);
-        check->setProperty("status", pass ? "pass" : "fail");
-        check->setProperty("detail", detail);
+        check->setProperty("id", validIdentifier ? id : "invalid_check_identifier_" + juce::String(checks.size()));
+        check->setProperty("status", checkPassed ? "pass" : "fail");
+        check->setProperty("detail", validIdentifier ? detail : "Missing or duplicate regression identifier: " + id + ". " + detail);
         if (! diagnostic.isVoid())
             check->setProperty("diagnostic", diagnostic);
         checks.add(juce::var(check));
         if (! isPlaying.load())
             pumpRegressionMessages();
-        overallPass = overallPass && pass;
+        overallPass = overallPass && checkPassed;
     };
 
     const auto hardwareEvidence = [this]()
@@ -75885,6 +76242,88 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
     addCheck("output_directory_ready",
              outputDirectoryReady,
              outputDirectory.getFullPathName());
+    if (outputDirectoryReady)
+        runAudioFileConversionRegression(outputDirectory, [&](const char* id, bool pass) {
+            addCheck(id, pass, "Bounded band-limited file conversion, content cache and atomic source route invariants.");
+        });
+    if (outputDirectoryReady)
+        runTempoDetectionRegression(outputDirectory, [&](const char* id, bool pass) {
+            addCheck(id, pass, "Audio-derived tempo evidence, ambiguity and bounded-work controls.");
+        });
+    runRealtimeSourceReadWindowRegression([&](const char* id, bool pass) {
+        addCheck(id, pass, "Bounded prepared streaming-source window preserves exact frames, readiness and source identity.");
+    });
+    runRealtimeCallbackTraceRegression([&](const char* id, bool pass) {
+        addCheck(id, pass, "Opt-in paired callback tracing preserves bounded SPSC ownership, sample identity and drop accounting.");
+    });
+    {
+        auto probe = std::make_unique<AudioEngine>(DeviceStartup::offline);
+        probe->setRealtimeCallbackTraceEnabled(true);
+        for (int index = 0; index < 16; ++index)
+            probe->audioDeviceIOCallbackWithContext(nullptr, 0, nullptr, 0, 8, {});
+        const auto snapshot = probe->getAudioDebugSnapshot();
+        const auto compact = probe->getRealtimeAudioTelemetry();
+        const auto stats = probe->getRealtimeCallbackTraceStats();
+        const bool expected = OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS != 0;
+        const bool availability = static_cast<bool>(snapshot["audioCallbackTimingAvailable"]) == expected
+            && static_cast<bool>(compact["audioCallbackTimingAvailable"]) == expected;
+        const bool timing = expected
+            ? static_cast<juce::int64>(snapshot["audioCallbackWindowCallbackCount"]) == 16
+                && stats.enabled && stats.published > 0
+            : snapshot["lastAudioCallbackProcessMs"].isVoid()
+                && snapshot["audioCallbackDeadlineMissCount"].isVoid()
+                && snapshot["audioCallbackStageTimings"].isVoid()
+                && compact["audioCallbackDeadlineMissCount"].isVoid()
+                && !stats.enabled && stats.published == 0 && stats.pending == 0;
+        int araArgumentEvaluations = 0;
+        logARADebugLine(juce::String(++araArgumentEvaluations));
+        addCheck("ara_logging_build_contract", araArgumentEvaluations == (expected ? 1 : 0),
+                 "ARA logging arguments are not evaluated in ordinary builds.");
+        addCheck("callback_diagnostics_build_contract", availability && timing,
+                 "Production omits measurements and cannot enable tracing; diagnostic builds collect explicit fixture callbacks. No hardware timing claim.");
+    }
+    runEditingWorkflowRegression([&](const char* id, bool pass) {
+        addCheck(id, pass, "Fader silence and bounded, cancellable tempo work; no hardware timing or listening claim.");
+    });
+    AudioXRunTelemetry::runRegression([&](const char* id, bool pass) {
+        addCheck(id, pass, "Driver and host overload telemetry remain distinct, preserve the legacy combined field and withhold inconsistent splits.");
+    });
+    runRecordingDiskWriterRegression([&](const char* id, bool pass) {
+        addCheck(id, pass, "Prepared recording FIFO preserves exact eight-frame PCM, bounded overflow, background failure status and stop-tail draining without producer wake notifications.");
+    });
+    const auto inlineEQDryRegression = runInlineEQDryRegression();
+    if (const auto* items = inlineEQDryRegression["checks"].getArray())
+        for (const auto& item : *items)
+            addCheck(item["id"].toString(), static_cast<bool>(item["pass"]), item["detail"].toString());
+    const auto packedWaveformRegression = runPackedWaveformPeaksRegression();
+    if (const auto* items = packedWaveformRegression["checks"].getArray())
+        for (const auto& item : *items)
+            addCheck(item["id"].toString(), static_cast<bool>(item["pass"]), item["detail"].toString());
+    if (outputDirectoryReady)
+        outputDirectory.getChildFile("packed-waveform-benchmark.json").replaceWithText(
+            juce::JSON::toString(packedWaveformRegression["benchmark"]));
+    if (outputDirectoryReady)
+    {
+        const auto peakCacheGenerationRegression = runPeakCacheGenerationRegression(outputDirectory);
+        if (const auto* items = peakCacheGenerationRegression["checks"].getArray())
+            for (const auto& item : *items)
+                addCheck(item["id"].toString(), static_cast<bool>(item["pass"]), item["detail"].toString());
+    }
+    if (outputDirectoryReady)
+        runPlaybackTinyBlockRegression(outputDirectory, [&](const char* id, bool pass) {
+            addCheck(id, pass, "Tiny-block playback preserves integer/fractional SRC, fades, channels, EOF and clip-index mutations.");
+        });
+    if (outputDirectoryReady)
+        runIntegerPDCRegression(outputDirectory, [&](const char* id, bool pass) {
+            addCheck(id, pass, "Prepared integer PDC preserves JUCE delay history, tap progression and production-track transitions; timings are diagnostic.");
+        });
+    if (outputDirectoryReady)
+    {
+        const auto recordingStart = runPreparedRecordingStartRegression(outputDirectory);
+        if (const auto* items = recordingStart["checks"].getArray())
+            for (const auto& item : *items)
+                addCheck(item["id"].toString(), static_cast<bool>(item["pass"]), item["detail"].toString());
+    }
 
     // Distribution/feedback invariants, independent of the audio render chain.
     for (const int bits : { 16, 18, 20, 22, 24 })
@@ -75990,10 +76429,14 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         const auto feedAlignmentCapture=[&]{
             if(left->alignmentCapture->state.load()==1&&right->alignmentCapture->state.load()==1)
                 // Continuous analysis calls the cancellation probe inside its
-                // FFT loops too. Advance one block per probe so the synthetic
-                // producer cannot outrun the bounded stream consumer.
-                for(int block=0;block<(static_cast<bool>(captureRequestValue["projectSpan"])?1:64)&&left->alignmentCapture->state.load()==1;++block)
+                // FFT loops too. Bound each synthetic burst and stop when a
+                // complete chunk is queued. One block per 5ms polling loop
+                // ties virtual audio progress to Windows sleep granularity and
+                // can time out even though no real input or DSP path stalled.
+                for(int block=0;block<(static_cast<bool>(captureRequestValue["projectSpan"])?4:64)&&left->alignmentCapture->state.load()==1;++block)
                 {
+                    if(static_cast<bool>(captureRequestValue["projectSpan"])
+                        &&(!left->alignmentCapture->continuousDrained()||!right->alignmentCapture->continuousDrained()))break;
                     for(int i=0;i<512;++i)for(int ch=0;ch<2;++ch){a.setSample(ch,i,signal(position+i-trackMap[alignTrackA]->getPDCDelay()));b.setSample(ch,i,-signal(position+i-37-trackMap[alignTrackB]->getPDCDelay()));}
                     left->alignmentCapture->process(a,position,true);right->alignmentCapture->process(b,position,true);position+=512;
                 }
@@ -76098,6 +76541,387 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
              fixtureWritten,
              fixtureFile.getFullPathName());
 
+    {
+        const auto previousExport = outputDirectory.getChildFile("native-vorbis-cancel.ogg");
+        const bool previousWritten = previousExport.replaceWithText("previous export remains intact");
+        juce::File stagingPath;
+        int cancellationChecks = 0;
+        bool cancelled = false;
+        {
+            juce::TemporaryFile staging(previousExport);
+            stagingPath = staging.getFile();
+            cancelled = !encodeOfflineVorbis(fixtureFile, stagingPath, 6,
+                [&cancellationChecks] { return ++cancellationChecks < 4; });
+        }
+        addCheck("native_vorbis_cancellation_preserves_previous_export",
+            fixtureWritten && previousWritten && cancelled && cancellationChecks == 4
+                && previousExport.loadFileAsString() == "previous export remains intact" && !stagingPath.exists(),
+            "Cancelling the bounded native encoder mid-stream removes staging without publishing over an existing export.");
+        const auto missingStage = outputDirectory.getChildFile("native-vorbis-missing-input.ogg");
+        addCheck("native_vorbis_invalid_input_and_existing_stage_rejected",
+            !encodeOfflineVorbis(outputDirectory.getChildFile("missing-vorbis-input.wav"), missingStage, 6, {})
+                && !missingStage.exists() && !encodeOfflineVorbis(fixtureFile, previousExport, 6, {})
+                && previousExport.loadFileAsString() == "previous export remains intact",
+            "Missing input fails before creating output; an existing destination cannot be appended to or overwritten by the staging encoder.");
+    }
+
+    // Long sources must use complete worker reads, regardless of the realtime
+    // full-decode budget, render speed, seek position or block partitioning.
+    {
+        const auto longFile = outputDirectory.getChildFile("offline-long-source.wav");
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> stream(longFile.createOutputStream());
+        auto writer = wav.createWriterFor(stream, juce::AudioFormatWriterOptions()
+            .withSampleRate(fixtureSampleRate).withNumChannels(1).withBitsPerSample(16));
+        juce::AudioBuffer<float> pattern(1, 65536);
+        for (int sample = 0; sample < pattern.getNumSamples(); ++sample)
+            pattern.setSample(0, sample, static_cast<float>((sample % 256) - 128) / 512.0f);
+        bool written = writer != nullptr;
+        for (int chunk = 0; written && chunk < 257; ++chunk)
+            written = writer->writeFromAudioSampleBuffer(pattern, 0, pattern.getNumSamples());
+        writer.reset();
+        PlaybackEngine offline;
+        offline.setOfflineSourceReads(true);
+        constexpr int start = 246000;
+        offline.addClip(longFile, 0.0, 4.0, "long-source", start / fixtureSampleRate,
+                        0.0, 0.0, 0.0, "long-source-clip");
+        juce::AudioBuffer<float> output(2, 2048);
+        int visited = 0;
+        double maxError = 0.0;
+        constexpr int partitions[] { 7, 2048, 333, 512 };
+        int partition = 0;
+        while (written && visited < 192000)
+        {
+            const int count = juce::jmin(partitions[partition++ % 4], 192000 - visited);
+            output.clear();
+            offline.fillTrackBuffer("long-source", output, visited / fixtureSampleRate, count, fixtureSampleRate);
+            for (int sample = 0; sample < count; ++sample)
+            {
+                const float expected = static_cast<float>(((start + visited + sample) % 256) - 128) / 512.0f;
+                maxError = juce::jmax(maxError, std::abs(static_cast<double>(output.getSample(0, sample) - expected)),
+                                    std::abs(static_cast<double>(output.getSample(1, sample) - expected)));
+            }
+            visited += count;
+        }
+        addCheck("offline_long_source_complete_bounded_reads", written && visited == 192000
+            && !offline.hasOfflineSourceReadFailure() && offline.getFullyDecodedSourceCount() == 0
+            && offline.getAudioDataCachedFileCount() == 0 && maxError < 1.0e-6,
+            "A source above 64 MiB decoded is read exactly after a nonzero seek with uneven blocks, without full decoding or read-ahead concealment.", maxError);
+        PlaybackEngine missing;
+        missing.setOfflineSourceReads(true);
+        missing.addClip(outputDirectory.getChildFile("missing-offline-source.wav"), 0, 1, "missing");
+        addCheck("offline_missing_source_fails_closed", missing.hasOfflineSourceReadFailure(),
+            "An unavailable offline source latches a render failure rather than valid silence.");
+
+        const auto sourceClips = offline.getClipSnapshot();
+        auto snapshot = sourceClips.empty()
+            ? PlaybackEngine::ClipInfo(longFile, 0, 4, "long-source") : sourceClips.front();
+        snapshot.fadeIn = 0.5; snapshot.fadeOut = 0.25;
+        snapshot.fadeInCurve = 1; snapshot.fadeOutCurve = 2;
+        snapshot.gainEnvelope = { { 0.0, 0.5f }, { 4.0, 0.5f } };
+        snapshot.isActive = false;
+        PlaybackEngine restored;
+        restored.setOfflineSourceReads(true);
+        restored.addClipFromSnapshot(snapshot);
+        const auto restoredClips = restored.getClipSnapshot();
+        output.clear(); restored.fillTrackBuffer("long-source", output, 0, 512, fixtureSampleRate);
+        addCheck("offline_clip_snapshot_complete", restoredClips.size() == 1
+            && restoredClips.front().fadeInCurve == 1 && restoredClips.front().fadeOutCurve == 2
+            && restoredClips.front().gainEnvelope.size() == 2 && !restoredClips.front().isActive
+            && output.getMagnitude(0, 512) == 0.0f,
+            "Offline snapshots retain fade shapes, gain envelopes and inactive state.");
+        snapshot.isActive = true;
+        PlaybackEngine shaped;
+        shaped.setOfflineSourceReads(true);
+        shaped.addClipFromSnapshot(snapshot);
+        output.clear(); shaped.fillTrackBuffer("long-source", output, 0.25, 512, fixtureSampleRate);
+        double shapedError = 0.0;
+        for (int sample = 0; sample < 512; ++sample)
+        {
+            const float source = static_cast<float>(((start + 12000 + sample) % 256) - 128) / 512.0f;
+            const double expected = source * 0.5 * std::sqrt((0.25 + sample / fixtureSampleRate) / 0.5);
+            shapedError = juce::jmax(shapedError, std::abs(output.getSample(0, sample) - expected));
+        }
+        addCheck("offline_snapshot_shapes_and_envelope_audio", written && shapedError < 1.0e-6,
+            "A restored equal-power fade and gain envelope produce the independently calculated sample gains.", shapedError);
+    }
+    {
+        const auto edgeFile = outputDirectory.getChildFile("waveform-trim-boundaries.wav");
+        juce::AudioBuffer<float> edgeAudio(1, 1537); edgeAudio.clear();
+        edgeAudio.setSample(0, 0, 0.9f); edgeAudio.setSample(0, 63, 0.8f);
+        edgeAudio.setSample(0, 1499, 0.5f); edgeAudio.setSample(0, 1500, 1.0f);
+        PeakCache cache;
+        const bool ready = writeBufferToWavFile(edgeAudio, 1537, fixtureSampleRate, edgeFile) && cache.generateSync(edgeFile);
+        const auto tail = cache.getPeaks(edgeFile, 4096, 0, 1);
+        const auto clipped = cache.getPeaks(edgeFile, 1024, 0, 2, 64, 1500);
+        const auto* tailData = tail.getArray(); const auto* clippedData = clipped.getArray();
+        addCheck("waveform_partial_final_aggregate", ready && tailData != nullptr && tailData->size() == 3
+            && std::abs(static_cast<double>((*tailData)[2]) - 1.0) < 1.0e-5,
+            "The final partial waveform pixel remains visible even when shorter than one aggregate.");
+        addCheck("waveform_exact_trim_boundaries", ready && clippedData != nullptr && clippedData->size() == 5
+            && std::abs(static_cast<double>((*clippedData)[2])) < 1.0e-5
+            && std::abs(static_cast<double>((*clippedData)[4]) - 0.5) < 1.0e-5,
+            "Removed edge transients are excluded while a retained transient one sample before the trim remains visible.");
+    }
+    {
+        const auto timing = juce::JSON::parse(R"json({"tempo":120,"tempoMarkers":[{"time":1,"bpm":60}],"timeSignature":{"numerator":7,"denominator":8}})json");
+        const auto tracks = juce::JSON::parse(R"json([{"name":"tempo-map","clips":[{"startTime":0,"events":[{"type":"noteOn","timestamp":2,"note":60,"velocity":100},{"type":"noteOff","timestamp":2.5,"note":60}]}]}])json");
+        const auto midiPath = outputDirectory.getChildFile("tempo-map-export.mid");
+        bool valid = exportProjectMIDI(midiPath.getFullPathName(), tracks, 120, timing);
+        juce::MidiFile file; juce::FileInputStream input(midiPath);
+        valid = valid && file.readFrom(input);
+        bool note = false, noteOff = false, signature = false; int tempoEvents = 0;
+        for (int track = 0; valid && track < file.getNumTracks(); ++track)
+            for (int event = 0; event < file.getTrack(track)->getNumEvents(); ++event)
+            {
+                const auto& message = file.getTrack(track)->getEventPointer(event)->message;
+                // 120 BPM for one second is two quarter notes; 60 BPM for
+                // the following second adds one, independently of PPQ.
+                if (message.isNoteOn()) note = std::abs(message.getTimeStamp()
+                    - 3.0 * file.getTimeFormat()) < 1.0e-6;
+                if (message.isNoteOff()) noteOff = std::abs(message.getTimeStamp()
+                    - 3.5 * file.getTimeFormat()) < 1.0e-6;
+                if (message.isTempoMetaEvent()) ++tempoEvents;
+                if (message.isTimeSignatureMetaEvent())
+                {
+                    int numerator = 0, denominator = 0; message.getTimeSignatureInfo(numerator, denominator);
+                    const auto* metadata = message.getMetaEventData();
+                    signature = numerator == 7 && denominator == 8
+                        && message.getMetaEventLength() == 4 && metadata[2] == 24 && metadata[3] == 8;
+                }
+            }
+        file.convertTimestampTicksToSeconds();
+        bool noteSeconds = false, noteOffSeconds = false;
+        for (int track = 0; valid && track < file.getNumTracks(); ++track)
+            for (int event = 0; event < file.getTrack(track)->getNumEvents(); ++event)
+            {
+                const auto& message = file.getTrack(track)->getEventPointer(event)->message;
+                if (message.isNoteOn()) noteSeconds = std::abs(message.getTimeStamp() - 2.0) < 1.0e-6;
+                if (message.isNoteOff()) noteOffSeconds = std::abs(message.getTimeStamp() - 2.5) < 1.0e-6;
+            }
+        addCheck("midi_export_project_tempo_map_and_meter", valid && note && noteOff && noteSeconds
+            && noteOffSeconds && signature && tempoEvents == 2,
+            "MIDI event ticks integrate the tempo map and preserve the project's 7/8 meter metadata.");
+        const auto denseTracks = juce::JSON::parse(R"json([{"name":"dense-controller","clips":[{"startTime":0,"events":[{"type":"cc","timestamp":0.1,"controller":4,"value":77,"channel":10},{"type":"cc","timestamp":0.1002,"controller":4,"value":78,"channel":10}]}]}])json");
+        const auto densePath = outputDirectory.getChildFile("dense-controller-export.mid");
+        bool denseValid = exportProjectMIDI(densePath.getFullPathName(), denseTracks, 120,
+            juce::JSON::parse(R"json({"tempo":120,"timeSignature":{"numerator":4,"denominator":4}})json"));
+        juce::MidiFile denseFile; juce::FileInputStream denseInput(densePath);
+        denseValid = denseValid && denseFile.readFrom(denseInput);
+        std::vector<double> controllerTicks;
+        for (int track = 0; denseValid && track < denseFile.getNumTracks(); ++track)
+            for (int event = 0; event < denseFile.getTrack(track)->getNumEvents(); ++event)
+            {
+                const auto& message = denseFile.getTrack(track)->getEventPointer(event)->message;
+                if (message.isController() && message.getControllerNumber() == 4)
+                    controllerTicks.push_back(message.getTimeStamp());
+            }
+        addCheck("midi_export_preserves_submillisecond_controller_tick_separation",
+            denseValid && denseFile.getTimeFormat() == 9600 && controllerTicks.size() == 2
+                && controllerTicks[1] > controllerTicks[0],
+            "Distinct controller values 0.2 ms apart remain distinct SMF ticks rather than collapsing in an external DAW.");
+        const auto latePath = outputDirectory.getChildFile("rounded-tempo-long-export.mid");
+        const auto lateTracks = juce::JSON::parse(R"json([{"name":"late-note","clips":[{"startTime":400,"events":[{"type":"noteOn","timestamp":0,"note":60,"velocity":100},{"type":"noteOff","timestamp":0.5,"note":60}]}]}])json");
+        bool lateValid = exportProjectMIDI(latePath.getFullPathName(), lateTracks, 154,
+            juce::JSON::parse(R"json({"tempo":154})json"));
+        juce::MidiFile lateFile; juce::FileInputStream lateInput(latePath);
+        lateValid = lateValid && lateFile.readFrom(lateInput);
+        lateFile.convertTimestampTicksToSeconds();
+        bool lateOn = false, lateOff = false;
+        for (int track = 0; lateValid && track < lateFile.getNumTracks(); ++track)
+            for (int event = 0; event < lateFile.getTrack(track)->getNumEvents(); ++event)
+            {
+                const auto& message = lateFile.getTrack(track)->getEventPointer(event)->message;
+                if (message.isNoteOn()) lateOn = std::abs(message.getTimeStamp() - 400.0) < 0.000041;
+                if (message.isNoteOff()) lateOff = std::abs(message.getTimeStamp() - 400.5) < 0.000041;
+            }
+        addCheck("midi_export_integer_tempo_does_not_accumulate_long_song_drift",
+            lateValid && lateOn && lateOff,
+            "At 154 BPM a note after 400 seconds round-trips within one 9600-PPQ tick using the encoded integer tempo.");
+    }
+
+    {
+        for (const double expectedBpm : { 90.0, 120.0, 154.0 })
+        {
+            const int samples = 12 * static_cast<int>(fixtureSampleRate);
+            juce::AudioBuffer<float> clicks(1, samples); clicks.clear();
+            const double beat = fixtureSampleRate * 60.0 / expectedBpm;
+            for (double position = fixtureSampleRate * 0.2; position + 128 < samples; position += beat)
+                for (int sample = 0; sample < 128; ++sample)
+                    clicks.setSample(0, static_cast<int>(position) + sample,
+                        0.8f * std::exp(-static_cast<float>(sample) / 18.0f)
+                        * (sample % 2 == 0 ? 1.0f : -1.0f));
+            const auto path = outputDirectory.getChildFile("tempo-clicks-" + juce::String(expectedBpm) + ".wav");
+            const bool written = writeBufferToWavFile(clicks, samples, fixtureSampleRate, path);
+            const auto analysis = ClipTempoAnalyzer::analyze(path, 0.0, 12.0);
+            bool candidateFound = false;
+            if (const auto* choices = analysis["candidates"].getArray())
+                for (const auto& choice : *choices)
+                    candidateFound = candidateFound || std::abs(static_cast<double>(choice["bpm"]) - expectedBpm) < 2.5;
+            addCheck("tempo_detector_clicks_" + juce::String(expectedBpm), written && analysis["error"].isVoid()
+                && candidateFound && std::abs(static_cast<double>(analysis["bpm"]) - expectedBpm) < 2.5,
+                "Known periodic clicks retain their tempo candidate; phase/downbeat and real-music confidence remain diagnostic only.", analysis);
+        }
+        const auto silence = outputDirectory.getChildFile("tempo-silence.wav");
+        juce::AudioBuffer<float> silent(1, 4 * static_cast<int>(fixtureSampleRate)); silent.clear();
+        const bool written = writeBufferToWavFile(silent, silent.getNumSamples(), fixtureSampleRate, silence);
+        const auto analysis = ClipTempoAnalyzer::analyze(silence, 0.0, 4.0);
+        addCheck("tempo_detector_silence_rejected", written && !analysis["error"].isVoid()
+            && static_cast<double>(analysis["confidence"]) == 0.0,
+            "Silence cannot produce an applicable tempo estimate.");
+        const auto noisePath = outputDirectory.getChildFile("tempo-unmetered-noise.wav");
+        juce::AudioBuffer<float> noise(1, 8 * static_cast<int>(fixtureSampleRate));
+        juce::uint32 noiseSeed = 123456789u;
+        for (int sample = 0; sample < noise.getNumSamples(); ++sample)
+        {
+            noiseSeed = noiseSeed * 1664525u + 1013904223u;
+            noise.setSample(0, sample, static_cast<float>(static_cast<int>(noiseSeed >> 8) - 8388608) / 33554432.0f);
+        }
+        const bool noiseWritten = writeBufferToWavFile(noise, noise.getNumSamples(), fixtureSampleRate, noisePath);
+        const auto noiseAnalysis = ClipTempoAnalyzer::analyze(noisePath, 0.0, 8.0);
+        addCheck("tempo_detector_unmetered_noise_rejected", noiseWritten && !noiseAnalysis["error"].isVoid()
+            && static_cast<double>(noiseAnalysis["confidence"]) == 0.0,
+            "A deterministic unmetered noise source cannot gain false confidence from the onset envelope's DC baseline.", noiseAnalysis);
+    }
+
+    {
+        const auto stereoSourceFile = outputDirectory.getChildFile("channel-fold-stereo.wav");
+        const auto monoSourceFile = outputDirectory.getChildFile("channel-expand-mono.wav");
+        juce::AudioBuffer<float> stereoSource(2, 1024), monoSource(1, 1024);
+        for (int sample = 0; sample < 1024; ++sample)
+        {
+            stereoSource.setSample(0, sample, 0.5f); stereoSource.setSample(1, sample, -0.25f);
+            monoSource.setSample(0, sample, 0.375f);
+        }
+        const bool channelSourcesWritten = writeBufferToWavFile(stereoSource, 1024, fixtureSampleRate, stereoSourceFile)
+            && writeBufferToWavFile(monoSource, 1024, fixtureSampleRate, monoSourceFile);
+        PlaybackEngine stereoSourcePlayback, monoSourcePlayback;
+        stereoSourcePlayback.setOfflineSourceReads(true); monoSourcePlayback.setOfflineSourceReads(true);
+        stereoSourcePlayback.addClip(stereoSourceFile, 0, 1024 / fixtureSampleRate, "channel-fold");
+        monoSourcePlayback.addClip(monoSourceFile, 0, 1024 / fixtureSampleRate, "channel-expand");
+        juce::AudioBuffer<float> folded(2, 512), expanded(2, 512), singleChannel(1, 512), unchangedStereo(2, 512);
+        folded.clear(); expanded.clear(); singleChannel.clear(); unchangedStereo.clear();
+        stereoSourcePlayback.fillTrackBuffer("channel-fold", folded, 0, 512, fixtureSampleRate, true);
+        monoSourcePlayback.fillTrackBuffer("channel-expand", expanded, 0, 512, fixtureSampleRate);
+        stereoSourcePlayback.fillTrackBuffer("channel-fold", singleChannel, 0, 512, fixtureSampleRate);
+        stereoSourcePlayback.fillTrackBuffer("channel-fold", unchangedStereo, 0, 512, fixtureSampleRate);
+        double channelError = 0.0;
+        for (int sample = 0; sample < 512; ++sample)
+        {
+            for (int channel = 0; channel < 2; ++channel)
+            {
+                channelError = juce::jmax(channelError, std::abs(static_cast<double>(folded.getSample(channel, sample)) - 0.125));
+                channelError = juce::jmax(channelError, std::abs(static_cast<double>(expanded.getSample(channel, sample)) - 0.375));
+            }
+            channelError = juce::jmax(channelError, std::abs(static_cast<double>(singleChannel.getSample(0, sample)) - 0.125));
+            channelError = juce::jmax(channelError, std::abs(static_cast<double>(unchangedStereo.getSample(0, sample)) - 0.5));
+            channelError = juce::jmax(channelError, std::abs(static_cast<double>(unchangedStereo.getSample(1, sample)) + 0.25));
+        }
+        addCheck("clip_channel_adaptation", channelSourcesWritten && channelError < 1.0e-6,
+            "Stereo sources average L+R on mono tracks, mono sources expand to stereo, and stereo tracks retain channel identity.", channelError);
+        TrackProcessor monoFXTrack;
+        monoFXTrack.setTrackChannelCount(1); monoFXTrack.setPanLaw(PanLaw::Linear);
+        monoFXTrack.prepareToPlay(fixtureSampleRate, 512);
+        auto stereoFX = std::make_unique<OpenStudioUtilityEffect>(OpenStudioUtilityEffect::Kind::GainPhase);
+        const bool rightPolaritySet = stereoFX->setControl("polarityR", 1.0f);
+        const bool stereoFXAdded = monoFXTrack.addTrackFX(std::move(stereoFX), fixtureSampleRate, 512);
+        juce::MidiBuffer noMidi; monoFXTrack.processBlock(folded, noMidi);
+        double postFXMonoError = 0.0;
+        for (int sample = 128; sample < 512; ++sample)
+            postFXMonoError = juce::jmax(postFXMonoError,
+                std::abs(static_cast<double>(folded.getSample(0, sample) + folded.getSample(1, sample))));
+        addCheck("mono_source_stereo_fx_output_preserved", channelSourcesWritten && rightPolaritySet && stereoFXAdded
+            && monoFXTrack.getProcessingChannelCount() >= 2 && postFXMonoError < 1.0e-5
+            && folded.getMagnitude(0, 128, 384) > 0.05f && folded.getMagnitude(1, 128, 384) > 0.05f,
+            "Mono source adaptation occurs before FX; a stereo processor's opposite-polarity outputs remain independently audible.");
+    }
+
+    {
+        const auto eofSourceFile = outputDirectory.getChildFile("source-eof-retained-frame.wav");
+        juce::AudioBuffer<float> eofSource(1, 1024);
+        for (int sample = 0; sample < 1024; ++sample) eofSource.setSample(0, sample, 0.125f);
+        eofSource.setSample(0, 1023, 0.75f);
+        const bool eofSourceWritten = writeBufferToWavFile(eofSource, 1024, fixtureSampleRate, eofSourceFile);
+        for (const bool offlineReads : { false, true })
+            for (const double destinationRate : { 48000.0, 96000.0, 44100.0 })
+            {
+                PlaybackEngine eofPlayback;
+                eofPlayback.setOfflineSourceReads(offlineReads);
+                eofPlayback.addClip(eofSourceFile, 0, 1024 / fixtureSampleRate, "eof-test");
+                juce::AudioBuffer<float> eofOutput(2, 4096); eofOutput.clear();
+                eofPlayback.fillTrackBuffer("eof-test", eofOutput, 0, 4096, destinationRate);
+                const int validFrames = static_cast<int>(std::ceil(1024 * destinationRate / fixtureSampleRate - 1.0e-9));
+                const bool lastRetained = std::abs(eofOutput.getSample(0, validFrames - 1) - 0.75f) < 1.0e-6f
+                    && std::abs(eofOutput.getSample(1, validFrames - 1) - 0.75f) < 1.0e-6f;
+                const bool noPastEOF = eofOutput.getMagnitude(validFrames, 4096 - validFrames) == 0.0f;
+                addCheck("playback_eof_frame_" + juce::String(offlineReads ? "offline_" : "cached_") + juce::String(destinationRate),
+                    eofSourceWritten && lastRetained && noPastEOF && !eofPlayback.hasOfflineSourceReadFailure(),
+                    "The final valid source frame survives equal-rate and resampled output; samples after source EOF remain silent.");
+            }
+        double partitionBoundaryError = 0.0;
+        constexpr juce::int64 boundaryEndFrame = 19451719;
+        constexpr juce::int64 boundaryCaptureStart = boundaryEndFrame - 1200;
+        const double boundaryEndTime = static_cast<double>(boundaryEndFrame) / fixtureSampleRate;
+        constexpr double fractionalOffsetSamples = 3.0 / 7.0;
+        const double boundaryClipStart = boundaryEndTime - (1024.0 - fractionalOffsetSamples) / fixtureSampleRate;
+        for (const bool offlineReads : { false, true })
+            for (const int partition : { 512, 333 })
+            {
+                PlaybackEngine boundaryPlayback; boundaryPlayback.setOfflineSourceReads(offlineReads);
+                boundaryPlayback.addClip(eofSourceFile, boundaryClipStart, boundaryEndTime - boundaryClipStart,
+                    "fractional-boundary", fractionalOffsetSamples / fixtureSampleRate);
+                juce::AudioBuffer<float> boundaryBlock(2, 512);
+                int captured = 0;
+                while (captured < 1600)
+                {
+                    const int count = juce::jmin(partition, 1600 - captured); boundaryBlock.clear();
+                    boundaryPlayback.fillTrackBuffer("fractional-boundary", boundaryBlock,
+                        static_cast<double>(boundaryCaptureStart + captured) / fixtureSampleRate, count, fixtureSampleRate);
+                    for (int sample = 0; sample < count; ++sample)
+                    {
+                        const int timelineFrame = captured + sample;
+                        const double expected = timelineFrame < 177 || timelineFrame >= 1200 ? 0.0
+                            : timelineFrame == 1199 ? 0.75 : 0.125;
+                        for (int channel = 0; channel < 2; ++channel)
+                            partitionBoundaryError = juce::jmax(partitionBoundaryError,
+                                std::abs(boundaryBlock.getSample(channel, sample) - expected));
+                    }
+                    captured += count;
+                }
+            }
+        addCheck("playback_long_timeline_fractional_boundary_partition", eofSourceWritten && partitionBoundaryError < 1.0e-6,
+            "A rational clip start near405seconds retains its last frame and excludes the exact end frame across cached/offline readers and uneven block partitions.", partitionBoundaryError);
+        PlaybackEngine finalFrame;
+        finalFrame.setOfflineSourceReads(true);
+        finalFrame.addClip(eofSourceFile, 0, 1.0 / fixtureSampleRate, "final-frame", 1023 / fixtureSampleRate);
+        juce::AudioBuffer<float> oneFrame(2, 4); oneFrame.clear();
+        finalFrame.fillTrackBuffer("final-frame", oneFrame, 0, 4, fixtureSampleRate);
+        addCheck("playback_single_retained_eof_frame", eofSourceWritten
+            && std::abs(oneFrame.getSample(0, 0) - 0.75f) < 1.0e-6f && oneFrame.getMagnitude(1, 3) == 0.0f,
+            "A trim retaining exactly the source's last frame is audible rather than discarded.");
+    }
+
+    {
+        constexpr double introFixtureRate = 8000.0;
+        constexpr int introFixtureSamples = 150 * 8000;
+        juce::AudioBuffer<float> delayedPulse(1, introFixtureSamples); delayedPulse.clear();
+        for (double position = 90.2 * introFixtureRate; position + 32 < introFixtureSamples; position += 0.5 * introFixtureRate)
+            for (int sample = 0; sample < 32; ++sample)
+                delayedPulse.setSample(0, static_cast<int>(position) + sample,
+                    0.8f * std::exp(-static_cast<float>(sample) / 5.0f) * (sample % 2 == 0 ? 1.0f : -1.0f));
+        const auto introFixtureFile = outputDirectory.getChildFile("tempo-long-silent-intro.wav");
+        const bool introWritten = writeBufferToWavFile(delayedPulse, introFixtureSamples, introFixtureRate, introFixtureFile);
+        const auto introAnalysis = ClipTempoAnalyzer::analyze(introFixtureFile, 0.0, 150.0);
+        addCheck("tempo_detector_bounded_audible_window", introWritten && introAnalysis["error"].isVoid()
+            && std::abs(static_cast<double>(introAnalysis["bpm"]) - 120.0) < 2.5
+            && static_cast<double>(introAnalysis["analysisStartSeconds"]) > 0.0
+            && static_cast<double>(introAnalysis["analysisDurationSeconds"]) <= 60.0
+            && static_cast<double>(introAnalysis["analysisStartSeconds"]) + static_cast<double>(introAnalysis["analysisDurationSeconds"]) <= 150.0
+            && static_cast<double>(introAnalysis["beatOffsetSeconds"]) >= 0.0
+            && static_cast<double>(introAnalysis["beatOffsetSeconds"]) < 60.0 / static_cast<double>(introAnalysis["bpm"]),
+            "Nine bounded energy probes select actual later audio after a 90-second silent lead-in; tempo DSP remains limited to 60 seconds and phase is clip-relative.", introAnalysis);
+    }
+
     // File-reference integration: the same worker learner handles mono/stereo,
     // bounded offsets, continuous FFT hops and invalid/cancelled requests.
     const auto learnFile=[&](const juce::File& file,double start=0.0,bool running=true)
@@ -76150,6 +76974,105 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
     addCheck("fixture_track_ready",
              trackAdded,
              trackAdded ? trackId : "Failed to create the fixture track.");
+
+    {
+        auto* track = trackMap.count(trackId) != 0 ? trackMap[trackId] : nullptr;
+        const auto renderFixture = [&](const juce::String& label, juce::AudioBuffer<float>& audio)
+        {
+            const auto path = outputDirectory.getChildFile("static-track-" + label + ".wav");
+            double rate = 0.0;
+            return track != nullptr && renderProject("master", 0, 1, path.getFullPathName(),
+                "wav", fixtureSampleRate, 32, 2, false, false, 0, false)
+                && readAudioFileForParity(path, audio, rate) && audio.getNumSamples() == fixtureSamples;
+        };
+        juce::AudioBuffer<float> baseline, changed;
+        const bool ready = renderFixture("baseline", baseline);
+        if (track != nullptr) track->setTrimVolume(-6.0f);
+        bool trim = ready && renderFixture("trim", changed);
+        double trimError = 0.0;
+        if (trim) for (int channel = 0; channel < 2; ++channel)
+            for (int sample = 0; sample < fixtureSamples; ++sample)
+                trimError = juce::jmax(trimError, std::abs(static_cast<double>(changed.getSample(channel, sample)
+                    - baseline.getSample(channel, sample) * juce::Decibels::decibelsToGain(-6.0f))));
+        if (track != nullptr) { track->setTrimVolume(0.0f); track->setPhaseInvert(true); }
+        bool phase = ready && renderFixture("phase", changed);
+        double phaseError = 0.0;
+        if (phase) for (int channel = 0; channel < 2; ++channel)
+            for (int sample = 0; sample < fixtureSamples; ++sample)
+                phaseError = juce::jmax(phaseError, std::abs(static_cast<double>(changed.getSample(channel, sample)
+                    + baseline.getSample(channel, sample))));
+        if (track != nullptr) track->setPhaseInvert(false);
+        addCheck("render_static_track_trim_and_polarity", trim && phase && trimError < 1.0e-5 && phaseError < 1.0e-5,
+            "Static track trim and polarity match the independent gain and sign transformations in the exported samples.");
+    }
+
+    {
+        const auto missingPath = outputDirectory.getChildFile("removed-render-source.wav");
+        const bool copied = fixtureFile.copyFileTo(missingPath);
+        const auto missingTrack = addTrack("excluded-missing-source", "audio");
+        addPlaybackClip(missingTrack, missingPath.getFullPathName(), 0, 1, 0, 0, 0, 0, "removed-source-clip");
+        const bool sourceFileRemoved = missingPath.deleteFile();
+        setTrackMute(missingTrack, true);
+        const bool mutedOk = renderProject("master", 0, 1,
+            outputDirectory.getChildFile("muted-missing-source.wav").getFullPathName(),
+            "wav", fixtureSampleRate, 32, 2, false, false, 0, false);
+        setTrackMute(missingTrack, false);
+        const bool excludedOk = renderProject("stem:" + trackId, 0, 1,
+            outputDirectory.getChildFile("excluded-missing-source.wav").getFullPathName(),
+            "wav", fixtureSampleRate, 32, 2, false, false, 0, false);
+        const bool includedRejected = !renderProject("master", 0, 1,
+            outputDirectory.getChildFile("included-missing-source.wav").getFullPathName(),
+            "wav", fixtureSampleRate, 32, 2, false, false, 0, false);
+        addCheck("render_missing_source_only_when_required", copied && sourceFileRemoved && mutedOk && excludedOk && includedRejected,
+            "Unreadable muted/excluded sources do not block export; an included unavailable source fails closed.");
+        removeTrack(missingTrack);
+    }
+
+    {
+        const double transportBeforePreview = getTransportPosition();
+        const bool playingBeforePreview = isTransportPlaying();
+        const auto previewData = getClipTempoPreviewData(trackId, "render-export-regression-clip", 0.25, 0.2);
+        juce::MemoryOutputStream previewDecodedStream;
+        const bool previewDecoded = juce::Base64::convertFromBase64(previewDecodedStream, previewData["wavBase64"].toString());
+        const auto previewBytes = previewDecodedStream.getMemoryBlock();
+        juce::AudioFormatManager previewFormats; previewFormats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> previewReader(previewFormats.createReaderFor(
+            std::make_unique<juce::MemoryInputStream>(previewBytes, false)));
+        bool previewParity = previewDecoded && previewReader && previewReader->sampleRate == fixtureSampleRate
+            && previewReader->lengthInSamples == 9600 && previewReader->numChannels == 1;
+        if (previewReader)
+        {
+            juce::AudioBuffer<float> previewAudio(1, 9600);
+            previewParity = previewReader->read(&previewAudio, 0, 9600, 0, true, false) && previewParity;
+            for (int sample = 0; sample < 9600; ++sample)
+                previewParity = std::abs(previewAudio.getSample(0, sample) - fixture.getSample(0, 12000 + sample)) < 1.0e-6f && previewParity;
+        }
+        addCheck("tempo_preview_pcm_range_preserves_transport", previewParity && getTransportPosition() == transportBeforePreview
+            && isTransportPlaying() == playingBeforePreview && deviceManager.getCurrentAudioDevice() == nullptr,
+            "Bounded dry-source preview PCM matches its retained audio range without changing transport or opening hardware.");
+        auto* descriptor = new juce::DynamicObject();
+        descriptor->setProperty("filePath", fixtureFile.getFullPathName());
+        descriptor->setProperty("startTime", 0.0); descriptor->setProperty("duration", 1.0);
+        descriptor->setProperty("offset", 0.0); descriptor->setProperty("volumeDB", 0.0);
+        descriptor->setProperty("fadeIn", 0.0); descriptor->setProperty("fadeOut", 0.0);
+        descriptor->setProperty("fadeInCurve", 0); descriptor->setProperty("fadeOutCurve", 0);
+        descriptor->setProperty("gainEnvelope", juce::Array<juce::var>());
+        const juce::var source(descriptor);
+        const auto countBefore = playbackEngine.getClipSnapshot().size();
+        const auto mutedPreview = getClipTempoPreviewData(trackId, "absent-muted-clip", 0.25, 0.2, source);
+        addCheck("muted_source_preview_without_playback_publication",
+            mutedPreview["wavBase64"] == previewData["wavBase64"] && playbackEngine.getClipSnapshot().size() == countBefore
+            && getTransportPosition() == transportBeforePreview,
+            "An absent muted clip's document source yields identical preview PCM without adding a playback clip.");
+        const auto sourceTempo = analyzeClipTempo(trackId, "absent-muted-clip", 0.0, -1.0, source);
+        const auto activeTempo = analyzeClipTempo(trackId, "render-export-regression-clip", 0.0, 1.0);
+        addCheck("muted_source_analysis_matches_active_source", juce::JSON::toString(sourceTempo) == juce::JSON::toString(activeTempo),
+            "Read-only analysis does not depend on an active playback publication.");
+        auto invalidSource = source.clone(); invalidSource.getDynamicObject()->setProperty("offset", -1.0);
+        addCheck("clip_source_descriptor_rejects_invalid_geometry",
+            getClipTempoPreviewData(trackId, "render-export-regression-clip", 0.0, 0.2, invalidSource).hasProperty("error"),
+            "An invalid supplied descriptor fails closed instead of silently previewing a different active source.");
+    }
 
     // Observe the host clock from a processor inside the actual export chain,
     // including a different export rate and a tempo change within the range.
@@ -76324,6 +77247,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
         { "mp3_256", "master", "mp3", 44100.0, 256, 2 },
         { "mp3_320", "master", "mp3", 96000.0, 320, 2 },
         { "ogg_q3", "master", "ogg", 44100.0, 3, 2 },
+        { "ogg_q0_mono_96000", "master", "ogg", 96000.0, 0, 1 },
         { "ogg_q5", "master", "ogg", 48000.0, 5, 2 },
         { "ogg_q6", "master", "ogg", 48000.0, 6, 2 },
         { "ogg_q7", "master", "ogg", 48000.0, 7, 2 },
@@ -77048,6 +77972,18 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
     juce::AudioBuffer<float> phaseBaseline, phaseMaster, phaseStem, phaseSelected;
     bool phaseRenderPass = renderPhaseCase("master", "baseline", phaseBaseline);
     const bool phaseMounted = addTrackBuiltInFX(phaseTrack, "OpenStudio EQ", false);
+    juce::AudioBuffer<float> neutralEQ;
+    bool neutralEQExact = phaseRenderPass && phaseMounted
+        && renderPhaseCase("master", "eq-neutral", neutralEQ)
+        && neutralEQ.getNumSamples() == phaseBaseline.getNumSamples();
+    double neutralEQError = 0;
+    if (neutralEQExact)
+        for (int channel = 0; channel < 2; ++channel)
+            for (int sample = 0; sample < phaseBaseline.getNumSamples(); ++sample)
+                neutralEQError = juce::jmax(neutralEQError, std::abs(static_cast<double>(
+                    neutralEQ.getSample(channel, sample) - phaseBaseline.getSample(channel, sample))));
+    addCheck("neutral_eq_export_identity", neutralEQExact && neutralEQError == 0,
+        "Default zero-gain EQ preserves PCM exactly, including on fused-math platforms; no recursive unity-filter residue.", neutralEQError);
     const bool phaseEnabled = phaseMounted && setBuiltInPluginParam(phaseTrack, "track", 0, "phaseMode", 1);
     auto* phaseEQ = phaseMounted ? dynamic_cast<OpenStudioEQ*>(trackMap[phaseTrack]->getTrackFXProcessor(0)) : nullptr;
     const auto phaseState = phaseEnabled ? getBuiltInPluginState(phaseTrack, "track", 0) : juce::var();
@@ -77172,8 +78108,14 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
             spectralChange = juce::jmax(spectralChange, std::abs(wet - dry));
         }
     }
+    auto* spectralEvidence = new juce::DynamicObject();
+    spectralEvidence->setProperty("pdc", spectralPDC);
+    spectralEvidence->setProperty("renderAndLengths", spectralRenderPass);
+    spectralEvidence->setProperty("neutralError", spectralNeutralError);
+    spectralEvidence->setProperty("routeError", spectralMixError);
+    spectralEvidence->setProperty("activeChange", spectralChange);
     addCheck("spectral_eq_export_alignment", spectralPDC && spectralRenderPass && spectralNeutralError < 2e-6 && spectralMixError < 2e-6 && spectralChange > 1e-6,
-        "Prepared spectral delay preserves neutral parallel alignment; active corrections agree in master, stem and selected-item exports.", spectralMixError);
+        "Prepared spectral delay preserves neutral parallel alignment; active corrections agree in master, stem and selected-item exports.", juce::var(spectralEvidence));
     bool spectralRecall = setBuiltInPluginParam(phaseTrack, "track", 0, "phaseMode", 1)
         && phaseEQ->getLatencySamples() == 4352 && trackMap[parallelTrack]->getPDCDelay() == 4352;
     spectralRecall = setBuiltInPluginState(phaseTrack, "track", 0, juce::JSON::toString(spectralState)) && spectralRecall
@@ -77958,6 +78900,7 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
             "Explicit offline startup retained zero device starts, hardware callbacks and callback registrations for the complete export fixture.", hardwareAfter);
     root->setProperty("hardwareBefore", hardwareBefore);
     root->setProperty("hardwareAfter", hardwareAfter);
+    root->setProperty("inlineEQDryRegression", inlineEQDryRegression);
     root->setProperty("offlineRequired", requireOffline);
     root->setProperty("harnessMode", "render_export_regression");
     root->setProperty("claimLevel", "objective_only");
@@ -78870,7 +79813,7 @@ juce::var AudioEngine::freezeTrack(const juce::String& trackId)
 
         if (admittedSourceSamples > 0)
             playbackEngine.fillTrackBuffer(trackId, trackBuffer, sourceBlockTime,
-                                           admittedSourceSamples, renderRate);
+                                           admittedSourceSamples, renderRate, track->getTrackChannelCount() == 1);
 
         // Process through FX chain
         track->setCurrentBlockPosition(automationTime);
@@ -79187,6 +80130,37 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
     result->setProperty("numTracks", midiFile.getNumTracks());
     result->setProperty("ticksPerQuarterNote", midiFile.getTimeFormat());
 
+    juce::Array<juce::var> sourceTempoMarkers;
+    double sourceTempo = 120.0;
+    int sourceNumerator = 4, sourceDenominator = 4;
+    for (int track = 0; track < midiFile.getNumTracks(); ++track)
+    {
+        const auto* sequence = midiFile.getTrack(track);
+        for (int event = 0; sequence != nullptr && event < sequence->getNumEvents(); ++event)
+        {
+            const auto& message = sequence->getEventPointer(event)->message;
+            if (message.isTempoMetaEvent() && message.getTempoSecondsPerQuarterNote() > 0.0)
+            {
+                const double sourceBpm = 60.0 / message.getTempoSecondsPerQuarterNote();
+                auto* marker = new juce::DynamicObject();
+                marker->setProperty("time", message.getTimeStamp()); marker->setProperty("bpm", sourceBpm);
+                sourceTempoMarkers.add(marker);
+                if (message.getTimeStamp() <= 1.0e-9) sourceTempo = sourceBpm;
+            }
+            if (message.isTimeSignatureMetaEvent() && message.getTimeStamp() <= 1.0e-9)
+                message.getTimeSignatureInfo(sourceNumerator, sourceDenominator);
+        }
+    }
+    if (!sourceTempoMarkers.isEmpty())
+    {
+        auto* metadata = new juce::DynamicObject();
+        metadata->setProperty("tempo", sourceTempo); metadata->setProperty("tempoMarkers", sourceTempoMarkers);
+        auto* signature = new juce::DynamicObject();
+        signature->setProperty("numerator", sourceNumerator); signature->setProperty("denominator", sourceDenominator);
+        metadata->setProperty("timeSignature", juce::var(signature));
+        result->setProperty("sourceTempoInfo", juce::var(metadata));
+    }
+
     juce::Array<juce::var> tracksArray;
 
     for (int t = 0; t < midiFile.getNumTracks(); ++t)
@@ -79226,7 +80200,8 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
                 ++channelCounts[msg.getChannel()];
                 evtObj->setProperty("type", "noteOff");
                 evtObj->setProperty("note", msg.getNoteNumber());
-                evtObj->setProperty("velocity", 0);
+                evtObj->setProperty("velocity", msg.getVelocity());
+                evtObj->setProperty("releaseVelocity", msg.getVelocity());
                 evtObj->setProperty("channel", msg.getChannel());
             }
             else if (msg.isController())
@@ -79248,6 +80223,27 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
             {
                 evtObj->setProperty("type", "tempo");
                 evtObj->setProperty("bpm", 60000000.0 / msg.getTempoSecondsPerQuarterNote() / 1000000.0);
+            }
+            else if (msg.isProgramChange() || msg.isChannelPressure() || msg.isAftertouch())
+            {
+                ++channelCounts[msg.getChannel()];
+                evtObj->setProperty("channel", msg.getChannel());
+                if (msg.isProgramChange())
+                {
+                    evtObj->setProperty("type", "programChange");
+                    evtObj->setProperty("value", msg.getProgramChangeNumber());
+                }
+                else if (msg.isChannelPressure())
+                {
+                    evtObj->setProperty("type", "channelPressure");
+                    evtObj->setProperty("value", msg.getChannelPressureValue());
+                }
+                else
+                {
+                    evtObj->setProperty("type", "polyPressure");
+                    evtObj->setProperty("note", msg.getNoteNumber());
+                    evtObj->setProperty("value", msg.getAfterTouchValue());
+                }
             }
             else
             {
@@ -79272,7 +80268,8 @@ juce::var AudioEngine::importMIDIFile(const juce::String& filePath)
     return juce::var(result);
 }
 
-bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::var& midiTracks, double bpm)
+bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::var& midiTracks, double bpm,
+                                   const juce::var& timingOptions)
 {
     auto tracksVar = midiTracks;
     if (tracksVar.isString())
@@ -79282,8 +80279,55 @@ bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::
     if (tracksArray == nullptr)
         return false;
 
-    if (bpm <= 0.0)
+    if (timingOptions.hasProperty("tempo")) bpm = static_cast<double>(timingOptions["tempo"]);
+    if (!std::isfinite(bpm) || bpm <= 0.0)
         bpm = 120.0;
+
+    std::vector<std::pair<double, double>> tempoMap { { 0.0, bpm } };
+    if (const auto* markers = timingOptions["tempoMarkers"].getArray())
+    {
+        for (const auto& marker : *markers)
+        {
+            const double time = static_cast<double>(marker["time"]);
+            const double markerBpm = static_cast<double>(marker.hasProperty("bpm") ? marker["bpm"] : marker["tempo"]);
+            if (std::isfinite(time) && time >= 0.0 && std::isfinite(markerBpm)
+                && markerBpm >= 1.0 && markerBpm <= 1000.0)
+                tempoMap.emplace_back(time, markerBpm);
+        }
+    }
+    else if (timingOptions.isVoid())
+    {
+        const juce::ScopedLock mapLock(tempoMapLock);
+        for (const auto& marker : tempoMarkers) tempoMap.emplace_back(marker.timeSeconds, marker.bpm);
+    }
+    std::stable_sort(tempoMap.begin(), tempoMap.end(), [] (const auto& a, const auto& b) { return a.first < b.first; });
+    // SMF tempo is integer microseconds/quarter. Use that exact encoded rate
+    // for event ticks as well, otherwise rounding accumulates over long songs.
+    for (auto& marker : tempoMap)
+        marker.second = 60000000.0 / juce::roundToInt(60000000.0 / marker.second);
+    // Preserve closely spaced controller changes when exchanging with DAWs
+    // that collapse multiple values for the same controller at one SMF tick.
+    constexpr int exportTicksPerQuarterNote = 9600;
+    const auto secondsToTicks = [&tempoMap, exportTicksPerQuarterNote=exportTicksPerQuarterNote] (double seconds)
+    {
+        const double end = juce::jmax(0.0, seconds);
+        double previous = 0.0, rate = tempoMap.front().second, ticks = 0.0;
+        for (const auto& [time, nextRate] : tempoMap)
+        {
+            if (time > end) break;
+            ticks += (time - previous) * rate * (exportTicksPerQuarterNote / 60.0);
+            previous = time;
+            rate = nextRate;
+        }
+        return ticks + (end - previous) * rate * (exportTicksPerQuarterNote / 60.0);
+    };
+    const auto signature = timingOptions["timeSignature"];
+    const int signatureNumerator = signature.hasProperty("numerator")
+        ? juce::jlimit(1, 32, static_cast<int>(signature["numerator"])) : timeSigNumerator.load();
+    int signatureDenominator = signature.hasProperty("denominator")
+        ? static_cast<int>(signature["denominator"]) : timeSigDenominator.load();
+    if (signatureDenominator < 1 || signatureDenominator > 64
+        || (signatureDenominator & (signatureDenominator - 1)) != 0) signatureDenominator = 4;
 
     auto getDoubleProperty = [] (juce::DynamicObject* obj, const char* name, double fallback)
     {
@@ -79318,7 +80362,8 @@ bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::
             return;
 
         const juce::String eventType = eventObj->getProperty("type").toString();
-        const double ticks = juce::jmax(0.0, absoluteTimeSeconds) * (bpm / 60.0) * 480.0;
+        if (!std::isfinite(absoluteTimeSeconds)) return;
+        const double ticks = secondsToTicks(absoluteTimeSeconds);
         const int channel = getIntProperty(eventObj, "channel", 1, 1, 16);
 
         if (eventType == "noteOn")
@@ -79365,7 +80410,7 @@ bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::
     };
 
     juce::MidiFile midiFile;
-    midiFile.setTicksPerQuarterNote(480);
+    midiFile.setTicksPerQuarterNote(exportTicksPerQuarterNote);
     int exportedTrackCount = 0;
 
     for (const auto& trackVar : *tracksArray)
@@ -79375,7 +80420,17 @@ bool AudioEngine::exportProjectMIDI(const juce::String& outputPath, const juce::
             continue;
 
         juce::MidiMessageSequence sequence;
-        sequence.addEvent(juce::MidiMessage::tempoMetaEvent(static_cast<int>(60000000.0 / bpm)), 0.0);
+        for (const auto& [time, markerBpm] : tempoMap)
+            sequence.addEvent(juce::MidiMessage::tempoMetaEvent(juce::roundToInt(60000000.0 / markerBpm)), secondsToTicks(time));
+        int denominatorPower = 0;
+        for (int denominator = signatureDenominator; denominator > 1; denominator >>= 1)
+            ++denominatorPower;
+        // SMF: 24 MIDI clocks per quarter-note click, eight notated 32nds
+        // per quarter note. JUCE's helper supplies 1 and 96 for these fields.
+        const juce::uint8 meterBytes[] { 0xff, 0x58, 0x04,
+            static_cast<juce::uint8>(signatureNumerator),
+            static_cast<juce::uint8>(denominatorPower), 24, 8 };
+        sequence.addEvent(juce::MidiMessage(meterBytes, sizeof(meterBytes), 0.0));
         const juce::String trackName = trackObj->getProperty("name").toString();
         if (trackName.isNotEmpty())
             sequence.addEvent(juce::MidiMessage::textMetaEvent(0x03, trackName), 0.0);

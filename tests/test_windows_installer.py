@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+import os
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,6 +151,14 @@ end;'''.strip())
             app.write_bytes(b"Not a Windows executable")
         else:
             shutil.copyfile(self.fixture_exe, app)
+        if scenario == 'support':
+            support = Path(os.environ['OPENSTUDIO_SUPPORT_TEST_BUNDLE'])
+            shutil.copy2(support / 'OpenStudioSupport.exe', payload)
+            shutil.copytree(support / 'support-runtime', payload / 'support-runtime')
+        else:
+            shutil.copyfile(self.fixture_exe, payload / "OpenStudioSupport.exe")
+            (payload / "support-runtime").mkdir()
+            (payload / "support-runtime/support-build.json").write_text('{}')
         if scenario != "payload-failure":
             (payload / "webui").mkdir()
             (payload / "webui/index.html").write_text("fixture frontend", encoding="utf-8")
@@ -180,6 +189,13 @@ Source: "%s\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createall
 [Code]
 %s
 ''' % (uuid.uuid4().hex, directory / "installed", directory, payload, self.code), encoding="utf-8")
+        if scenario == 'support':
+            shortcut_name = 'OpenStudio Support QA ' + uuid.uuid4().hex
+            production = (ROOT / 'packaging/windows/OpenStudio.iss').read_text(encoding='utf-8')
+            icon = next(line for line in production.splitlines() if 'Filename: "{app}\\OpenStudioSupport.exe"' in line)
+            icon = icon.replace('{autoprograms}\\OpenStudio Support', '{userprograms}\\' + shortcut_name)
+            script.write_text(script.read_text(encoding='utf-8').replace('[Code]', '[Icons]\n' + icon + '\n[Code]'), encoding='utf-8')
+            (directory / 'shortcut.txt').write_text(shortcut_name, encoding='utf-8')
         exit_code, output = run_bounded([self.compiler, "/Q", script], timeout=60)
         self.assertEqual(exit_code, 0, output)
         return directory
@@ -219,6 +235,25 @@ Source: "%s\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createall
             self.assertEqual((directory / "installed/self-test-ran.txt").read_text(), "0")
         finally:
             self.uninstall(directory)
+
+    @unittest.skipUnless(os.environ.get('OPENSTUDIO_SUPPORT_TEST_BUNDLE'), 'Real support bundle not supplied')
+    def test_support_installs_shortcut_runs_only_on_request_and_uninstalls(self):
+        directory = self.build_fixture('support')
+        shortcut = Path(os.environ['APPDATA']) / 'Microsoft/Windows/Start Menu/Programs' / ((directory / 'shortcut.txt').read_text() + '.lnk')
+        try:
+            code, output = self.install(directory)
+            self.assertEqual(code, 0, output)
+            self.assertTrue(shortcut.is_file())
+            # The application prerequisites/self-test do not start the support executable.
+            processes = subprocess.check_output(['tasklist', '/FO', 'CSV', '/NH'], text=True)
+            self.assertNotIn('"OpenStudioSupport.exe"', processes)
+            subprocess.run([sys.executable, str(ROOT / 'tools/test-packaged-support.py'), '--bundle',
+                            str(directory / 'installed')], check=True, timeout=120)
+        finally:
+            self.uninstall(directory)
+        self.assertFalse(shortcut.exists())
+        self.assertFalse((directory / 'installed/OpenStudioSupport.exe').exists())
+        self.assertFalse((directory / 'installed/support-runtime').exists())
 
     def test_missing_payload_returns_failure_without_dialog(self):
         self.verify_failure("payload-failure", False)

@@ -32,6 +32,7 @@ node_modules
 
 # Python
 __pycache__/
+.venv-support/
 *.pyc
 get-pip.py
 .env
@@ -188,3 +189,4 @@ Desktop.ini
 
 # Download cache for local AI runtime assembly
 /.cache/
+/frontend/debug-symbols/

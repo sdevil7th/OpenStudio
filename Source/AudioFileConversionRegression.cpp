@@ -2,6 +2,8 @@
 #include "AudioFileConversion.h"
 #include "FFmpegLocator.h"
 #include "OwnedChildProcess.h"
+#include "ProjectRateCopy.h"
+#include "PlaybackEngine.h"
 #include <cmath>
 
 namespace
@@ -224,4 +226,122 @@ void runAudioFileConversionRegression(const juce::File& root, const std::functio
     check("converter_invalid_input_preserves_destination",
         protectedOutput.replaceWithText("existing destination")
         && AudioFileConversion::convert(protectedOutput, same, options, alive).failed() && openFixture(same) != nullptr);
+
+    const auto cache = directory.getChildFile("rate-copy-cache");
+    const auto sourceHash = juce::SHA256(stereo).toHexString();
+    const auto rateCopy = ProjectRateCopy::create(stereo, cache, 44100, alive);
+    const auto cachedCopy = ProjectRateCopy::create(stereo, cache, 44100, alive);
+    const juce::File convertedFile(rateCopy["filePath"].toString());
+    auto rateReader = openFixture(convertedFile);
+    check("project_rate_copy_float32_channels_duration", static_cast<bool>(rateCopy["success"]) && rateReader
+        && rateReader->sampleRate == 44100 && rateReader->numChannels == 2 && rateReader->lengthInSamples == 8820
+        && rateReader->bitsPerSample == 32 && rateReader->usesFloatingPointData);
+    check("project_rate_copy_content_cache_preserves_original", static_cast<bool>(cachedCopy["success"])
+        && static_cast<bool>(cachedCopy["cacheHit"]) && cachedCopy["filePath"] == rateCopy["filePath"]
+        && juce::SHA256(stereo).toHexString() == sourceHash);
+    // Final SHA256-named files fit below MAX_PATH, while the former nested
+    // basename-derived staging paths exceed it. Keep that boundary covered.
+    const auto longCache = directory.getChildFile(juce::String::repeatedString("p",
+        juce::jmax(1, 180 - directory.getFullPathName().length() - 1)));
+    const auto longPathCopy = ProjectRateCopy::create(stereo, longCache, 44100, alive);
+    const auto longPathHit = ProjectRateCopy::create(stereo, longCache, 44100, alive);
+    auto longPathReader = openFixture(juce::File(longPathCopy["filePath"].toString()));
+    check("project_rate_copy_long_project_path_has_short_atomic_staging",
+        static_cast<bool>(longPathCopy["success"]) && static_cast<bool>(longPathHit["cacheHit"])
+        && longPathReader && longPathReader->lengthInSamples == 8820
+        && longCache.getNumberOfChildFiles(juce::File::findFiles) == 2
+        && juce::SHA256(stereo).toHexString() == sourceHash);
+    const auto back = ProjectRateCopy::create(convertedFile, cache, 48000, alive);
+    auto backReader = openFixture(juce::File(back["filePath"].toString()));
+    bool roundtripPitch = static_cast<bool>(back["success"]) && backReader && backReader->lengthInSamples == 9600 && backReader->numChannels == 2;
+    if (backReader)
+    {
+        juce::AudioBuffer<float> audio(2, 9600);
+        roundtripPitch = backReader->read(&audio, 0, 9600, 0, true, true) && roundtripPitch;
+        for (int sample = 256; sample < 9344; ++sample)
+            roundtripPitch = std::abs(audio.getSample(0, sample) - 0.25 * std::sin(juce::MathConstants<double>::twoPi * 1000 * sample / 48000)) < 0.0001 && roundtripPitch;
+    }
+    check("project_rate_copy_48000_44100_48000_pitch_duration", roundtripPitch);
+    const auto changedSource = directory.getChildFile("identity-source.wav");
+    const bool firstIdentityWritten = writeFixture(changedSource, 48000, 1, 9600, 1000);
+    const auto firstIdentity = ProjectRateCopy::create(changedSource, cache, 44100, alive);
+    const auto unchangedTime = changedSource.getLastModificationTime();
+    const bool secondIdentityWritten = writeFixture(changedSource, 48000, 1, 9600, 2000);
+    changedSource.setLastModificationTime(unchangedTime);
+    const auto secondIdentity = ProjectRateCopy::create(changedSource, cache, 44100, alive);
+    check("project_rate_copy_identity_includes_source_content", firstIdentityWritten && secondIdentityWritten
+        && static_cast<bool>(firstIdentity["success"]) && static_cast<bool>(secondIdentity["success"])
+        && firstIdentity["filePath"] != secondIdentity["filePath"]);
+    const auto cancelledCopy = ProjectRateCopy::create(stereo, cache, 44100, [] { return false; });
+    check("project_rate_copy_cancelled_job_never_publishes_clip", !static_cast<bool>(cancelledCopy["success"])
+        && static_cast<bool>(cancelledCopy["cancelled"]) && juce::SHA256(stereo).toHexString() == sourceHash);
+
+    PlaybackEngine sourceRoute; sourceRoute.setOfflineSourceReads(true);
+    sourceRoute.addClip(stereo, 12.3, 0.1, "conversion-track", 0.05, -3.0, 0.01, 0.02, "conversion-clip", stereo, 0.05, 1, 2);
+    sourceRoute.setClipGainEnvelope("conversion-track", "conversion-clip", { { 0, 0.5f }, { 0.1, 0.75f } });
+    const bool routeApplied = static_cast<bool>(rateCopy["success"]) && sourceRoute.replaceClipSourcePreservingTimeline(
+        "conversion-track", "conversion-clip", stereo, convertedFile, convertedFile, 0.05, alive);
+    const auto routeAfter = sourceRoute.getClipSnapshot();
+    check("project_rate_copy_atomic_route_preserves_trim_gain_fades", routeApplied && routeAfter.size() == 1
+        && routeAfter[0].audioFile == convertedFile && routeAfter[0].originalAudioFile == convertedFile
+        && routeAfter[0].offset == 0.05 && routeAfter[0].originalOffset == 0.05 && routeAfter[0].startTime == 12.3
+        && routeAfter[0].duration == 0.1 && routeAfter[0].volumeDB == -3 && routeAfter[0].fadeInCurve == 1
+        && routeAfter[0].fadeOutCurve == 2 && routeAfter[0].gainEnvelope.size() == 2);
+    const bool staleRejected = !sourceRoute.replaceClipSourcePreservingTimeline("conversion-track", "conversion-clip", stereo, stereo, stereo, 0.05, alive);
+    const bool restoredRoute = sourceRoute.replaceClipSourcePreservingTimeline("conversion-track", "conversion-clip", convertedFile, stereo, stereo, 0.05, alive);
+    check("project_rate_copy_route_undo_and_stale_compare_swap", staleRejected && restoredRoute
+        && sourceRoute.getClipSnapshot()[0].audioFile == stereo && sourceRoute.getClipSnapshot()[0].offset == 0.05);
+    const bool projectReloadRejected = !sourceRoute.replaceClipSourcePreservingTimeline("conversion-track", "conversion-clip", stereo, convertedFile, convertedFile, 0.05, alive, [&]() {
+        sourceRoute.clearAllClips(); sourceRoute.addClip(stereo, 0, 0.1, "conversion-track", 0, 0, 0, 0, "conversion-clip");
+        return std::static_pointer_cast<void>(std::make_shared<int>(1));
+    });
+    check("project_rate_copy_reopened_identity_cannot_receive_stale_source", projectReloadRejected && sourceRoute.getClipSnapshot()[0].audioFile == stereo);
+
+    PlaybackEngine envelopeRoute; envelopeRoute.setOfflineSourceReads(true);
+    envelopeRoute.addClip(stereo, 0, 0.2, "envelope-track", 0, 0, 0, 0, "envelope-clip");
+    std::vector<PlaybackEngine::GainEnvelopePoint> envelope;
+    for (int point = 4095; point >= 0; --point) envelope.push_back({ point * 0.2 / 4095.0, 0.25f + 0.5f * static_cast<float>(point) / 4095.0f });
+    envelopeRoute.setClipGainEnvelope("envelope-track", "envelope-clip", envelope);
+    juce::AudioBuffer<float> envelopeAudio(2, 4096); envelopeAudio.clear();
+    envelopeRoute.fillTrackBuffer("envelope-track", envelopeAudio, 0, 4096, 48000);
+    double envelopeError = 0.0;
+    for (int sample = 0; sample < 4096; ++sample)
+    {
+        const double expected = 0.25 * std::sin(juce::MathConstants<double>::twoPi * 1000 * sample / 48000)
+            * (0.25 + 0.5 * (sample / 48000.0) / 0.2);
+        envelopeError = juce::jmax(envelopeError, std::abs(envelopeAudio.getSample(0, sample) - expected));
+    }
+    check("large_sorted_gain_envelope_binary_lookup_audio_parity", envelopeError < 1.0e-6);
+
+    const auto impulseSource = directory.getChildFile("float-overunity-impulse.wav");
+    juce::WavAudioFormat impulseFormat;
+    std::unique_ptr<juce::OutputStream> impulseStream = impulseSource.createOutputStream();
+    auto impulseWriter = impulseFormat.createWriterFor(impulseStream, juce::AudioFormatWriterOptions()
+        .withSampleRate(48000).withNumChannels(2).withBitsPerSample(32));
+    juce::AudioBuffer<float> impulse(2, 1024); impulse.clear();
+    impulse.setSample(0, 800, 1.5f); impulse.setSample(1, 800, -0.75f);
+    bool impulsePass = impulseWriter && impulseWriter->writeFromAudioSampleBuffer(impulse, 0, 1024) && impulseWriter->flush();
+    impulseWriter.reset();
+    const auto impulseConverted = ProjectRateCopy::create(impulseSource, cache, 44100, alive);
+    auto impulseReader = openFixture(juce::File(impulseConverted["filePath"].toString()));
+    if (impulseReader)
+    {
+        juce::AudioBuffer<float> convertedImpulse(2, static_cast<int>(impulseReader->lengthInSamples));
+        impulsePass = impulseReader->read(&convertedImpulse, 0, convertedImpulse.getNumSamples(), 0, true, true) && impulsePass;
+        int peakSample = 0; float peakValue = 0;
+        for (int sample = 0; sample < convertedImpulse.getNumSamples(); ++sample)
+        {
+            const float value = std::abs(convertedImpulse.getSample(0, sample));
+            if (value > peakValue) { peakValue = value; peakSample = sample; }
+            impulsePass = std::abs(convertedImpulse.getSample(1, sample) + 0.5f * convertedImpulse.getSample(0, sample)) < 1.0e-6f && impulsePass;
+        }
+        impulsePass = peakValue > 1.0f && std::abs(peakSample - 735) <= 1 && impulsePass;
+    }
+    else impulsePass = false;
+    check("project_rate_copy_impulse_timing_float_headroom_and_channel_phase", impulsePass && static_cast<bool>(impulseConverted["success"]));
+    auto* diagnostics = new juce::DynamicObject();
+    diagnostics->setProperty("firstCopy", rateCopy); diagnostics->setProperty("cachedCopy", cachedCopy);
+    diagnostics->setProperty("roundtripCopy", back); diagnostics->setProperty("longPathCopy", longPathCopy);
+    diagnostics->setProperty("longPathCacheDirectoryCharacters", longCache.getFullPathName().length());
+    directory.getChildFile("project-rate-copy-regression.json").replaceWithText(juce::JSON::toString(juce::var(diagnostics), true));
 }

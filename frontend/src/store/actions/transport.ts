@@ -18,6 +18,7 @@ const AUDIO_RECORD_LOG_PREFIX = "[audio.record]";
 
 let recordStartInFlight = false;
 let recordStartToken = 0;
+let recordStartProjectEpoch = -1;
 let playRequestToken = 0;
 
 function quantizeRecordedMIDIEvents(events: MIDIEvent[], gridSeconds: number, strength: number) {
@@ -305,7 +306,8 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
 
     toggleRecord: async () => {
       const state = get();
-      if (recordStartInFlight || state.transport.isRecording || state.recordSession) {
+      if ((recordStartInFlight && recordStartProjectEpoch === getProjectEpoch())
+        || state.isPreparingToRecord || state.transport.isRecording || state.recordSession) {
         await state.stop();
         return;
       }
@@ -313,6 +315,10 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
     },
 
     record: async () => {
+      if (recordStartInFlight && recordStartProjectEpoch !== getProjectEpoch()) {
+        recordStartToken += 1;
+        recordStartInFlight = false;
+      }
       if (recordStartInFlight) {
         console.warn(`${AUDIO_RECORD_LOG_PREFIX} record ignored because a start is already in flight`);
         return;
@@ -333,7 +339,13 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       }
 
       recordStartInFlight = true;
+      const projectEpoch = getProjectEpoch();
+      recordStartProjectEpoch = projectEpoch;
       const recordToken = ++recordStartToken;
+      const transportRequestToken = ++playRequestToken;
+      const isCurrentRecordRequest = () => recordToken === recordStartToken
+        && projectEpoch === getProjectEpoch() && transportRequestToken === playRequestToken;
+      set({ isPreparingToRecord: true });
       console.log(`${AUDIO_RECORD_LOG_PREFIX} record:start`, {
         transportBefore: transport,
         armedTrackIds: armedTracks.map(({ track }) => track.id),
@@ -348,6 +360,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
 
       if (!wasAlreadyPlaying) {
         await ensureMIDIInputsReadyForRecording(armedMidiTracks, get);
+        if (!isCurrentRecordRequest()) return;
       }
 
       // If time selection exists and loop is enabled, start from selection
@@ -374,7 +387,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
 
       const currentTime = wasAlreadyPlaying ? clickedPlayheadTime : get().transport.currentTime;
 
-      if(!wasAlreadyPlaying && (!await get().prepareAutomationAutoJoin(currentTime) || recordToken !== recordStartToken))return;
+      if (!wasAlreadyPlaying && (!await get().prepareAutomationAutoJoin(currentTime) || !isCurrentRecordRequest())) return;
 
       // Store the start position for stop behavior (only if not already playing)
       if (!wasAlreadyPlaying) {
@@ -404,36 +417,29 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         } catch (error) {
           console.warn(`${AUDIO_RECORD_LOG_PREFIX} record:syncClipsWithBackend failed; continuing with recording`, error);
         }
+        if (!isCurrentRecordRequest()) return;
         await syncArmedTracksBeforeRecording(armedTracks);
+        if (!isCurrentRecordRequest()) return;
         const positionResult = await nativeBridge.setTransportPosition(currentTime);
+        if (!isCurrentRecordRequest()) return;
         console.log(`${AUDIO_RECORD_LOG_PREFIX} record:setTransportPosition`, { currentTime, positionResult });
       } else {
         console.log(
           "[DAW] Punch-in recording: already playing, preserving playback state",
         );
         await syncArmedTracksBeforeRecording(armedTracks);
+        if (!isCurrentRecordRequest()) return;
       }
 
-      if (recordToken !== recordStartToken) {
+      if (!isCurrentRecordRequest()) {
         console.warn(`${AUDIO_RECORD_LOG_PREFIX} record start cancelled before native recording`);
         return;
       }
 
-      set((state) => ({
-        transport: {
-          ...state.transport,
-          isPlaying: true,
-          isPaused: false,
-          isRecording: true,
-        },
-        recordingClips: newRecordingClips,
-        recordSession: nextRecordSession,
-        recordingMIDIPreviews: {},
-      }));
-
       // Sync punch range with backend before recording starts
       const punchState = get().transport;
       const punchResult = await nativeBridge.setPunchRange(punchState.punchStart, punchState.punchEnd, punchState.punchEnabled);
+      if (!isCurrentRecordRequest()) return;
       console.log(`${AUDIO_RECORD_LOG_PREFIX} record:setPunchRange`, {
         punchStart: punchState.punchStart,
         punchEnd: punchState.punchEnd,
@@ -441,37 +447,38 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         punchResult,
       });
 
-      // Start both playback and recording
-      if (!wasAlreadyPlaying) {
-        const playingResult = await nativeBridge.setTransportPlaying(true);
-        console.log(`${AUDIO_RECORD_LOG_PREFIX} record:setTransportPlaying`, { playingResult });
-      }
-      if (recordToken !== recordStartToken) {
-        console.warn(`${AUDIO_RECORD_LOG_PREFIX} record start cancelled after playback start`);
-        if (!wasAlreadyPlaying) {
-          await nativeBridge.setTransportPlaying(false).catch(logBridgeError("record:cancelPlaybackStart"));
-        }
-        return;
-      }
-      const recordingResult = await nativeBridge.setTransportRecording(true);
-      console.log(`${AUDIO_RECORD_LOG_PREFIX} record:setTransportRecording`, { recordingResult });
+      // A fresh start prepares writers before the same native operation publishes
+      // playback. Punch-in keeps the existing rolling transport and position.
+      const recordingResult = wasAlreadyPlaying
+        ? await nativeBridge.setTransportRecording(true)
+        : await nativeBridge.startPreparedRecording();
+      if (!isCurrentRecordRequest()) return;
+      console.log(`${AUDIO_RECORD_LOG_PREFIX} record:nativeCommit`, { recordingResult, wasAlreadyPlaying });
       if (!recordingResult) {
         throw new Error("Native recording did not start");
       }
+      set((state) => ({
+        isPreparingToRecord: false,
+        transport: { ...state.transport, isPlaying: true, isPaused: false, isRecording: true },
+        recordingClips: newRecordingClips,
+        recordSession: nextRecordSession,
+        recordingMIDIPreviews: {},
+      }));
       if (wasAlreadyPlaying) {
         void ensureMIDIInputsReadyForRecording(armedMidiTracks, get).catch((error) => {
           console.warn(`${AUDIO_RECORD_LOG_PREFIX} record:punchInMIDIInputReadiness failed`, error);
         });
       }
       } catch (error) {
-        if (recordToken !== recordStartToken) return;
+        if (!isCurrentRecordRequest()) return;
         console.error(`${AUDIO_RECORD_LOG_PREFIX} record failed`, error);
         if (!transport.isPlaying) {
           await nativeBridge.setTransportPlaying(false).catch(logBridgeError("record:failedStartPlayback"));
-          if (recordToken !== recordStartToken) return;
+          if (!isCurrentRecordRequest()) return;
         }
         get().showToast?.("Failed to start recording", "error");
         set((state) => ({
+          isPreparingToRecord: false,
           transport: {
             ...state.transport,
             isPlaying: transport.isPlaying,
@@ -485,6 +492,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       } finally {
         if (recordToken === recordStartToken) {
           recordStartInFlight = false;
+          if (projectEpoch === getProjectEpoch()) set({ isPreparingToRecord: false });
         }
       }
     },
@@ -513,11 +521,12 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       const stopProjectEpoch = getProjectEpoch();
       const { playStartPosition, transport, addClip, playheadStopBehavior } = get();
       const activeRecordSession = get().recordSession;
+      const wasPreparingToRecord = recordStartInFlight || get().isPreparingToRecord;
       if (recordStartInFlight) {
         recordStartToken += 1;
         recordStartInFlight = false;
       }
-      const wasRecording = transport.isRecording || Boolean(activeRecordSession);
+      const wasRecording = transport.isRecording || Boolean(activeRecordSession) || wasPreparingToRecord;
       const wasPlaying = transport.isPlaying || transport.isPaused;
       console.log("[useDAWStore] STOP called. Was recording:", wasRecording);
 
@@ -537,6 +546,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       const intendedStopTime = stopTime;
 
       set((state) => ({
+        isPreparingToRecord: false,
         transport: {
           ...state.transport,
           isPlaying: false,
@@ -929,7 +939,8 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
       // asks the backend for completed audio/MIDI takes and clears the active
       // record session. This also keeps custom bindings and Command Palette
       // execution safe, not only the factory Space binding.
-      if (transport.isRecording || get().recordSession) {
+      if (transport.isRecording || get().recordSession || get().isPreparingToRecord
+        || (recordStartInFlight && recordStartProjectEpoch === getProjectEpoch())) {
         await get().stop();
         return;
       }
@@ -996,6 +1007,7 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
     },
 
     setTempo: async (tempo) => {
+      if (!Number.isFinite(tempo) || tempo < 20 || tempo > 400 || get().globalLocked) return;
       const oldTempo = get().transport.tempo;
       if (oldTempo === tempo) return;
 
@@ -1004,12 +1016,12 @@ export const transportActions = (set: SetFn, get: GetFn) => ({
         description: `Set tempo to ${tempo} BPM`,
         timestamp: Date.now(),
         execute: async () => {
-          set((s) => ({ transport: { ...s.transport, tempo } }));
+          set((s) => ({ transport: { ...s.transport, tempo }, isModified: true }));
           await nativeBridge.setTempo(tempo);
           if (get().metronomeTrackId) await get().generateMetronomeTrack();
         },
         undo: async () => {
-          set((s) => ({ transport: { ...s.transport, tempo: oldTempo } }));
+          set((s) => ({ transport: { ...s.transport, tempo: oldTempo }, isModified: true }));
           await nativeBridge.setTempo(oldTempo);
           if (get().metronomeTrackId) await get().generateMetronomeTrack();
         },

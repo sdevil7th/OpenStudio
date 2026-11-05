@@ -1,6 +1,7 @@
 export const AUDIO_DEADLINE_RECENT_WINDOW_SECONDS = 10;
 
 export type AudioDeadlineTelemetry = {
+  audioCallbackTimingAvailable?: boolean;
   blockSize?: number;
   sampleRate?: number;
   lastCallbackCounter?: number;
@@ -12,6 +13,7 @@ export type AudioDeadlineTelemetry = {
 };
 
 export type AudioDeadlineStatus = {
+  available: boolean;
   deviceSessionMissCount: number;
   burstMissCount: number;
   lastMissProcessMs: number;
@@ -38,6 +40,9 @@ export function resolveAudioDeadlineStatus(
   telemetry: AudioDeadlineTelemetry | null | undefined,
   recentWindowSeconds = AUDIO_DEADLINE_RECENT_WINDOW_SECONDS,
 ): AudioDeadlineStatus {
+  const available = telemetry?.audioCallbackTimingAvailable !== false
+    && typeof telemetry?.audioCallbackDeadlineMissCount === "number";
+  if (!available) telemetry = undefined;
   const deviceSessionMissCount = Math.trunc(finiteNonNegative(telemetry?.audioCallbackDeadlineMissCount));
   const burstMissCount = Math.trunc(finiteNonNegative(telemetry?.audioCallbackDeadlineMissBurstCount));
   const lastMissProcessMs = finiteNonNegative(telemetry?.lastAudioCallbackDeadlineMissProcessMs);
@@ -64,6 +69,7 @@ export function resolveAudioDeadlineStatus(
   );
 
   return {
+    available,
     deviceSessionMissCount,
     burstMissCount,
     lastMissProcessMs,

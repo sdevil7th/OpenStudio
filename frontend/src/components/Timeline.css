@@ -1,0 +1,8 @@
+.timeline-canvas-spacer {
+  height: var(--timeline-content-height);
+}
+
+.timeline-canvas-viewport {
+  top: var(--timeline-sticky-top);
+  height: var(--timeline-viewport-height);
+}

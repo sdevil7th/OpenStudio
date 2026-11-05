@@ -539,6 +539,28 @@ describe("action catalog integrity", () => {
     }
   });
 
+  it("routes explicit project zoom commands to Timeline while a menu or another surface owns focus", () => {
+    const timeline = vi.fn(() => "handled" as const);
+    const other = vi.fn(() => "handled" as const);
+    const unregisterTimeline = registerScopedActionExecutor({ kind: "timeline" }, timeline);
+    const unregisterModal = registerScopedActionExecutor({ kind: "modal" }, other);
+    const unregisterMixer = registerScopedActionExecutor({ kind: "mixer" }, other);
+    try {
+      for (const kind of ["modal", "mixer", "track_control_panel", "application"] as const) {
+        activateShortcutContext({ kind });
+        getRegisteredAction("view.zoomToFit")?.execute();
+        getRegisteredAction("view.zoomToSelection")?.execute();
+      }
+      expect(timeline.mock.calls).toEqual(Array.from({ length: 4 }, () => [
+        ["view.zoomToFit"], ["view.zoomToSelection"],
+      ]).flat());
+      expect(other).not.toHaveBeenCalled();
+    } finally {
+      unregisterMixer(); unregisterModal(); unregisterTimeline();
+      activateShortcutContext({ kind: "application" });
+    }
+  });
+
   it("falls through co-owned surface executors until one recognizes the action", () => {
     const owner = vi.fn(() => "handled" as const);
     const unrelatedOwner = vi.fn(() => "unmatched" as const);

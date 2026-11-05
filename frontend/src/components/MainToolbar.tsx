@@ -108,6 +108,7 @@ export function MainToolbar({
     isPlaying,
     isPaused,
     isRecording,
+    isPreparingToRecord,
     loopEnabled,
     play,
     toggleRecord,
@@ -144,6 +145,7 @@ export function MainToolbar({
       isPlaying: s.transport.isPlaying,
       isPaused: s.transport.isPaused,
       isRecording: s.transport.isRecording,
+      isPreparingToRecord: s.isPreparingToRecord,
       loopEnabled: s.transport.loopEnabled,
       play: s.play,
       toggleRecord: s.toggleRecord,
@@ -357,10 +359,10 @@ export function MainToolbar({
           variant="danger"
           size="icon-lg"
           active={isRecording}
-          disabled={!hasArmedTracks && !isRecording}
+          disabled={!hasArmedTracks && !isRecording && !isPreparingToRecord}
           onClick={() => toggleRecord()}
-          title={isRecording || hasArmedTracks ? `Record (${recordShortcut})` : "Arm a track to record"}
-          aria-label={isRecording || hasArmedTracks ? "Record" : "Arm a track to record"}
+          title={isPreparingToRecord ? "Cancel recording preparation" : isRecording || hasArmedTracks ? `Record (${recordShortcut})` : "Arm a track to record"}
+          aria-label={isPreparingToRecord ? "Cancel recording preparation" : isRecording || hasArmedTracks ? "Record" : "Arm a track to record"}
         >
           <Circle size={16} fill="currentColor" />
         </Button>
@@ -368,6 +370,7 @@ export function MainToolbar({
           variant="success"
           size="icon-lg"
           active={isPlaying}
+          disabled={isPreparingToRecord}
           onClick={() => play()}
           title="Play (Space)"
           aria-label="Play"
@@ -377,7 +380,7 @@ export function MainToolbar({
         <Button
           variant="default"
           size="icon-lg"
-          disabled={!isPlaying && !isPaused}
+          disabled={!isPlaying && !isPaused && !isPreparingToRecord}
           onClick={() => stop()}
           title="Stop (Space)"
           aria-label="Stop"

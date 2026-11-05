@@ -6,11 +6,21 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Unpublished candidate version to qualify
+        default: "0.1.09"
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  support-packages:
+    uses: ./.github/workflows/support-qualification.yml
+    with:
+      version: ${{ inputs.version || '0.1.09' }}
+
   verify-python-tools:
     name: Python tooling
     runs-on: ubuntu-24.04
@@ -34,6 +44,8 @@ jobs:
         run: >-
           python3 -m unittest
           tests.test_release_notes
+          tests.test_release_build_policy
+          tests.test_support_identity
           tests.test_build_process_lifecycle
           tests.test_juce_lv2_identifier_patch
           tests.test_juce_mac_browser_navigation_patch
@@ -66,7 +78,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest, macos-14]
+        os: [ubuntu-24.04, windows-latest, macos-15]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -120,12 +132,25 @@ jobs:
           if-no-files-found: error
 
   verify-input-profiles:
-    name: Input profiles (${{ matrix.os }})
+    name: Input profiles (${{ matrix.os }}, ${{ matrix.shard }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-15, ubuntu-24.04]
+        # Fresh browser contexts load hundreds of Vite modules. Spread Windows
+        # cases across hosts to reduce loopback socket pressure after an
+        # ERR_NO_BUFFER_SPACE failure in the full suite. Keep every test and
+        # assertion; do not retry a failed navigation or extend UI deadlines.
+        include:
+          - { os: windows-latest, shard: '1/4', artifact: windows-1 }
+          - { os: windows-latest, shard: '2/4', artifact: windows-2 }
+          - { os: windows-latest, shard: '3/4', artifact: windows-3 }
+          - { os: windows-latest, shard: '4/4', artifact: windows-4 }
+          - { os: macos-15, shard: '1/1', artifact: macos }
+          - { os: ubuntu-24.04, shard: '1/4', artifact: linux-1 }
+          - { os: ubuntu-24.04, shard: '2/4', artifact: linux-2 }
+          - { os: ubuntu-24.04, shard: '3/4', artifact: linux-3 }
+          - { os: ubuntu-24.04, shard: '4/4', artifact: linux-4 }
     defaults:
       run:
         working-directory: frontend
@@ -183,14 +208,14 @@ jobs:
           NODE
 
       - name: Run shortcut and input-profile browser tests
-        run: npm run test:e2e
+        run: npm run test:e2e -- --shard=${{ matrix.shard }}
 
       - name: Remove Playwright WebKit keyboard-navigation preference
         if: always() && runner.os == 'macOS'
         run: defaults delete org.webkit.Playwright AppleKeyboardUIMode 2>/dev/null || true
 
       - name: Check controls in the system WebKitGTK
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.shard == '1/4'
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-webkit2-4.1 libxtst6 xvfb xauth
@@ -201,7 +226,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: control-ui-${{ matrix.os }}
+          name: control-ui-${{ matrix.artifact }}
           path: |
             output/playwright/test-results
             output/linux-control-ui
@@ -210,13 +235,17 @@ jobs:
   verify-windows:
     runs-on: windows-latest
     env:
-      VERSION: 0.0.0
+      VERSION: ${{ inputs.version || '0.1.09' }}
       BUILD_DIR: build-verify-windows
       ASIO_SDK_DIR: thirdparty/asio
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_WIN_X64_SHA256: d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate candidate release notes
+        shell: pwsh
+        run: python tools/validate-release-notes.py --version "$env:VERSION"
 
       - name: Install Inno Setup for installer regression tests
         shell: pwsh
@@ -252,6 +281,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
 
       - name: Install ASIO SDK
         shell: pwsh
@@ -315,6 +348,18 @@ jobs:
       - name: Build OpenStudio
         shell: pwsh
         run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
+
+      - name: Qualify standalone offline support
+        shell: pwsh
+        run: |
+          python tools/build-support-tool.py --version "$env:VERSION" --stage "$env:BUILD_DIR/OpenStudio_artefacts/Release"
+          if ($LASTEXITCODE -ne 0) { throw 'Support build failed.' }
+          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support -q
+          if ($LASTEXITCODE -ne 0) { throw 'Support regression failed.' }
+          python tools/validate-support-tool.py --bundle output/support-package/OpenStudioSupport --version "$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'Support inventory failed.' }
+          python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged support qualification failed.' }
 
       - name: Install Chromium for native-schema editor qualification
         shell: pwsh
@@ -557,18 +602,60 @@ jobs:
             -TimeoutSeconds 360 `
             -SkipBuild
 
+      - name: Package complete Windows candidate without publishing
+        shell: pwsh
+        run: |
+          ./tools/package-windows-release.ps1 -Version $env:VERSION -SourceDir "$env:BUILD_DIR/OpenStudio_artefacts/Release" -OutputDir dist/windows
+          ./tools/package-windows-store.ps1 -Version "$env:VERSION.0" -SourceDir "$env:BUILD_DIR/OpenStudio_artefacts/Release" -OutputDir dist/store
+
+      - name: Qualify installed Windows candidate
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'OpenStudio-installed-candidate'
+          $installer = (Resolve-Path 'dist/windows/OpenStudio-Setup-x64.exe').Path
+          $install = Start-Process -FilePath $installer -PassThru -Wait -WindowStyle Hidden -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="{0}"' -f $root))
+          if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+          try {
+            ./tools/run-window-lifecycle-smoke.ps1 -AppPath "$root/OpenStudio.exe" -ReportPath "$env:RUNNER_TEMP/candidate-installed.json" -TimeoutSeconds 300
+            python tools/test-packaged-support.py --bundle $root
+            if ($LASTEXITCODE -ne 0) { throw 'Installed support self-test failed.' }
+          } finally {
+            $uninstall = Start-Process -FilePath "$root/unins000.exe" -PassThru -Wait -WindowStyle Hidden -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+            if ($uninstall.ExitCode -ne 0) { throw 'Candidate uninstall failed.' }
+          }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-windows-x64
+          path: |
+            dist/windows/OpenStudio-Setup-x64.exe
+            dist/store/*.msix
+            dist/store/package-report.json
+            ${{ runner.temp }}/candidate-installed*
+          if-no-files-found: error
+
   verify-macos:
-    name: macOS native windows (${{ matrix.os }})
+    needs: support-packages
+    name: macOS native windows (${{ matrix.os }}; callback diagnostics ${{ matrix.os == 'macos-15-intel' && 'ON' || 'OFF' }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15-intel]
+        os: [macos-15, macos-15-intel]
     env:
-      VERSION: 0.0.0
+      VERSION: ${{ inputs.version || '0.1.09' }}
       BUILD_DIR: build-verify-macos
+      CALLBACK_DIAGNOSTICS: ${{ matrix.os == 'macos-15-intel' && 'ON' || 'OFF' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate candidate release notes
+        shell: pwsh
+        run: python tools/validate-release-notes.py --version "$env:VERSION"
+
+      - name: Test POSIX desktop ownership and lifecycle identity
+        shell: bash
+        run: python3 -B -m unittest tests.test_desktop_qualification -v
 
       - name: Prepare system FFmpeg for audio conversion qualification
         shell: bash
@@ -596,6 +683,7 @@ jobs:
         run: |
           cmake -S . -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DOPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS="$CALLBACK_DIAGNOSTICS" \
             -DOPENSTUDIO_APP_VERSION="$VERSION" \
             -DOPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK=OFF \
             -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
@@ -677,10 +765,6 @@ jobs:
             output/review/runtime-Release-*/qualification.json
           if-no-files-found: warn
 
-      - name: Test POSIX desktop process ownership
-        shell: bash
-        run: python3 -B -m unittest tests.test_desktop_qualification -v
-
       - name: Retain native FX order regression evidence (macOS)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -706,16 +790,89 @@ jobs:
             ${{ runner.temp }}/OpenStudio_WindowLifecycleHarness.startup.log
           if-no-files-found: warn
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: env.CALLBACK_DIAGNOSTICS == 'OFF'
+        with:
+          name: support-macos-universal
+          path: output/support-universal
+
+      - name: Package complete macOS candidate without notarization or publication
+        if: env.CALLBACK_DIAGNOSTICS == 'OFF'
+        shell: bash
+        env:
+          MACOS_CODESIGN_KIND: ad-hoc
+        run: |
+          tar -xzf output/support-universal/support-macos-universal.tgz -C output/support-universal
+          ditto output/support-universal/OpenStudioSupport.app "$APP_BUNDLE/Contents/Helpers/OpenStudioSupport.app"
+          ditto 'output/support-universal/OpenStudio Support.app' "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio Support.app"
+          bash tools/package-macos-release.sh "$APP_BUNDLE" "$VERSION" dist/macos
+
+      - name: Qualify installed apps from the finished candidate DMG
+        if: env.CALLBACK_DIAGNOSTICS == 'OFF'
+        run: python3 tools/test-macos-candidate.py --dmg dist/macos/OpenStudio-macOS.dmg --version "$VERSION" --output "$RUNNER_TEMP/candidate-macos-installed"
+
+      - name: Check callback diagnostic build contract
+        shell: pwsh
+        run: ./tools/run-render-export-headless-regression.ps1 -AppPath "$env:APP_BUNDLE/Contents/MacOS/OpenStudio" -Configuration Release -SkipBuild -OutputRoot "$env:RUNNER_TEMP/candidate-render" -TimeoutSeconds 300
+
+      - name: Retain Mac render/export diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: render-export-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-render/**/render_export_regression_result.json
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && env.CALLBACK_DIAGNOSTICS == 'OFF'
+        with:
+          name: candidate-macos-universal
+          path: dist/macos/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && env.CALLBACK_DIAGNOSTICS == 'OFF'
+        with:
+          name: candidate-macos-installed-arm64
+          path: ${{ runner.temp }}/candidate-macos-installed/
+          if-no-files-found: warn
+
+  qualify-macos-candidate-intel:
+    name: Installed universal DMG (Intel)
+    needs: verify-macos
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version || '0.1.09' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: candidate-macos-universal
+          path: candidate
+      - name: Qualify the same finished DMG on Intel
+        run: python3 tools/test-macos-candidate.py --dmg candidate/OpenStudio-macOS.dmg --version "$VERSION" --output "$RUNNER_TEMP/candidate-macos-installed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: candidate-macos-installed-intel
+          path: ${{ runner.temp }}/candidate-macos-installed/
+          if-no-files-found: error
+
   verify-linux:
     runs-on: ubuntu-22.04
     env:
       # AppImage verification exercises the real release-notes gate.
-      VERSION: 0.1.04
+      VERSION: ${{ inputs.version || '0.1.09' }}
       BUILD_DIR: build-verify-linux
       ONNXRUNTIME_VERSION: 1.24.4
       ONNXRUNTIME_LINUX_X64_SHA256: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: '3.13'
 
       - name: Validate AppImage release notes
         run: python3 tools/validate-release-notes.py --version "$VERSION"
@@ -731,7 +888,7 @@ jobs:
               | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           fi
           bash ./tools/setup-linux-prereqs.sh
-          sudo apt-get install -y xvfb xauth openbox
+          sudo apt-get install -y xvfb xauth openbox python3-tk
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -771,6 +928,17 @@ jobs:
       - name: Build OpenStudio
         shell: bash
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
+
+      - name: Verify and archive Linux native/frontend symbol matches
+        run: |
+          python3 -m unittest tests.test_support_identity tests.test_release_build_policy -v
+          python3 tools/build-symbols.py archive --app "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --build-dir "$BUILD_DIR" --output output/linux-symbols
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-linux-debug-symbols
+          path: output/linux-symbols/
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Validate Linux runtime bundle
         shell: pwsh
@@ -829,6 +997,12 @@ jobs:
       - name: Test native package construction
         run: python3 -m unittest discover -s tests -p 'test_linux_*.py' -v
 
+      - name: Build and qualify candidate support without waiting for other platforms
+        run: |
+          python3 tools/build-support-tool.py --version "$VERSION" --stage "$BUILD_DIR/OpenStudio_artefacts/Release"
+          python3 tools/validate-support-tool.py --bundle "$BUILD_DIR/OpenStudio_artefacts/Release" --version "$VERSION"
+          xvfb-run -a python3 tools/test-packaged-support.py --bundle "$BUILD_DIR/OpenStudio_artefacts/Release"
+
       - name: Build and install Ubuntu package
         shell: bash
         run: |
@@ -869,11 +1043,12 @@ jobs:
         run: python3 tools/smoke-linux-appimage.py "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage"
 
       - name: Exercise final AppImage launcher and native windows
+        # The preceding Openbox report stays in the parent; this suite requires fresh output.
         shell: bash
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: |
-          xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage --desktop
+          xvfb-run -a python3 tools/run-linux-qualification.py --app "dist/linux/OpenStudio-${VERSION}-linux-x86_64.AppImage" --output output/linux-appimage/launcher --desktop
 
       - name: Retain Linux qualification evidence
         if: always()
@@ -885,3 +1060,36 @@ jobs:
             output/linux-native-safe
             output/linux-appimage
           if-no-files-found: warn
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-linux-x64
+          path: |
+            dist/linux/*.AppImage
+            dist/linux/*with-support.tar.gz
+            dist/linux/*.deb
+          if-no-files-found: error
+
+  certify-windows-package:
+    name: Windows App Certification Kit (unpublished candidate)
+    needs: verify-windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: candidate-windows-x64
+          path: candidate
+      - name: Run WACK without uploading or submitting to the Store
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath candidate -Filter '*.msix' -Recurse -File)
+          if ($packages.Count -ne 1) { throw 'Expected exactly one candidate MSIX.' }
+          ./tools/run-windows-certification.ps1 -PackagePath $packages[0].FullName -OutputDirectory "$env:RUNNER_TEMP/candidate-wack"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: candidate-windows-certification
+          path: ${{ runner.temp }}/candidate-wack/
+          if-no-files-found: error

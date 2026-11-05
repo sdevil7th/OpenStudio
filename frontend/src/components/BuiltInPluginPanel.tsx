@@ -151,6 +151,19 @@ const PARAM_ADJUSTMENT_KEYS = new Set([
   "End",
 ]);
 
+/** Capture a completed edit before a new gesture can reuse the same parameter. */
+export function beginBuiltInPluginParamGesture(
+  history: BuiltInPluginParamHistory,
+  paramId: string,
+  begin: (paramId: string) => boolean,
+  commit: () => void,
+  continueSameParam = false,
+): boolean {
+  if (history.getActiveParamId()
+    && (!continueSameParam || !history.hasActiveParam(paramId))) commit();
+  return begin(paramId);
+}
+
 export function createNAMBootSchema(address: BuiltInPluginAddress, fallbackName: string): BuiltInPluginSchema {
   return {
     schemaVersion: 1,
@@ -993,6 +1006,7 @@ function BuiltInPluginPanelContent({
   const paramCommitTimerRef = useRef<number | null>(null);
   const pointerParamRef = useRef<string | null>(null);
   const keyboardParamRef = useRef<string | null>(null);
+  const wheelParamRef = useRef<string | null>(null);
 
   const clearScheduledParamCommit = useCallback(() => {
     if (paramCommitTimerRef.current === null) return;
@@ -1032,6 +1046,7 @@ function BuiltInPluginPanelContent({
     clearScheduledParamCommit();
     paramCommitTimerRef.current = window.setTimeout(() => {
       paramCommitTimerRef.current = null;
+      wheelParamRef.current = null;
       void paramHistory.commit(flushParamWrites).finally(historyChanged);
       void finishAutomationGestures();
     }, delayMs);
@@ -1047,13 +1062,19 @@ function BuiltInPluginPanelContent({
     return paramHistory.begin(paramId, currentParam.label, currentParam.value);
   }, [paramHistory, writeAddress]);
 
-  const beginExclusiveParamGesture = useCallback((paramId: string) => {
+  const beginExclusiveParamGesture = useCallback((paramId: string, continueSameParam = false) => {
     clearScheduledParamCommit();
-    if (paramHistory.getActiveParamId() && !paramHistory.hasActiveParam(paramId)) {
+    const preservesAutomationGesture = paramHistory.hasActiveParam(paramId);
+    return beginBuiltInPluginParamGesture(paramHistory, paramId, beginParamEdit, () => {
+      // commit() takes the edit synchronously, before the async native flush.
+      // A new interaction must not cancel a pending key-up/blur commit and
+      // silently merge its history into another edit of the same parameter.
       void paramHistory.commit(flushParamWrites).finally(historyChanged);
-      void finishAutomationGestures();
-    }
-    return beginParamEdit(paramId);
+      // Preserve an already-open native touch gesture for this parameter.
+      // Ending it asynchronously and immediately reopening it can send two
+      // begins before the old end, or let the old end close the new gesture.
+      if (!preservesAutomationGesture) void finishAutomationGestures();
+    }, continueSameParam);
   }, [beginParamEdit, clearScheduledParamCommit, flushParamWrites, paramHistory, finishAutomationGestures, historyChanged]);
 
   const replayParamHistory = useCallback(async (
@@ -1113,10 +1134,12 @@ function BuiltInPluginPanelContent({
     canRedo: paramHistory.canRedo(),
     undo: () => {
       clearScheduledParamCommit();
+      void finishAutomationGestures();
       void paramHistory.undo(flushParamWrites, replayParamHistory).finally(historyChanged);
     },
     redo: () => {
       clearScheduledParamCommit();
+      void finishAutomationGestures();
       void paramHistory.redo(flushParamWrites, replayParamHistory).finally(historyChanged);
     },
   });
@@ -1339,6 +1362,7 @@ function BuiltInPluginPanelContent({
   const finishPointerParamGesture = () => {
     const paramId = pointerParamRef.current;
     pointerParamRef.current = null;
+    if (wheelParamRef.current === paramId) wheelParamRef.current = null;
     if (paramId && paramHistory.hasActiveParam(paramId)) {
       // Capture runs before the control's own pointer-up handler. Deferring the
       // commit keeps that handler's final value in the same history gesture.
@@ -1361,6 +1385,8 @@ function BuiltInPluginPanelContent({
         activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId });
         const paramId = paramIdFromEventTarget(event.target);
         pointerParamRef.current = paramId;
+        keyboardParamRef.current = null;
+        wheelParamRef.current = null;
         if (paramId) beginExclusiveParamGesture(paramId);
         else if (paramHistory.getActiveParamId()) {
           clearScheduledParamCommit();
@@ -1374,15 +1400,20 @@ function BuiltInPluginPanelContent({
       onWheelCapture={(event) => {
         const paramId = paramIdFromEventTarget(event.target);
         if (!paramId || resolveProfiledParameterWheel(event.nativeEvent).operation !== "adjust") return;
-        beginExclusiveParamGesture(paramId);
+        const continuing = wheelParamRef.current === paramId;
+        keyboardParamRef.current = null;
+        wheelParamRef.current = paramId;
+        beginExclusiveParamGesture(paramId, continuing);
         scheduleParamCommit();
       }}
       onKeyDownCapture={(event) => {
         if (!PARAM_ADJUSTMENT_KEYS.has(event.key)) return;
         const paramId = paramIdFromEventTarget(event.target);
         if (!paramId) return;
+        const continuing = keyboardParamRef.current === paramId;
         keyboardParamRef.current = paramId;
-        beginExclusiveParamGesture(paramId);
+        wheelParamRef.current = null;
+        beginExclusiveParamGesture(paramId, continuing);
       }}
       onKeyUpCapture={(event) => {
         if (!PARAM_ADJUSTMENT_KEYS.has(event.key)) return;
@@ -1395,7 +1426,8 @@ function BuiltInPluginPanelContent({
       onFocusCapture={(event) => {
         activateShortcutContext({ kind: "plugin", sessionId: pluginShortcutSessionId });
         const paramId = paramIdFromEventTarget(event.target);
-        if (paramId) beginExclusiveParamGesture(paramId);
+        if (paramId) beginExclusiveParamGesture(paramId,
+          pointerParamRef.current === paramId || keyboardParamRef.current === paramId);
       }}
       onBlur={(event) => {
         // Numeric fields commit in their own blur handler. Close the gesture
@@ -1404,6 +1436,7 @@ function BuiltInPluginPanelContent({
         if (!paramId || !paramHistory.hasActiveParam(paramId)) return;
         pointerParamRef.current = null;
         keyboardParamRef.current = null;
+        wheelParamRef.current = null;
         scheduleParamCommit(0);
       }}
     >
@@ -1454,7 +1487,7 @@ function BuiltInPluginPanelContent({
             return flushParamWrites();
           })}
           onHostBypass={value => applySuiteState(JSON.stringify({ hostBypassed: value }))} onApplyState={applySuiteState} onApplyValues={applySuiteValues} onRecallPreset={recallSuitePreset} onFlush={flushParamWrites}
-          onGestureStart={(id) => { pointerParamRef.current = id; beginExclusiveParamGesture(id); }}
+          onGestureStart={(id) => { pointerParamRef.current = id; beginExclusiveParamGesture(id, true); }}
           onGestureEnd={finishPointerParamGesture}
           canUndo={paramHistory.canUndo()} canRedo={paramHistory.canRedo()}
           onUndo={() => { clearScheduledParamCommit(); void finishAutomationGestures(); void paramHistory.undo(flushParamWrites, replayParamHistory).finally(historyChanged); }}
@@ -1462,7 +1495,7 @@ function BuiltInPluginPanelContent({
       ) : (
         <GeneralEditor key={pluginShortcutSessionId} historyReplayRevision={historyReplayRevision} schema={schema} address={address} onChange={handleParamChange}
           onApplyAlignment={applyAlignmentGroup} onHostBypass={value => applySuiteState(JSON.stringify({ hostBypassed: value }))} onApplyState={applySuiteState} onApplyValues={applySuiteValues} onRecallPreset={recallSuitePreset} onFlush={flushParamWrites}
-          onGestureStart={(id) => { pointerParamRef.current = id; beginExclusiveParamGesture(id); }}
+          onGestureStart={(id) => { pointerParamRef.current = id; beginExclusiveParamGesture(id, true); }}
           onGestureEnd={finishPointerParamGesture}
           canUndo={paramHistory.canUndo()} canRedo={paramHistory.canRedo()}
           onUndo={() => { clearScheduledParamCommit(); void finishAutomationGestures(); void paramHistory.undo(flushParamWrites, replayParamHistory).finally(historyChanged); }}

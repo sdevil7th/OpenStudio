@@ -63,6 +63,7 @@ Root: HKCR; Subkey: "OpenStudio.Project\shell\open\command"; ValueType: string; 
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\OpenStudio Support"; Filename: "{app}\OpenStudioSupport.exe"; Comment: "Collect diagnostics after closing OpenStudio"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
@@ -93,6 +94,10 @@ begin
 
   if not FileExists(ExpandConstant('{app}\OpenStudio.exe')) then
     MissingItems := MissingItems + #13#10 + ' - OpenStudio.exe';
+  if not FileExists(ExpandConstant('{app}\OpenStudioSupport.exe')) then
+    MissingItems := MissingItems + #13#10 + ' - OpenStudioSupport.exe';
+  if not FileExists(ExpandConstant('{app}\support-runtime\support-build.json')) then
+    MissingItems := MissingItems + #13#10 + ' - support-runtime\support-build.json';
   if not FileExists(ExpandConstant('{app}\webui\index.html')) then
     MissingItems := MissingItems + #13#10 + ' - webui\index.html';
 

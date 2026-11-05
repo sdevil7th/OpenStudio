@@ -83,6 +83,20 @@
       "coverage": []
     },
     {
+      "id": "frontend/src/components/AudioConversionStatus.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AudioConversionStatus.tsx",
+      "coverage": [
+        {
+          "scenario": "Named project-rate jobs and cancellation; source Undo/Redo",
+          "environment": "Windows Chromium; native bridge mocked; 2026-11-04",
+          "status": "pass",
+          "evidence": "frontend/e2e/project-rate-copy.spec.ts",
+          "sourceRevision": "d64ea6ae80273133bd17b7e9a30af9a464c714e5"
+        }
+      ]
+    },
+    {
       "id": "frontend/src/components/AudioDeviceStatus.tsx",
       "kind": "component",
       "source": "frontend/src/components/AudioDeviceStatus.tsx",
@@ -379,6 +393,20 @@
       "coverage": []
     },
     {
+      "id": "frontend/src/components/MixerLevelInput.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/MixerLevelInput.tsx",
+      "coverage": [
+        {
+          "scenario": "Track/master entry, cancellation, precision and Undo",
+          "environment": "Windows Chromium; native bridge mocked; 2026-11-04",
+          "status": "pass",
+          "evidence": "frontend/e2e/mixer-entry-resize.spec.ts",
+          "sourceRevision": "d64ea6ae80273133bd17b7e9a30af9a464c714e5"
+        }
+      ]
+    },
+    {
       "id": "frontend/src/components/MixerPanel.tsx",
       "kind": "component",
       "source": "frontend/src/components/MixerPanel.tsx",
@@ -461,6 +489,20 @@
       "kind": "component",
       "source": "frontend/src/components/NoteInspector.tsx",
       "coverage": []
+    },
+    {
+      "id": "frontend/src/components/PanelResizeHandle.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/PanelResizeHandle.tsx",
+      "coverage": [
+        {
+          "scenario": "Pointer release/Escape/cancel/blur context; keyboard resize and responsive geometry",
+          "environment": "Windows Chromium; native bridge mocked; 2026-11-04",
+          "status": "pass",
+          "evidence": "frontend/e2e/mixer-entry-resize.spec.ts",
+          "sourceRevision": "d64ea6ae80273133bd17b7e9a30af9a464c714e5"
+        }
+      ]
     },
     {
       "id": "frontend/src/components/ParametricGraph/ChorusGraph.tsx",
@@ -765,6 +807,20 @@
       "kind": "component",
       "source": "frontend/src/components/TONE3000Branding.tsx",
       "coverage": []
+    },
+    {
+      "id": "frontend/src/components/TempoDetectionModal.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/TempoDetectionModal.tsx",
+      "coverage": [
+        {
+          "scenario": "Analyze/Cancel/target replacement; preview and explicit tempo Apply with Undo",
+          "environment": "Windows Chromium; native bridge mocked; 2026-11-04",
+          "status": "pass",
+          "evidence": "frontend/e2e/tempo-detection.spec.ts",
+          "sourceRevision": "d64ea6ae80273133bd17b7e9a30af9a464c714e5"
+        }
+      ]
     },
     {
       "id": "frontend/src/components/ThemeEditor.tsx",
@@ -1360,6 +1416,14 @@
       "coverage": []
     },
     {
+      "id": "feature:59999f096c3e0656",
+      "kind": "feature",
+      "section": "Core Engine / Transport",
+      "description": "Cancellable band-limited project-rate source copies, source Undo/Redo and optional import-copy policy; originals preserved (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
       "id": "feature:1b155df5f689be54",
       "kind": "feature",
       "section": "Core Engine / Transport",
@@ -1456,6 +1520,14 @@
       "coverage": []
     },
     {
+      "id": "feature:fedeb461d620fcf3",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Divider insertion preserves mixed source-row order with compatible new tracks and one Undo (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
       "id": "feature:075d202b40966879",
       "kind": "feature",
       "section": "Arrangement / Editing",
@@ -1520,6 +1592,30 @@
       "coverage": []
     },
     {
+      "id": "feature:cea1178248c16b33",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "General selected-audio crossfades: contained/nested/same-edge handoffs, editable curves/lengths, preserved manual gain and one Undo (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:64356913225f02b5",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Bounded multi-section audio/MIDI tempo analysis with pulse-family candidates, range/tap/count controls and explicit undoable base-tempo apply (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:4ebd0774509df130",
+      "kind": "feature",
+      "section": "Arrangement / Editing",
+      "description": "Isolated dry clip + click audition, adjustable phase/grouping and bounded MIDI guide tones; cancellation preserves project transport/source files (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
       "id": "feature:b8fd6cc7b66af0bd",
       "kind": "feature",
       "section": "Arrangement / Editing",
@@ -1572,6 +1668,22 @@
       "kind": "feature",
       "section": "Mixing / Routing / Metering",
       "description": "Mixer panel, channel strips, master strip, detached mixer",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:a254c0ca31949297",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Numeric track/master dB entry with draft cancellation and one-step Undo (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ceb948190ec0bf0e",
+      "kind": "feature",
+      "section": "Mixing / Routing / Metering",
+      "description": "Persisted docked mixer resizing with pointer/keyboard controls and workspace bounds (development)",
       "source": "docs/implemented_features.md",
       "coverage": []
     },
@@ -1968,6 +2080,30 @@
       "coverage": []
     },
     {
+      "id": "feature:89508805c5a6c17f",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Join same-track MIDI clips with finite loop/source-window materialization and one Undo (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:2ba0f78535c9ba6d",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "MIDI export retains channel/controller events and current project tempo/time-signature changes, rebased for clip exports (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ffd75bff2cfc8809",
+      "kind": "feature",
+      "section": "MIDI / Instruments",
+      "description": "Piano Roll note hover shows pitch name/number and velocity without pointer-driven React updates (development)",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
       "id": "feature:31fdf72e07591d47",
       "kind": "feature",
       "section": "MIDI / Instruments",
@@ -2096,10 +2232,10 @@
       "coverage": []
     },
     {
-      "id": "feature:a9562580513610e0",
+      "id": "feature:c4149a3f1e372238",
       "kind": "feature",
       "section": "Rendering / Export / Interchange",
-      "description": "Render formats: WAV, AIFF, FLAC, MP3, OGG (FFmpeg-backed export uses the bundled audited binary on Windows and a system dependency on macOS/Linux)",
+      "description": "Render formats: WAV, AIFF, FLAC, MP3, OGG (OGG uses built-in Vorbis; MP3 and final FFmpeg conversions use the bundled audited binary on Windows and a system dependency on macOS/Linux)",
       "source": "docs/implemented_features.md",
       "coverage": []
     },

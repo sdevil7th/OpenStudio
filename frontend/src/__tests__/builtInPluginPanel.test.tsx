@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BuiltInPluginPanel,
   BuiltInParamControl,
+  beginBuiltInPluginParamGesture,
   createFrameCoalescedParamWriter,
   createParamWriteReconciler,
   createSchemaRequestGate,
@@ -19,6 +20,7 @@ import { SuiteParameter } from "../components/builtin/SuiteParameter";
 import { reverbControlLayout } from "../utils/reverbControlLayout";
 import { ReverbEditor } from "../components/builtin/ReverbEditor";
 import { capturePluginState, eqValues } from "../components/builtin/EQToolbar";
+import { BuiltInPluginParamHistory, type BuiltInPluginHistoryReplay } from "../utils/builtInPluginParamHistory";
 
 function param(overrides: Partial<BuiltInParamDescriptor>): BuiltInParamDescriptor {
   return {
@@ -199,6 +201,93 @@ const panelSchemas = [
     continuous("outputGain", "Output", -10, -36, 0, "output", "dB"),
   ]),
 ];
+
+describe("built-in parameter gesture boundaries", () => {
+  function harness(initial: Record<string, number>, flush = async () => true) {
+    const history = new BuiltInPluginParamHistory("gesture-window");
+    const values = { ...initial };
+    const commits: Promise<boolean>[] = [];
+    const begin = (id: string, continuing = false) => beginBuiltInPluginParamGesture(
+      history, id, key => history.begin(key, key, values[key]),
+      () => { commits.push(history.commit(flush)); }, continuing,
+    );
+    const change = (id: string, value: number) => {
+      history.update(id, value);
+      values[id] = value;
+    };
+    const commit = () => { commits.push(history.commit(flush)); };
+    const replay: BuiltInPluginHistoryReplay = async (entry, direction) => {
+      for (const change of entry.changes) values[change.paramId] = change[direction];
+      return true;
+    };
+    return { history, values, commits, begin, change, commit, replay };
+  }
+
+  it("captures exact entry, keyboard adjustment and reset separately before pending native writes finish", async () => {
+    let release!: (value: boolean) => void;
+    const pendingWrite = new Promise<boolean>(resolve => { release = resolve; });
+    const edit = harness({ fuzzCleanMix: 0 }, () => pendingWrite);
+    edit.begin("fuzzCleanMix"); edit.change("fuzzCleanMix", .384);
+    // Focus restoration and another edit can occur in the same browser task,
+    // before either the blur/keyup timer or the native write has completed.
+    edit.begin("fuzzCleanMix"); edit.change("fuzzCleanMix", .386);
+    edit.begin("fuzzCleanMix"); edit.change("fuzzCleanMix", 0);
+    edit.commit();
+    expect(edit.history.getUndoEntries()).toHaveLength(0);
+    release(true); await Promise.all(edit.commits);
+    expect(edit.history.getUndoEntries().map(entry => entry.changes[0])).toEqual([
+      { paramId: "fuzzCleanMix", label: "fuzzCleanMix", before: 0, after: .384 },
+      { paramId: "fuzzCleanMix", label: "fuzzCleanMix", before: .384, after: .386 },
+      { paramId: "fuzzCleanMix", label: "fuzzCleanMix", before: .386, after: 0 },
+    ]);
+    for (const expected of [.386, .384, 0]) {
+      expect(await edit.history.undo(async () => true, edit.replay)).toBe("applied");
+      expect(edit.values.fuzzCleanMix).toBe(expected);
+    }
+    for (const expected of [.384, .386, 0]) {
+      expect(await edit.history.redo(async () => true, edit.replay)).toBe("applied");
+      expect(edit.values.fuzzCleanMix).toBe(expected);
+    }
+  });
+
+  it("retains held-key and wheel continuations as one edit, while a new gesture of that parameter is separate", async () => {
+    const edit = harness({ mix: .5 });
+    edit.begin("mix"); edit.change("mix", .51);
+    edit.begin("mix", true); edit.change("mix", .52);
+    edit.begin("mix", true); edit.change("mix", .53);
+    expect(edit.commits).toHaveLength(0);
+    edit.begin("mix"); edit.change("mix", .6); edit.commit();
+    await Promise.all(edit.commits);
+    expect(edit.history.getUndoEntries().map(entry => entry.changes[0])).toEqual([
+      { paramId: "mix", label: "mix", before: .5, after: .53 },
+      { paramId: "mix", label: "mix", before: .53, after: .6 },
+    ]);
+  });
+
+  it("keeps dependent parameter changes together and closes them before another parameter's gesture", async () => {
+    const edit = harness({ profile: 0, gate: -60, mix: .5 });
+    edit.begin("profile"); edit.change("profile", 1);
+    edit.history.begin("gate", "gate", -60); edit.change("gate", -48);
+    edit.begin("mix", true); edit.change("mix", .6); edit.commit();
+    await Promise.all(edit.commits);
+    expect(edit.history.getUndoEntries().map(entry => entry.changes.map(change => change.paramId)))
+      .toEqual([["profile", "gate"], ["mix"]]);
+    await edit.history.undo(async () => true, edit.replay);
+    await edit.history.undo(async () => true, edit.replay);
+    expect(edit.values).toEqual({ profile: 0, gate: -60, mix: .5 });
+  });
+
+  it("keeps a rejected flush from merging its captured edit into the next gesture", async () => {
+    const flush = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const edit = harness({ mix: 0 }, flush);
+    edit.begin("mix"); edit.change("mix", .384);
+    edit.begin("mix"); edit.change("mix", .386); edit.commit();
+    expect(await Promise.all(edit.commits)).toEqual([false, true]);
+    expect(edit.history.getUndoEntries()).toHaveLength(1);
+    expect(await edit.history.undo(async () => true, edit.replay)).toBe("applied");
+    expect(edit.values.mix).toBe(.384);
+  });
+});
 
 describe("BuiltInPluginPanel schema model", () => {
   it("coalesces NAM parameter writes only within an animation frame", async () => {

@@ -1,5 +1,6 @@
 import { startPitchEditorSessionController, usePitchWindowState, detachPitchEditor, dockPitchEditor, recoverPitchCheckpoint } from "./utils/pitchEditorSession";
 import { usePanelLayout } from "./utils/usePanelLayout";
+import { AudioConversionStatus } from "./components/AudioConversionStatus";
 import React, { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useShallow } from "zustand/shallow";
 import { ExternalLink, GripHorizontal, X } from "lucide-react";
@@ -111,6 +112,7 @@ const HelpOverlay = React.lazy(() => import("./components/HelpOverlay").then(m =
 const GettingStartedGuide = React.lazy(() => import("./components/GettingStartedGuide").then(m => ({ default: m.GettingStartedGuide })));
 const StemSeparationModal = React.lazy(() => import("./components/StemSeparationModal"));
 const AIClipGenerationModal = React.lazy(() => import("./components/AIClipGenerationModal"));
+const TempoDetectionModal = React.lazy(() => import("./components/TempoDetectionModal").then(m => ({ default: m.TempoDetectionModal })));
 const AiToolsSetupModal = React.lazy(() => import("./components/AiToolsSetupModal"));
 import {
   DndContext,
@@ -170,6 +172,9 @@ function App() {
     closePianoRoll,
     lowerZoneHeight,
     setLowerZoneHeight,
+    mixerHeight,
+    setMixerHeight,
+    tempoDetectionTarget,
     showUndoHistory,
     showCommandPalette,
     showRegionMarkerManager,
@@ -246,6 +251,9 @@ function App() {
       closePianoRoll: state.closePianoRoll,
       lowerZoneHeight: state.lowerZoneHeight,
       setLowerZoneHeight: state.setLowerZoneHeight,
+      mixerHeight: state.mixerHeight,
+      setMixerHeight: state.setMixerHeight,
+      tempoDetectionTarget: state.tempoDetectionTarget,
       showUndoHistory: state.showUndoHistory,
       showCommandPalette: state.showCommandPalette,
       showRegionMarkerManager: state.showRegionMarkerManager,
@@ -354,7 +362,7 @@ function App() {
   const { rootRef: layoutRootRef, heights: panelHeights, available: panelAvailable } = usePanelLayout({
     ...(pitchVisible ? { pitch: lowerZoneHeight } : {}),
     ...(midiVisible ? { midi: lowerZoneHeight } : {}),
-    ...(showMixer && !isMixerDetached ? { mixer: 340 } : {}),
+    ...(showMixer && !isMixerDetached ? { mixer: mixerHeight } : {}),
     ...(showClipLauncher ? { launcher: 256 } : {}),
   });
   const panelHeightStyle = (height: number): React.CSSProperties => ({ "--pane-height": `${height}px` } as React.CSSProperties);
@@ -1919,11 +1927,14 @@ function App() {
       <div data-layout-pane="mixer" className="shrink-0" role="complementary" aria-label="Mixer panel">
       <MixerPanel
         dockedHeight={panelHeights.mixer ?? 0}
+        maxDockedHeight={Math.min(1200, Math.max(96, panelAvailable - 180
+          - (panelHeights.pitch ?? 0) - (panelHeights.midi ?? 0) - (panelHeights.launcher ?? 0)))}
+        onResize={setMixerHeight}
         isVisible={showMixer && !isMixerDetached}
         isDetached={false}
-        onDetach={() => { void handleDetachMixer(); }}
+        onDetach={handleDetachMixer}
         onAttach={() => { void nativeBridge.closeMixerWindow(); }}
-        onClose={() => { void handleToggleMixerVisibility(); }}
+        onClose={handleToggleMixerVisibility}
       />
       </div>
 
@@ -2104,6 +2115,12 @@ function App() {
       {showAIClipGeneration && (
         <Suspense fallback={null}>
           <AIClipGenerationModal />
+        </Suspense>
+      )}
+
+      {tempoDetectionTarget && (
+        <Suspense fallback={null}>
+          <TempoDetectionModal />
         </Suspense>
       )}
 
@@ -2288,6 +2305,7 @@ function App() {
         )}
 
       {/* Toast Notification */}
+      <AudioConversionStatus />
       {toastVisible && (
         <div className={`fixed bottom-20 left-1/2 -translate-x-1/2 z-[10000] px-4 py-2 rounded-lg shadow-lg text-sm font-medium transition-all animate-in fade-in slide-in-from-bottom-2 duration-200 ${
           toastType === "success" ? "bg-green-600 text-white" :

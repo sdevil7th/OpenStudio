@@ -2,6 +2,7 @@
 #include "ProcessorSafety.h"
 
 #include <JuceHeader.h>
+#include "PreparedIntegerDelayLine.h"
 #include "AutomationList.h"
 #include "SendAutomation.h"
 #include "FallbackInstrumentAutomation.h"
@@ -474,8 +475,8 @@ public:
     double getPlaybackOffset() const { return playbackOffsetMs.load(); }
 
     // Track Channel Count (internal processing channels, informational for now)
-    void setTrackChannelCount(int numChannels) { trackChannelCount = juce::jlimit(1, 8, numChannels); }
-    int getTrackChannelCount() const { return trackChannelCount; }
+    void setTrackChannelCount(int numChannels) { trackChannelCount.store(juce::jlimit(1, 8, numChannels), std::memory_order_release); }
+    int getTrackChannelCount() const { return trackChannelCount.load(std::memory_order_acquire); }
 
     // Per-track MIDI Output
     void setMIDIOutputDevice(const juce::String& deviceName);
@@ -540,6 +541,7 @@ public:
     bool tryProcessBlockParallel(juce::AudioBuffer<float>&, juce::MidiBuffer&,
                                  uint64 expectedGeneration);
     static juce::var runParallelNAMEligibilityRegression();
+    static juce::var runPreparedPDCRegression();
     void setDiagnosticsTrackId(const juce::String& id) { diagnosticsTrackId = id; }
     int getProcessorFault(bool input, int index) const;
 
@@ -626,6 +628,11 @@ private:
 
     struct RealtimeGraphSnapshot;
     bool isParallelNAMGraphEligible(const RealtimeGraphSnapshot*) const noexcept;
+    bool tryProcessTinyEmptyGraph(juce::AudioBuffer<float>&, juce::MidiBuffer&);
+    void processTrackPDC(juce::AudioBuffer<float>&);
+    float processTrackOutput(juce::AudioBuffer<float>&, bool capturePreFader,
+                             double blockTimeSeconds, double processingSampleRate, PanLaw blockPanLaw);
+    void resetEmptyGraphTailState() noexcept;
     void processBlockInternal(juce::AudioBuffer<float>&, juce::MidiBuffer&,
                               const RealtimeGraphSnapshot* workerGraph = nullptr);
     void timerCallback() override;
@@ -870,7 +877,7 @@ private:
         retiredRealtimeAuxOwners;
 
     // Plugin Delay Compensation (PDC)
-    juce::dsp::DelayLine<float> pdcDelayLine { 96000 };  // max 2 seconds at 48kHz
+    PreparedIntegerDelayLine pdcDelayLine { 96000 };  // max 2 seconds at 48kHz
     std::atomic<int> pdcDelaySamples { 0 };
     std::atomic<bool> pdcDelayDirty { false };
     int pdcCurrentDelaySamples = 0;
@@ -907,7 +914,7 @@ private:
     std::atomic<double> playbackOffsetMs { 0.0 };
 
     // Track Channel Count (informational)
-    int trackChannelCount { 2 };
+    std::atomic<int> trackChannelCount { 2 };
 
     // Pre-fader buffer (captured during processBlock for pre-fader sends)
     juce::AudioBuffer<float> preFaderBuffer;
@@ -965,6 +972,11 @@ private:
     };
     std::atomic<const RealtimeGraphSnapshot*>
         realtimeGraphSnapshotForAudio { nullptr };
+    // Discovery needs only a generation, never ownership of the graph. The
+    // worker entrypoint still validates the exact graph under its reader epoch.
+    std::atomic<uint64> parallelNAMGraphCandidateGeneration { 0 };
+    std::atomic<bool> hasEmptyRealtimeGraphForAudio { false };
+    juce::uint64 tinyEmptyGraphProcessedBlocks = 0; // Callback-owned; read only by device-free tests.
     mutable std::atomic<std::uint32_t>
         realtimeGraphAudioReaders { 0 };
     juce::CriticalSection realtimeGraphPublicationLock;

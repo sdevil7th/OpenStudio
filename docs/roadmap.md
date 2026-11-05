@@ -56,7 +56,10 @@ lives in [Testing](testing.md) and the
   parallel while hosted, MIDI/ARA and routed tracks retain serial processing.
   The conservative eligibility gate adds no device buffering. The required target is four recording,
   monitored NAM Racks at 16 samples and 4x Drive oversampling; 8 samples is a
-  separate stretch target. Bounded Release probes show lower average callback
+  separate stretch target. For PR #36, the user accepted the measured 8-sample
+  contention failure as non-blocking on 5 November 2026; further work on that
+  stretch target is deferred. Recorded failures and recording-safety checks remain
+  unchanged. Bounded Release probes show lower average callback
   costs, but four- and twelve-track cases still report missed or skipped work. The target
   remains **not met**; bounded ownership/recording tests and a low average CPU
   meter do not close the live deadline, recording-duration or listening gates.

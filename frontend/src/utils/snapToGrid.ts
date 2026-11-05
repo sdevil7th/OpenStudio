@@ -411,6 +411,14 @@ export function resolveVisualGrid(
   const beatInterval = calculateGridInterval(tempo, timeSignature, "beat", options);
   const gridDivisionsPerBar = nearestWhole(barInterval / Math.max(0.000001, gridInterval));
 
+  // At wide views even one line per bar exceeds the display budget. Step by
+  // whole, zero-anchored groups of bars without changing the actual snap grid.
+  if (barInterval * pixelsPerSecond < minPixels) {
+    const barsPerLine = 2 ** Math.ceil(Math.log2(minPixels / (barInterval * pixelsPerSecond)));
+    return { gridInterval, visualInterval: barInterval * barsPerLine, barInterval,
+      alignedToBar: false, divisionsPerBar: 1 };
+  }
+
   if (gridDivisionsPerBar !== null) {
     const maxVisibleDivisionsPerBar = Math.max(1, Math.floor((barInterval * pixelsPerSecond) / minPixels));
     const divisionsPerBar = largestDivisorAtOrBelow(gridDivisionsPerBar, maxVisibleDivisionsPerBar);

@@ -5,6 +5,7 @@ import { commandManager } from "../store/commands";
 import { createDefaultTrack, useDAWStore } from "../store/useDAWStore";
 import { advanceProjectEpoch } from "../utils/projectLifetime";
 import { sendAutomationParamId } from "../store/automationParams";
+import { interpolateClipGain } from "../utils/clipCrossfades";
 
 const initial = useDAWStore.getState();
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
@@ -34,6 +35,36 @@ describe("project save concurrency and recovery", () => {
     vi.restoreAllMocks();
     commandManager.clear();
     useDAWStore.setState(initial);
+  });
+
+  it("round-trips optional crossfade layers/import policy and loads older projects with preserve-source defaults", async () => {
+    const track = createDefaultTrack("track", "Track", "#fff", "audio");
+    const base = { name: "Source", filePath: "C:/source.wav", offset: 0, sampleRate: 48000, color: "#fff", volumeDB: 0, fadeIn: 0, fadeOut: 0 };
+    track.clips = [{ ...base, id: "bed", startTime: 0, duration: 10,
+      gainEnvelope: [{ time: 0, gain: 0.5 }, { time: 10, gain: 1.5 }] },
+    { ...base, id: "insert", startTime: 2, duration: 2 }];
+    useDAWStore.setState({ tracks: [track], selectedClipIds: ["bed", "insert"], syncClipsWithBackend: vi.fn().mockResolvedValue(undefined) });
+    vi.spyOn(nativeBridge, "setClipGainEnvelope").mockResolvedValue(true);
+    expect(useDAWStore.getState().crossfadeSelectedClips()).toBe(true);
+    useDAWStore.getState().setProjectAudioImportPolicy("project-rate-copy");
+    const expectedLayers = useDAWStore.getState().tracks[0].clips[0].crossfadeLayers;
+    expect(await useDAWStore.getState().saveProject()).toBe(true);
+    const json = vi.mocked(nativeBridge.saveProjectToFile).mock.calls[0][1];
+    expect(JSON.parse(json).version).toBe("1.2.0");
+    expect(JSON.parse(json).projectAudioImportPolicy).toBe("project-rate-copy");
+    const load = vi.spyOn(nativeBridge, "loadProjectFromFile").mockResolvedValue(json);
+    expect(await useDAWStore.getState().loadProject("C:/roundtrip.osproj")).toBe(true);
+    expect(useDAWStore.getState().projectAudioImportPolicy).toBe("project-rate-copy");
+    expect(useDAWStore.getState().tracks[0].clips[0].crossfadeLayers).toEqual(expectedLayers);
+    const envelope = vi.mocked(nativeBridge.setClipGainEnvelope).mock.calls.find(call => call[1] === "bed")![2];
+    expect(interpolateClipGain(envelope, 3)).toBe(0);
+    const legacy = JSON.parse(json);
+    delete legacy.projectAudioImportPolicy;
+    for (const clip of legacy.tracks[0].clips) delete clip.crossfadeLayers;
+    load.mockResolvedValue(JSON.stringify(legacy));
+    expect(await useDAWStore.getState().loadProject("C:/older.osproj")).toBe(true);
+    expect(useDAWStore.getState().projectAudioImportPolicy).toBe("preserve");
+    expect(useDAWStore.getState().tracks[0].clips[0].crossfadeLayers).toBeUndefined();
   });
 
   it.each(["master", "monitor"] as const)("round trips a Safe-only %s control and blocks changed parameter meaning", async chain => {

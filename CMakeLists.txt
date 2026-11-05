@@ -63,6 +63,7 @@ endif()
 option(OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK "Allow dev/unbundled builds to bootstrap AI tools from a system Python interpreter" ON)
 option(OPENSTUDIO_REQUIRE_ARA "Fail configuration when the ARA SDK is unavailable" ON)
 option(OPENSTUDIO_REQUIRE_ASIO "Fail configuration when the ASIO SDK is unavailable for a Windows build" OFF)
+option(OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS "Instrument audio callbacks for explicit diagnostic builds (never release packages)" OFF)
 
 # Some third-party dependencies still expect CMAKE_BUILD_TYPE to exist even
 # under multi-config generators like Visual Studio. Seed a harmless default
@@ -89,6 +90,14 @@ if(WIN32)
         endif()
     endif()
 
+    # A regeneration can run from the build directory. Resolve user-supplied
+    # relative SDK paths against the source tree once, not the caller's cwd.
+    if(NOT IS_ABSOLUTE "${JUCE_ASIOSDK_PATH}")
+        get_filename_component(_OPENSTUDIO_ABSOLUTE_ASIO_SDK "${JUCE_ASIOSDK_PATH}"
+            ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+        set(JUCE_ASIOSDK_PATH "${_OPENSTUDIO_ABSOLUTE_ASIO_SDK}"
+            CACHE PATH "Path to ASIO SDK" FORCE)
+    endif()
     set(OPENSTUDIO_ASIO_HEADER "${JUCE_ASIOSDK_PATH}/common/iasiodrv.h")
 
     if(EXISTS "${OPENSTUDIO_ASIO_HEADER}")
@@ -127,6 +136,7 @@ FetchContent_MakeAvailable(juce)
 # checkouts also need updated recipes applied before compiling host code.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCERealtimePatches.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEHeapBlockPatch.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEVST3StatePatch.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCEAutomationPatch.cmake"
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyJUCELV2IdentifierPatch.cmake"
@@ -192,11 +202,12 @@ if(MSVC)
     # MSVC /O2 and /Ox can break WRL callback dispatch in JUCE's WebView2
     # resource-provider path, leaving Release builds on about:blank even though
     # the controller was created successfully.  Restrict /O1 to JUCE's GUI-extra
-    # translation unit so audio/DSP code keeps the normal Release optimisation.
+    # translation unit so audio/DSP code keeps its normal optimisation. Debug
+    # uses an optimized host too; retain the same WebView-specific exception.
     set_property(SOURCE
         "${juce_SOURCE_DIR}/modules/juce_gui_extra/juce_gui_extra.cpp"
         APPEND PROPERTY COMPILE_OPTIONS
-        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/O1>
+        $<$<OR:$<CONFIG:Debug>,$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/O1>
     )
 endif()
 
@@ -484,10 +495,23 @@ if(MSVC)
     # supported ABI instead of the removed experimental coroutine headers.
     set_property(SOURCE Source/StoreUpdater.cpp APPEND PROPERTY
         COMPILE_OPTIONS /await:strict)
-    # Realtime audio translation units below are intentionally optimized
-    # in Debug. CMP0184 controls runtime checks at target scope, so the target
-    # must opt out to avoid MSVC's incompatible /O2 + /RTC1 combination.
+    # Optimize the entire Debug host, including JUCE core and UI/regression
+    # translation units. Header-defined COMDAT helpers are shared at link time:
+    # a /Od definition emitted by a non-audio file can otherwise replace an
+    # optimized definition called by /O2 realtime code. Keep Debug symbols,
+    # _DEBUG, the Debug CRT and assertions; only code generation changes.
+    target_compile_options(OpenStudio PRIVATE
+        $<$<CONFIG:Debug>:/O2>
+        $<$<CONFIG:Debug>:/Ob2>
+        $<$<CONFIG:Debug>:/Oi>
+        $<$<CONFIG:Debug>:/Ot>
+    )
+    # CMP0184 controls runtime checks at target scope. /RTC1 is incompatible
+    # with optimized code; leave those checks disabled as before.
     set_property(TARGET OpenStudio PROPERTY MSVC_RUNTIME_CHECKS "")
+    # Re-select COMDATs from the current objects rather than retaining an
+    # earlier unoptimized selection in an incremental-link database.
+    target_link_options(OpenStudio PRIVATE $<$<CONFIG:Debug>:/INCREMENTAL:NO>)
     # The headless aggregate regression nests the complete NAM DSP suite
     # inside the host suite. Both deliberately keep sizeable fixed DSP state
     # on the calling thread, which exceeds Windows' 1 MiB executable default
@@ -514,14 +538,34 @@ target_sources(OpenStudio PRIVATE
     Source/RecordingRecovery.cpp
     Source/RecordingRecoveryRegression.cpp
     Source/AudioEngine.cpp
+    Source/ProjectQualification.cpp
+    Source/ProjectRateCopy.cpp
+    Source/ClipPreviewData.cpp
+    Source/RecordingQualification.cpp
+    Source/RecordingStartRegression.cpp
+    Source/RealtimeSourceReadWindowRegression.cpp
+    Source/PlaybackTinyBlockRegression.cpp
+    Source/RealtimeCallbackTraceRegression.cpp
+    Source/RecordingDiskWriterRegression.cpp
+    Source/InlineEQDryRegression.cpp
+    Source/IntegerPDCRegression.cpp
+    Source/PackedWaveformPeaksRegression.cpp
+    Source/PeakCacheGenerationRegression.cpp
     Source/RealtimeTrackExecutor.cpp
     Source/MetronomeRegression.cpp
+    Source/TempoDetectionRegression.cpp
+    Source/EditingWorkflowRegression.cpp
+    Source/EditingWorkflowRegression.h
+    Source/LatestAnalysisQueue.h
+    Source/MixerGain.h
+    Source/TempoDetectionRegression.h
     Source/FreePluginRegression.cpp
     Source/NAMDelayRegression.h
     Source/NAMDelayRegression.cpp
     Source/NAMDelayRegressionLifecycle.cpp
     Source/NAMDelayRegressionRackTail.cpp
     Source/AudioRecorder.cpp
+    Source/RecordingDiskWriter.cpp
     Source/PlaybackEngine.cpp
     Source/PeakCache.cpp
     Source/AudioConverter.cpp
@@ -573,7 +617,8 @@ target_sources(OpenStudio PRIVATE
     Source/ARAHostController.cpp
 )
 
-target_compile_definitions(OpenStudio PRIVATE OPENSTUDIO_BUILD_CONFIGURATION="$<CONFIG>")
+target_compile_definitions(OpenStudio PRIVATE OPENSTUDIO_BUILD_CONFIGURATION="$<CONFIG>"
+    OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS=$<BOOL:${OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS}>)
 if(WIN32)
     # Tiny hidden helper: no JUCE, WebView, audio device, plug-in or Python startup.
     add_executable(OpenStudioCrashReporter Source/CrashReporterMain.cpp Source/CrashReportWriter.cpp)
@@ -604,14 +649,22 @@ if(WIN32)
         COMMENT "Copying out-of-process crash reporter")
 endif()
 
-# Keep the complete production audio callback path optimized even in the app's
-# developer build. `build.py dev --run` uses Debug; leaving JUCE's ASIO
-# conversion/convolution modules or the surrounding host/track helpers at /Od
-# creates periodic work spikes that do not represent the shipped DSP.
+# Release debug information is retained separately at packaging time.
+if(NOT MSVC)
+    target_compile_options(OpenStudio PRIVATE $<$<CONFIG:Release>:-g>)
+    if(NOT APPLE)
+        target_link_options(OpenStudio PRIVATE "-Wl,--build-id=sha1")
+    endif()
+endif()
+
+# Non-MSVC developer builds keep the production audio callback path optimized
+# with source-local options. MSVC optimizes the full Debug host above so that
+# shared header COMDAT helpers cannot come from an unoptimized translation unit.
 set(OPENSTUDIO_REALTIME_AUDIO_SOURCES
     Source/AudioEngine.cpp
     Source/RealtimeTrackExecutor.cpp
     Source/AudioRecorder.cpp
+    Source/RecordingDiskWriter.cpp
     Source/PlaybackEngine.cpp
     Source/TrackProcessor.cpp
     Source/Metronome.cpp
@@ -620,6 +673,10 @@ set(OPENSTUDIO_REALTIME_AUDIO_SOURCES
     Source/TimecodeSync.cpp
     Source/TriggerEngine.cpp
     Source/BuiltInEffects.cpp
+    Source/InlineEQDryRegression.cpp
+    Source/IntegerPDCRegression.cpp
+    Source/PackedWaveformPeaksRegression.cpp
+    Source/PeakCacheGenerationRegression.cpp
     Source/BuiltInEffects2.cpp
     Source/NAMCabPresentation.cpp
     Source/NAMPolyOctaver.cpp
@@ -634,16 +691,7 @@ set(OPENSTUDIO_REALTIME_AUDIO_SOURCES
     "${juce_SOURCE_DIR}/modules/juce_audio_utils/juce_audio_utils.cpp"
     "${juce_SOURCE_DIR}/modules/juce_dsp/juce_dsp.cpp"
 )
-if(MSVC)
-    set_property(SOURCE
-        ${OPENSTUDIO_REALTIME_AUDIO_SOURCES}
-        APPEND PROPERTY COMPILE_OPTIONS
-        $<$<CONFIG:Debug>:/O2>
-        $<$<CONFIG:Debug>:/Ob2>
-        $<$<CONFIG:Debug>:/Oi>
-        $<$<CONFIG:Debug>:/Ot>
-    )
-else()
+if(NOT MSVC)
     set_property(SOURCE
         ${OPENSTUDIO_REALTIME_AUDIO_SOURCES}
         APPEND PROPERTY COMPILE_OPTIONS
@@ -1018,6 +1066,16 @@ endfunction()
 set(OPENSTUDIO_VERSION_MANIFEST
     "${CMAKE_CURRENT_BINARY_DIR}/OpenStudio.version")
 file(WRITE "${OPENSTUDIO_VERSION_MANIFEST}" "${OPENSTUDIO_APP_VERSION}\n")
+if(OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS)
+    set(OPENSTUDIO_CALLBACK_DIAGNOSTICS_JSON true)
+else()
+    set(OPENSTUDIO_CALLBACK_DIAGNOSTICS_JSON false)
+endif()
+set(OPENSTUDIO_BUILD_POLICY "${CMAKE_CURRENT_BINARY_DIR}/OpenStudio.build-policy.json")
+file(WRITE "${OPENSTUDIO_BUILD_POLICY}"
+    "{\"version\":\"${OPENSTUDIO_APP_VERSION}\",\"callbackDiagnostics\":${OPENSTUDIO_CALLBACK_DIAGNOSTICS_JSON},\"araDiagnostics\":${OPENSTUDIO_CALLBACK_DIAGNOSTICS_JSON},\"hangMonitoring\":${OPENSTUDIO_CALLBACK_DIAGNOSTICS_JSON}}\n")
+openstudio_copy_runtime_file("${OPENSTUDIO_BUILD_POLICY}" "OpenStudio.build-policy.json"
+    "Copying callback instrumentation build policy")
 openstudio_copy_runtime_file(
     "${OPENSTUDIO_VERSION_MANIFEST}"
     "OpenStudio.version"
@@ -1502,6 +1560,8 @@ openstudio_remove_runtime_file(
 # Copy packaged frontend assets for release/offline builds
 set(FRONTEND_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/frontend/dist")
 if(EXISTS "${FRONTEND_DIST_DIR}/index.html")
+    # Remove obsolete hashed chunks before copying; identities/maps describe this build only.
+    openstudio_remove_runtime_path("webui" "Removing obsolete packaged frontend chunks")
     openstudio_copy_runtime_directory(
         "${FRONTEND_DIST_DIR}"
         "webui"
@@ -1522,3 +1582,11 @@ endif()
 # )
 # Ensure binary data is linked (generated by juce_add_binary_data)
 # target_link_libraries(OpenStudio PRIVATE OpenStudio_rc_lib)
+
+# Build-host Python only; the DAW never reads this identity or starts Support.
+find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
+add_custom_command(TARGET OpenStudio POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/build-symbols.py" identity
+        --app "$<TARGET_FILE:OpenStudio>" --version "${OPENSTUDIO_APP_VERSION}" --configuration "$<CONFIG>"
+    COMMENT "Writing offline native and frontend build identity"
+    VERBATIM)

@@ -222,7 +222,7 @@ If you want one command for the full guarded Windows path, use:
    `./tools/validate-release-metadata.ps1 -MetadataDir dist/release-metadata -Channel stable -WindowsAssetPath dist/windows/OpenStudio-Setup-x64.exe -WindowsBaseAiRuntimeAssetPath dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip -WindowsCudaInstallPlanPath tools/ai-runtime-install-plan-windows-cuda.json -WindowsDirectmlInstallPlanPath tools/ai-runtime-install-plan-windows-directml.json`
 11. Stage the uniquely named GitHub Release metadata assets:
    `./tools/prepare-release-publish-assets.ps1 -MetadataDir dist/release-metadata -OutputDir dist/release-publish-assets`
-12. If certificate signing is enabled, the packaging helper signs and verifies `OpenStudio.exe`, `OpenStudioCrashReporter.exe` and `OpenStudio-Setup-x64.exe`. The SignPath workflow verifies product metadata, trusted signatures and timestamps before packaging/publishing.
+12. If certificate signing is enabled, the packaging helper signs and verifies `OpenStudio.exe`, `OpenStudioCrashReporter.exe`, `OpenStudioSupport.exe` and `OpenStudio-Setup-x64.exe`. The SignPath workflow verifies product metadata, trusted signatures and timestamps before packaging/publishing.
 
 ## Local macOS release flow
 
@@ -773,7 +773,7 @@ repository owner activates SignPath.
 
 The GitHub-hosted Windows release job builds and tests OpenStudio, then:
 
-1. Stages only `OpenStudio.exe` and `OpenStudioCrashReporter.exe` as a GitHub
+1. Stages only `OpenStudio.exe`, `OpenStudioCrashReporter.exe` and `OpenStudioSupport.exe` as a GitHub
    artifact. Third-party DLLs and prerequisite installers are not re-signed.
 2. Submits that artifact to SignPath using the `windows-payload` configuration.
    It waits up to one hour for approval/completion and downloads the signed files.
@@ -887,3 +887,47 @@ still encounter operating-system trust warnings during installation.
 These changes take effect once a release containing them is distributed. Users
 on older builds need to install that release first; if their old update feed is
 unavailable, they need to download it manually once.
+
+### Offline support companion (unreleased cross-platform integration)
+
+Release CI qualifies native support builds before packaging/signing. `build.py prod`
+also builds a native companion; direct CMake builds must additionally follow
+[the support packaging instructions](offline-support.md#packaging-and-qualification).
+The release-notes gate applies before preparing an actual release.
+
+- Windows: include `OpenStudioSupport.exe` and the entire `support-runtime` folder.
+  Installer and MSIX expose a separate **OpenStudio Support** Start menu entry.
+  Synchronize the hosted SignPath `windows-payload` definition with the repository
+  XML before signing a release; missing/untrusted helper signatures fail closed.
+- macOS: release CI assembles Apple Silicon and Intel runtimes inside the helper's
+  universal `.app`, stored in `OpenStudio.app/Contents/Helpers`. The DMG also contains
+  **OpenStudio Support.app**, a small Finder launcher. Install both top-level apps
+  together. Sign nested helper code inside out before the main app, then notarize
+  through the existing release path. A local native-only support build does not
+  satisfy the universal DMG gate; assemble both native artifacts first.
+- Linux x86-64: DEB/RPM install a separate desktop entry and private runtime.
+  AppImage distributions offer a `with-support.tar.gz` containing two independently
+  launched AppImages. Existing main-AppImage URLs remain compatible. RPM must preserve
+  frozen support bytes; the support ABI gate retains the Ubuntu 22.04 baseline.
+
+Nothing registers support for autostart or adds a hook to the DAW. The support
+window refuses work when it detects OpenStudio; users must keep the DAW closed
+until support exits. No monitor or resident service enforces that afterwards.
+
+`support-qualification.yml` exercises installer install/uninstall and shortcuts,
+MSIX registration/activation/package identity/cleanup, DEB/RPM payload round trips,
+the companion AppImage, and mounted-DMG/Finder activation. These use real support
+payloads with a dummy DAW and disposable package identities. They do not replace
+final signed-artifact testing, Store certification, Gatekeeper/notarization,
+oldest-supported-OS testing or full-DAW hardware qualification. Retain those release
+gates and verify that support remains absent until explicitly opened.
+
+Build-time symbol retention now uses `tools/build-symbols.py`: exact PE/PDB IDs,
+Mach-O/dSYM UUIDs and ELF build IDs must match; packaged JavaScript must match the
+hidden maps in `frontend/debug-symbols`. `build.py prod` and release CI fail the
+archive step for missing/stale companions. Keep `OpenStudio.build-identity.json`
+in the payload, but keep symbol archives/maps outside installer and Store inputs.
+Signing can change binary hashes without changing debug IDs. Retain Actions
+`*-debug-symbols` archives in long-term support storage before their 90-day maximum
+retention expires; artifacts inherit repository permissions. Never substitute a
+later rebuild with the same app version. See [offline support](offline-support.md#build-identities-and-developer-symbols).

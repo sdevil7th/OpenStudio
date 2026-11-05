@@ -86,6 +86,9 @@ export const CLICK_ONLY_METRONOME_SHORTCUT = "Ctrl+Shift+Space";
 // Keep existing source-DAW fallbacks stable when OpenStudio's own factory map
 // changes. Explicit source mappings/unassignments continue to take precedence.
 const PREVIOUS_OPENSTUDIO_BINDINGS: Readonly<Record<string, ProfileActionBindings>> = {
+  // New OpenStudio editing defaults must not silently take keys from a vendor profile.
+  "clip.joinSelectedMidi": keys(),
+  "clip.crossfadeSelected": keys(),
   "transport.record": keys("Ctrl+R"),
   "transport.rewind": keys("Home"),
   "track.toggleSelectedArm": keys("R"),

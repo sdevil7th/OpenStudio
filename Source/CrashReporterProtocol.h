@@ -6,7 +6,7 @@
 namespace CrashReporterProtocol
 {
 constexpr DWORD magic = 0x4f534352;
-constexpr DWORD version = 3;
+constexpr DWORD version = 4;
 constexpr int entryCount = 64;
 struct Entry
 {
