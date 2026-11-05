@@ -1,0 +1,76 @@
+name: Snap qualification (no publication)
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      artifact:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  installed-snap:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.artifact }}
+          path: output/snap-input
+      - name: Prepare the exact versioned DEB payload
+        env:
+          APP_VERSION: ${{ inputs.version }}
+        run: |
+          python3 -m pip install PyYAML==6.0.3
+          mapfile -t packages < <(find output/snap-input -name '*.deb' -type f)
+          test "${#packages[@]}" -eq 1
+          python3 tools/prepare-snap-project.py --deb "${packages[0]}" --version "$APP_VERSION" --output output/snap-project
+      - uses: canonical/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1.3.0
+        id: build
+        with:
+          path: output/snap-project
+          snapcraft-channel: 8.x/stable
+      - name: Install unpublished Snap for qualification
+        env:
+          SNAP_FILE: ${{ steps.build.outputs.snap }}
+        run: |
+          mkdir -p output/snap-candidate
+          cp "$SNAP_FILE" output/snap-candidate/openstudio.snap
+          sudo snap install --dangerous --classic "$SNAP_FILE"
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth openbox
+          printf '#!/bin/sh\nexec snap run openstudio "$@"\n' > output/snap-launch
+          chmod +x output/snap-launch
+      - name: Qualify installed main and detached windows and exports
+        run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-desktop --desktop --render
+      - name: Qualify installed recovery windows
+        run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-safe --desktop --safe-mode
+      - name: Qualify explicitly opened frozen Support
+        run: |
+          xvfb-run -a snap run openstudio.support --self-test "$GITHUB_WORKSPACE/output/snap-support.json"
+          xvfb-run -a python3 tools/test-packaged-support.py --bundle /snap/openstudio/current/usr/lib/openstudio
+      - name: Qualify Snap-managed update routing
+        run: snap run openstudio --updater-self-test "$GITHUB_WORKSPACE/output/snap-updater"
+      - name: Check installed Snap identity and inactivity contract
+        env:
+          APP_VERSION: ${{ inputs.version }}
+        run: python3 tools/qualify-snap-result.py --version "$APP_VERSION" --root /snap/openstudio/current --snap output/snap-candidate/openstudio.snap --project output/snap-project --desktop output/snap-desktop --safe output/snap-safe --support output/snap-support.json --updater output/snap-updater --output output/snap-candidate/qualification.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: snap-qualification-${{ github.run_attempt }}
+          path: |
+            output/snap-desktop
+            output/snap-safe
+            output/snap-support.json
+            output/snap-updater/result.json
+            output/snap-project/input-receipt.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: snap-candidate
+          path: output/snap-candidate/
+          if-no-files-found: error

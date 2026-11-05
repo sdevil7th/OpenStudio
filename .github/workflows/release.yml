@@ -18,6 +18,72 @@ permissions:
   contents: read
 
 jobs:
+  qualify-snap:
+    name: Qualify Snap before Store release
+    if: vars.OPENSTUDIO_SNAP_ENABLED == 'true'
+    needs: [build-linux, validate-release-notes]
+    uses: ./.github/workflows/snap-qualification.yml
+    with:
+      version: ${{ needs.validate-release-notes.outputs.app_version }}
+      artifact: linux-release
+
+  preflight-snap:
+    name: Check Snap Store readiness without publication
+    needs: [qualify-snap, validate-release-notes]
+    if: vars.OPENSTUDIO_SNAP_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    environment: snap-store
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: snap-candidate
+          path: candidate
+      - run: sudo snap install snapcraft --classic --channel=8.x/stable
+      - name: Authenticate and read status of the qualified Snap
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          APP_VERSION: ${{ needs.validate-release-notes.outputs.app_version }}
+          APPROVAL_URL: ${{ vars.OPENSTUDIO_SNAP_CLASSIC_APPROVAL_URL }}
+        run: python3 tools/submit_snap_release.py --directory candidate --version "$APP_VERSION" --tag "$GITHUB_REF_NAME" --approval-url "$APPROVAL_URL" --report output/snap-preflight.json --preflight
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: snap-store-readiness-${{ github.run_attempt }}
+          path: output/snap-preflight.json
+          if-no-files-found: warn
+
+  submit-snap:
+    name: Submit Ubuntu App Center Snap release
+    needs: [publish, preflight-snap, validate-release-notes]
+    if: vars.OPENSTUDIO_SNAP_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    environment: snap-store
+    concurrency:
+      group: openstudio-snap-store-submission
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: snap-candidate
+          path: candidate
+      - run: sudo snap install snapcraft --classic --channel=8.x/stable
+      - name: Submit the exact qualified package
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          APP_VERSION: ${{ needs.validate-release-notes.outputs.app_version }}
+          APPROVAL_URL: ${{ vars.OPENSTUDIO_SNAP_CLASSIC_APPROVAL_URL }}
+        run: python3 tools/submit_snap_release.py --directory candidate --version "$APP_VERSION" --tag "$GITHUB_REF_NAME" --approval-url "$APPROVAL_URL" --report output/snap-submission.json --submit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: snap-store-submission-${{ github.run_attempt }}
+          path: output/snap-submission.json
+          if-no-files-found: warn
+
   validate-release-notes:
     runs-on: ubuntu-24.04
     outputs:
@@ -28,7 +94,7 @@ jobs:
       NOTES_FILE: ${{ github.event.inputs.release_notes_file }}
     steps:
       - name: Require exact release tag when Store is enabled
-        if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
+        if: vars.OPENSTUDIO_STORE_ENABLED == 'true' || vars.OPENSTUDIO_SNAP_ENABLED == 'true'
         shell: bash
         run: |
           if [ "$GITHUB_REF" != "refs/tags/v${VERSION#v}" ]; then
@@ -1054,7 +1120,10 @@ jobs:
           && needs.build-linux.result == 'success'
           && (needs.preflight-store.result == 'success'
               || (needs.preflight-store.result == 'skipped'
-                  && vars.OPENSTUDIO_STORE_ENABLED != 'true')) }}
+                  && vars.OPENSTUDIO_STORE_ENABLED != 'true'))
+          && (needs.preflight-snap.result == 'success'
+              || (needs.preflight-snap.result == 'skipped'
+                  && vars.OPENSTUDIO_SNAP_ENABLED != 'true')) }}
     runs-on: ubuntu-latest
     needs:
       - validate-release-notes
@@ -1062,6 +1131,7 @@ jobs:
       - build-macos
       - build-linux
       - preflight-store
+      - preflight-snap
     permissions:
       contents: write
     env:

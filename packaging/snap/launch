@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+# Setup occurs only when one of the two desktop applications is opened. There
+# are no hooks, background services, collectors or periodic support processes.
+export PATH="$SNAP/usr/bin:$PATH"
+export GSETTINGS_SCHEMA_DIR="$SNAP/usr/share/glib-2.0/schemas"
+export XDG_DATA_DIRS="$SNAP/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+case "$0" in
+  *openstudio-support-launch) exec "$SNAP/usr/lib/openstudio/OpenStudioSupport" "$@" ;;
+  *) exec "$SNAP/usr/lib/openstudio/OpenStudio" "$@" ;;
+esac

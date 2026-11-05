@@ -64,7 +64,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
         )
         cls.jobs = cls.workflow["jobs"]
 
-    def job_runs(self, name, results=None, enabled="true", ref="refs/tags/v0.1.04", cancelled=False):
+    def job_runs(self, name, results=None, enabled="true", ref="refs/tags/v0.1.04", cancelled=False, snap_enabled="false"):
         job = self.jobs[name]
         needs = job.get("needs", [])
         if isinstance(needs, str):
@@ -78,6 +78,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
                 return False
         values = {
             "vars.OPENSTUDIO_STORE_ENABLED": enabled,
+            "vars.OPENSTUDIO_SNAP_ENABLED": snap_enabled,
             "github.ref": ref,
             **{f"needs.{name}.result": status for name, status in statuses.items()},
         }
@@ -137,6 +138,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(enabled=enabled):
                 self.assertEqual(evaluate_condition(guard["if"], {
                     "vars.OPENSTUDIO_STORE_ENABLED": enabled,
+                    "vars.OPENSTUDIO_SNAP_ENABLED": "false",
                 }), expected)
         for name in ("build-windows", "build-macos", "build-linux"):
             needs = self.jobs[name]["needs"]

@@ -1,5 +1,10 @@
 # OpenStudio Release Runbook
 
+Ubuntu App Center preparation and its tag-bound Snap qualification/submission
+chain are documented in [Snap Store release preparation](snap-store-release.md).
+The account/name reservation is complete; credentials, Canonical confinement
+approval and installed-candidate qualification are separate release prerequisites.
+
 Microsoft Store package/submission automation and one-time enablement are documented
 in [Store release automation](release-runbook.md#microsoft-store-release-automation). Once enabled, the Store
 job runs after successful release publication, preserves the saved listing settings,

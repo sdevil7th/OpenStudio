@@ -16,6 +16,14 @@ permissions:
   contents: read
 
 jobs:
+  qualify-snap:
+    name: Installed Snap (unpublished)
+    needs: verify-linux
+    uses: ./.github/workflows/snap-qualification.yml
+    with:
+      version: ${{ inputs.version || '0.1.09' }}
+      artifact: candidate-linux-x64
+
   support-packages:
     uses: ./.github/workflows/support-qualification.yml
     with:
@@ -59,6 +67,7 @@ jobs:
           tests.test_store_diagnosis
           tests.test_store_recovery
           tests.test_store_release_workflow
+          tests.test_snap_release
           tests.test_ai_runtime_dependency_pins
           tests.test_release_ai_runtime
           tests.test_ai_runtime_release

@@ -97,6 +97,15 @@ public:
         };
         AppUpdater updater(directory);
         updater.trustedPublicKey = publicHex;
+       #if JUCE_LINUX
+        if (OpenStudioRuntime::nativePackageFormat() == "snap")
+        {
+            const auto status = updater.getLastStatus();
+            check("snap_updates_use_store_without_appimage_restore",
+                  status["status"] == "manual-update" && status["updateSource"] == "snap-store"
+                  && status["releasePageUrl"] == "https://snapcraft.io/openstudio");
+        }
+       #endif
         const auto root = directory.getChildFile("updates");
         const auto folder = root.getChildFile(juce::Uuid().toString());
         folder.createDirectory();
