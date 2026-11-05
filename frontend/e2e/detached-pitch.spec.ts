@@ -54,6 +54,11 @@ test("two pitch views share edits and undo, preserve viewport, and survive docki
   });
   await context.addInitScript(() => {
     localStorage.setItem("openstudio_essentialControlsDismissed", "true");
+    if (new URLSearchParams(location.search).get("window") === "pitchEditor") {
+      document.addEventListener("DOMContentLoaded", () => {
+        document.getElementById("root")!.hidden = true;
+      }, { once: true });
+    }
     // Exercise the macOS 12-compatible canvas cache fallback as well.
     Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true });
     Object.defineProperty(window, "OffscreenCanvas", { value: undefined, configurable: true });
@@ -76,6 +81,15 @@ test("two pitch views share edits and undo, preserve viewport, and survive docki
   await main.getByRole("button", { name: "Detach pitch editor" }).click();
   remote = await context.newPage();
   await remote.goto("/?window=pitchEditor&sessionId=native-view-1&windowChrome=native");
+  await remote.locator("canvas").waitFor({ state: "attached" });
+  await expect(remote.locator("#root")).toHaveAttribute("hidden", "");
+  // Hold the mounted canvas without usable geometry beyond the former two-frame
+  // probe, then expose it. Native editing must wait for the actual visible view.
+  await remote.evaluate(() => new Promise<void>(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  }));
+  expect(ready).toBe(false);
+  await remote.locator("#root").evaluate(root => { (root as HTMLElement).hidden = false; });
   await expect(remote.locator("canvas")).toBeVisible();
   await expect.poll(() => ready).toBe(true);
   await expect(main.getByText("Pitch editor is open in its own window.")).toBeVisible();

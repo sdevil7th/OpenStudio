@@ -9,12 +9,15 @@ import { toGlobalShortcutPayload } from "./utils/domShortcutEvent";
 
 export default function PitchEditorWindowApp() {
   const [hydrated, setHydrated] = useState(false);
+  const [canvasReady, setCanvasReady] = useState<(() => void) | undefined>();
   const [error, setError] = useState("");
   const [height, setHeight] = useState(window.innerHeight - 36);
   useEffect(() => {
     let cancelled = false;
     let disconnect: (() => void) | undefined;
-    void connectPitchEditorView(() => { if (!cancelled) setHydrated(true); }, setError)
+    void connectPitchEditorView(ready => {
+      if (!cancelled) { setHydrated(true); setCanvasReady(() => ready); }
+    }, setError)
       .then(stop => { if (cancelled) stop(); else disconnect = stop; }).catch(reason => setError(String(reason)));
     return () => { cancelled = true; disconnect?.(); };
   }, []);
@@ -34,6 +37,6 @@ export default function PitchEditorWindowApp() {
       <button type="button" className="rounded bg-neutral-700 px-3 py-1" disabled={!hydrated}
         onClick={() => window.dispatchEvent(new Event("openstudio:dock-pitch"))}>Dock</button>
     </header>
-    {hydrated ? <PitchEditorLowerZone height={height} /> : <div className="m-auto text-sm">Loading pitch session...</div>}
+    {hydrated ? <PitchEditorLowerZone height={height} onCanvasReady={canvasReady} /> : <div className="m-auto text-sm">Loading pitch session...</div>}
   </div>;
 }
