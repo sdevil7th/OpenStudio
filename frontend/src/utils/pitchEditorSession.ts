@@ -227,13 +227,14 @@ export async function connectPitchEditorView(onHydrated: (canvasReady: () => voi
   let sequence = 0;
   let sending: Promise<void> | undefined;
   const queuedCommands: Array<Omit<PitchSessionCommand, "sequence">> = [];
-  let readyGeneration = -1;
+  let readyIdentity: PitchSessionIdentity | undefined;
   let renderedIdentity: PitchSessionIdentity | undefined;
   let active = true;
   const acknowledgeRenderedView = () => {
     if (!active || !viewId || !snapshot || !renderedIdentity
-      || !samePitchIdentity(renderedIdentity, snapshot) || readyGeneration === snapshot.generation) return;
-    readyGeneration = snapshot.generation;
+      || !samePitchIdentity(renderedIdentity, snapshot)
+      || (readyIdentity && samePitchIdentity(readyIdentity, snapshot))) return;
+    readyIdentity = identityFrom(snapshot);
     void nativeBridge.pitchEditorSession("ready", { ...identityFrom(snapshot), viewId });
   };
   const originals = usePitchEditorStore.getState();
@@ -278,7 +279,7 @@ export async function connectPitchEditorView(onHydrated: (canvasReady: () => voi
     usePitchEditorStore.setState(incoming.pitch);
     if (incoming.daw) useDAWStore.setState({ ...incoming.daw, showPitchEditor: true });
     if (incoming.error) onError(incoming.error);
-    if (changedSession || readyGeneration !== incoming.generation) {
+    if (changedSession || !readyIdentity || !samePitchIdentity(readyIdentity, incoming)) {
       const expected = identityFrom(incoming);
       onHydrated(() => {
         if (!active || !snapshot || !samePitchIdentity(expected, snapshot)) return;

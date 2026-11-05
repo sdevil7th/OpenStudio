@@ -57,6 +57,16 @@ describe("detached pitch canvas readiness", () => {
     rendered[0]();
     expect(readyCalls()).toHaveLength(0);
   });
+  it("acknowledges a replacement project even if its generation number repeats", async () => {
+    stop = await connectPitchEditorView(hydrate, vi.fn());
+    rendered[0]();
+    deliver({ ...snapshot(2), projectEpoch: 2 });
+    rendered[0]();
+    expect(readyCalls()).toHaveLength(1);
+    rendered[1]();
+    expect(readyCalls()).toHaveLength(2);
+    expect(readyCalls()[1][1]).toMatchObject({ projectEpoch: 2, generation: 1 });
+  });
   it("handles a snapshot rendering before the initial native view ID arrives", async () => {
     let reply!: (value: unknown) => void;
     vi.mocked(nativeBridge.pitchEditorSession).mockImplementation(operation =>
