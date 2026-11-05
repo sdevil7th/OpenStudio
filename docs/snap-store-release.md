@@ -60,17 +60,24 @@ driver while reading ELF notes. Snapcraft 8.14.5 bundles patchelf 0.9: its fixup
 moved valid note sections while leaving stale runtime note segments. This matches
 [upstream issue 217](https://github.com/NixOS/patchelf/issues/217).
 
-The recipe builds checksum-pinned patchelf 0.18.0 as a build-only tool, excludes it
-from the app, and invokes Canonical's same dependency resolver with that patcher.
-Its managed build must be Ubuntu 22.04. Runtime note mappings and original GNU
+The recipe keeps Canonical's dependency resolver, interpreter and RPATH fixups.
+It then repairs stale PT_NOTE/PT_GNU_PROPERTY references from the authoritative
+mapped note sections. This changes existing program-header entries only: no code,
+section data, file length or appended frozen-Support archive moves. GNU properties
+remain represented by their dedicated runtime segment. Unsupported layouts fail
+closed. Newer ELF writers broke the pristine frozen launcher, so they are not used
+as a substitute for this bounded metadata correction.
+
+The managed build must be Ubuntu 22.04. Runtime note mappings and original GNU
 build IDs must survive every fixup, then the installed package is audited again
 before any app window opens. GIO module discovery is restricted to the matching
 packaged directory. The browser-stack audit accepts base-identical GLib from
 core22; GTK/WebKit/Soup must come from the app Snap and host GLib is rejected.
 
 A corrected private Mesa copy reached frontend `boot-ready` on the Linux desktop.
-A real relocation fixture passes metadata validation and executes after the new
-patcher; the bundled 0.9 control fails the new audit. These are diagnostic results,
+A real relocation fixture detects the bundled 0.9 corruption. A private package
+copy passes metadata validation for all 605 ELF files after note-reference repair.
+These are diagnostic results,
 not installed-package qualification or hardware GPU/audio qualification. Resume
 automatic window checks for this concrete packaging correction; full installed
 main/popout/recovery/export/Support/updater checks are still required.

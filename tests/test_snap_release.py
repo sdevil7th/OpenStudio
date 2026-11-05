@@ -14,7 +14,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 from submit_snap_release import SNAP_ID, run
-from snap_elf import audit_notes
+from snap_elf import audit_notes, repair_notes
 from tests import test_store_release_workflow as store_workflow
 
 spec = importlib.util.spec_from_file_location('snap_webkit', ROOT / 'tools/patch-snap-webkit.py')
@@ -113,9 +113,7 @@ class SnapReleaseTests(unittest.TestCase):
                 self.assertNotIn('override-prime', part)
         runtime = recipe['parts']['runtime']
         self.assertEqual(runtime['build-attributes'], ['no-patchelf'])
-        self.assertIn('"$CRAFT_STAGE/usr/bin/patchelf"', runtime['override-prime'])
-        self.assertIn('patchelf', runtime['after'])
-        self.assertEqual(recipe['parts']['patchelf']['prime'], ['-*'])
+        self.assertIn('"$CRAFT_PROJECT_DIR/snap_elf.py" "$CRAFT_PRIME"', runtime['override-prime'])
 
     def test_runtime_elf_notes_match_the_native_symbol_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -142,6 +140,15 @@ class SnapReleaseTests(unittest.TestCase):
             path.write_bytes(runtime_elf_fixture(note_offset=0x180))
             with self.assertRaisesRegex(ValueError, 'matching runtime segment'):
                 audit_notes(path)
+            original = path.read_bytes()
+            self.assertTrue(repair_notes(path))
+            repaired = path.read_bytes()
+            self.assertEqual(len(repaired), len(original))
+            self.assertEqual(repaired[:120], original[:120])
+            self.assertEqual(repaired[176:], original[176:])
+            self.assertEqual(audit_notes(path), ['01' * 20])
+            self.assertFalse(repair_notes(path))
+            self.assertEqual(path.read_bytes(), repaired)
 
     def test_reject_runtime_note_virtual_address_mismatch_and_truncation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -156,6 +163,33 @@ class SnapReleaseTests(unittest.TestCase):
             struct.pack_into('<Q', data, 0x340 + 16, 0x20000)
             path.write_bytes(data)
             with self.assertRaisesRegex(ValueError, 'mapped load segments'): audit_notes(path)
+            with self.assertRaises(ValueError): repair_notes(path)
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_repair_uses_existing_gnu_property_segment_and_preserves_appended_archive(self):
+        data = runtime_elf_fixture()
+        data.extend(bytes(0x100))
+        names = b'\0.note.gnu.build-id\0.shstrtab\0.note.gnu.property\0'
+        data[0x240:0x240 + len(names)] = names
+        struct.pack_into('<Q', data, 0x380 + 32, len(names))
+        struct.pack_into('<H', data, 56, 3)
+        struct.pack_into('<H', data, 60, 4)
+        struct.pack_into('<IIQQQQQQ', data, 64, 1, 4, 0, 0, 0, len(data), len(data), 0x1000)
+        struct.pack_into('<IIQQQQQQ', data, 176, 0x6474e553, 4, 0x180, 0x180, 0x180, 32, 32, 8)
+        data[0x180:0x1a0] = b'X' * 32
+        prop = struct.pack('<III', 4, 16, 5) + b'GNU\0' + struct.pack('<IIII', 0xc0008002, 4, 1, 0)
+        data[0x280:0x280 + len(prop)] = prop
+        struct.pack_into('<IIQQQQIIQQ', data, 0x3c0, 30, 7, 2, 0x280, 0x280, len(prop), 0, 0, 8, 0)
+        data.extend(b'private-frozen-archive-fixture' * 500)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'frozen-launcher'
+            path.write_bytes(data)
+            self.assertTrue(repair_notes(path))
+            repaired = path.read_bytes()
+            self.assertEqual(len(repaired), len(data))
+            self.assertEqual(repaired[:120], data[:120])
+            self.assertEqual(repaired[232:], data[232:])
+            self.assertEqual(audit_notes(path), ['01' * 20])
 
     def test_webkit_relocation_preserves_elf_offsets(self):
         source = b'prefix\0' + webkit.OLD + b'/injected-bundle/test.so\0suffix'
