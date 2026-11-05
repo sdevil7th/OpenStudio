@@ -6,8 +6,8 @@ The user requested certification checks and a release PR, with publication held.
 
 ## Current evidence
 
-The follow-up "Mac export/window qualification" below records the latest source
-changes and the completed Windows certification at `dd92c765`. PR #36 retains
+The follow-ups "Mac export/window qualification" and "Neutral EQ precision"
+below record the latest source changes and artifact-specific results. PR #36 retains
 final-head CI links; earlier results remain tied to their listed artifacts.
 
 **Merge acceptance decision — 5 November 2026:** the user explicitly accepted the
@@ -639,3 +639,43 @@ The accepted 8-sample failure remains **fail, non-blocking**; no new hardware
 measurement was made. Listening quality, physical devices, Apple notarization,
 Gatekeeper acceptance and Store approval remain **not_asserted**. Nothing was
 published, submitted or merged.
+
+
+## Neutral EQ precision — 5 November 2026
+
+At `f92fc430`, the [Intel Mac native job](https://github.com/sdevil7th/OpenStudio/actions/runs/41982480859/job/127097795850)
+passed without C++ compiler warnings, including all seven OGG cases, native
+Vorbis failure/cancellation contracts, window lifecycle and spectral export.
+Apple Silicon passed 88 window checks and installed-DMG/Support/signature checks,
+but its newly reached spectral-export assertion failed. Windows native/installer
+qualification and [WACK](https://github.com/sdevil7th/OpenStudio/actions/runs/41982480859/job/127106661326)
+passed; the [certification report](https://github.com/sdevil7th/OpenStudio/actions/runs/41982480859/artifacts/13396536108)
+is retained. Linux package qualification passed. These results are tied to those
+artifacts; they do not assert that a later binary has passed.
+
+`191d91c2` replaced the window harness's deprecated Linux frame-size API with the
+current optional API. `85d7717c` retained the exact Mac candidate even when later
+export tests fail and expanded the explicit spectral test's evidence. The
+[Apple Silicon report](https://github.com/sdevil7th/OpenStudio/actions/runs/41986658088/artifacts/13398186415)
+then identified the sole failing condition: neutral error
+`2.447515726089478e-6` exceeded the unchanged `2e-6` limit. PDC and output lengths
+passed, route error was `1.862645149230957e-9`, and active correction was
+`0.03571418300271`. The current Linux build passed without C++ warnings. One
+Windows browser test in that run failed before app startup because Chromium
+could not fetch React (`ERR_NO_BUFFER_SPACE`); its trace identifies a runner
+network-resource failure, not a batch-converter assertion failure.
+
+The neutral-EQ correction recognizes exactly equal numerator/denominator
+polynomials during coefficient construction and uses exact identity coefficients.
+This avoids exciting cancelled recursive poles through fused-math rounding.
+Non-unity coefficient construction and the existing spectral error thresholds
+are unchanged. A new export regression requires exact PCM equality with a
+neutral default EQ. Local Release builds have zero C++ warnings; all 427 export
+checks and six focused EQ suites (spectral, phase, minimum FIR, shapes, adaptive
+dynamics and draft processing modes) pass. New Mac/Windows/Linux artifacts must
+pass their own CI; final results are recorded on PR #36.
+
+Support remains inactive until explicitly opened. No recording-time diagnostics
+were added. Physical device behavior and subjective audio quality remain
+**not_asserted**; the accepted 8-sample hardware result remains **fail,
+non-blocking**. No Store submission, notarization, release or publication occurred.

@@ -77972,6 +77972,18 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
     juce::AudioBuffer<float> phaseBaseline, phaseMaster, phaseStem, phaseSelected;
     bool phaseRenderPass = renderPhaseCase("master", "baseline", phaseBaseline);
     const bool phaseMounted = addTrackBuiltInFX(phaseTrack, "OpenStudio EQ", false);
+    juce::AudioBuffer<float> neutralEQ;
+    bool neutralEQExact = phaseRenderPass && phaseMounted
+        && renderPhaseCase("master", "eq-neutral", neutralEQ)
+        && neutralEQ.getNumSamples() == phaseBaseline.getNumSamples();
+    double neutralEQError = 0;
+    if (neutralEQExact)
+        for (int channel = 0; channel < 2; ++channel)
+            for (int sample = 0; sample < phaseBaseline.getNumSamples(); ++sample)
+                neutralEQError = juce::jmax(neutralEQError, std::abs(static_cast<double>(
+                    neutralEQ.getSample(channel, sample) - phaseBaseline.getSample(channel, sample))));
+    addCheck("neutral_eq_export_identity", neutralEQExact && neutralEQError == 0,
+        "Default zero-gain EQ preserves PCM exactly, including on fused-math platforms; no recursive unity-filter residue.", neutralEQError);
     const bool phaseEnabled = phaseMounted && setBuiltInPluginParam(phaseTrack, "track", 0, "phaseMode", 1);
     auto* phaseEQ = phaseMounted ? dynamic_cast<OpenStudioEQ*>(trackMap[phaseTrack]->getTrackFXProcessor(0)) : nullptr;
     const auto phaseState = phaseEnabled ? getBuiltInPluginState(phaseTrack, "track", 0) : juce::var();

@@ -233,6 +233,14 @@ constexpr OpenStudioIIRCoefficientSet kIdentityBiquad {
 OpenStudioIIRCoefficientSet normaliseBiquad(
     const std::array<float, 6>& coefficients) noexcept
 {
+    // Equal numerator/denominator polynomials are exactly unity. Retaining
+    // cancelling recursive terms lets fused multiply-add rounding excite the
+    // otherwise cancelled poles on ARM, even with every EQ gain at zero.
+    if (std::isfinite(coefficients[0]) && std::isfinite(coefficients[1])
+        && std::isfinite(coefficients[2]) && std::abs(coefficients[3]) > 1.0e-12f
+        && coefficients[0] == coefficients[3] && coefficients[1] == coefficients[4]
+        && coefficients[2] == coefficients[5])
+        return kIdentityBiquad;
     const float inverseA0 = std::abs(coefficients[3]) > 1.0e-12f
         ? 1.0f / coefficients[3]
         : 0.0f;
