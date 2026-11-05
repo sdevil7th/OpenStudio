@@ -9,8 +9,8 @@ def validate(bundle: Path, version: str) -> None:
     if root.suffix == '.app':
         root = root / 'Contents/Resources'
     policy = json.loads((root / 'OpenStudio.build-policy.json').read_text(encoding='utf-8'))
-    if policy.get('version') != version or policy.get('callbackDiagnostics') is not False:
-        raise ValueError('Release packaging requires matching application version and callback diagnostics compiled out')
+    if policy.get('version') != version or any(policy.get(key) is not False for key in ('callbackDiagnostics', 'araDiagnostics', 'hangMonitoring')):
+        raise ValueError('Release packaging requires matching application version and callback/ARA diagnostics and periodic hang monitoring compiled out')
 
 
 if __name__ == '__main__':

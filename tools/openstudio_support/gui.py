@@ -27,22 +27,23 @@ def create_window(root):
     ttk.Label(frame, text="Operation").grid(row=2, column=0, sticky="w")
     combo = ttk.Combobox(frame, textvariable=operation, values=list(choices), state="readonly")
     combo.grid(row=2, column=1, columnspan=2, sticky="ew", pady=5)
-    variables = {key: tk.StringVar() for key in ("input", "context", "output", "description", "clips")}
+    variables = {key: tk.StringVar() for key in ("input", "context", "output", "description", "clips", "app", "symbols", "crash")}
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     variables["output"].set(str(Path.home() / "OpenStudio-support" / stamp))
     labels, fields, operation_controls = {}, {}, {}
     controls = [combo]
     for index, (key, label) in enumerate((("input", "Log folder (optional)"), ("context", "Render report (optional)"),
                                          ("output", "New review folder"), ("description", "What happened?"),
-                                         ("clips", "MIDI clip IDs (optional)")), start=3):
+                                         ("clips", "MIDI clip IDs (optional)"), ("app", "App executable (optional)"),
+                                         ("symbols", "Symbol archive (optional)"), ("crash", "OS crash report (optional)")), start=3):
         labels[key] = ttk.Label(frame, text=label)
         labels[key].grid(row=index, column=0, sticky="w", padx=(0, 12))
         fields[key] = [labels[key]]
         entry = ttk.Entry(frame, textvariable=variables[key])
-        entry.grid(row=index, column=1, columnspan=1 if key in {"input", "context", "output"} else 2, sticky="ew", pady=5)
+        entry.grid(row=index, column=1, columnspan=1 if key in {"input", "context", "output", "app", "symbols", "crash"} else 2, sticky="ew", pady=5)
         controls.append(entry)
         fields[key].append(entry)
-        if key in {"input", "context", "output"}:
+        if key in {"input", "context", "output", "app", "symbols", "crash"}:
             def browse(which=key):
                 action = choices[operation.get()]
                 if which == "output":
@@ -51,7 +52,7 @@ def create_window(root):
                     else:
                         parent = filedialog.askdirectory(title="Parent folder for a NEW review folder")
                         value = str(Path(parent) / datetime.now().strftime("support-%Y%m%d-%H%M%S")) if parent else ""
-                elif which == "input" and action in {"collect", "bundle"}:
+                elif which == "symbols" or which == "input" and action in {"collect", "bundle"}:
                     value = filedialog.askdirectory(title="Evidence folder")
                 else:
                     value = filedialog.askopenfilename(title="Choose existing file")
@@ -62,16 +63,16 @@ def create_window(root):
             controls.append(button)
             fields[key].append(button)
     dumps, reviewed = tk.BooleanVar(), tk.BooleanVar()
-    for row, variable, label in ((8, dumps, "Include unredacted crash dumps (can contain private memory and credentials)"),
-                                 (9, reviewed, "I reviewed every file in the report folder before creating this ZIP")):
+    for row, variable, label in ((11, dumps, "Include unredacted crash dumps (can contain private memory and credentials)"),
+                                 (12, reviewed, "I reviewed every file in the report folder before creating this ZIP")):
         control = ttk.Checkbutton(frame, text=label, variable=variable)
         control.grid(row=row, column=0, columnspan=3, sticky="w", pady=5)
         controls.append(control)
         operation_controls[row] = control
-    ttk.Label(frame, text="Redaction is best effort. Review the report folder before creating a ZIP.\nAttach the ZIP to your support request yourself; nothing is sent automatically.", wraplength=680).grid(row=10, column=0, columnspan=3, sticky="w", pady=8)
+    ttk.Label(frame, text="Redaction is best effort. Review the report folder before creating a ZIP.\nAttach the ZIP to your support request yourself; nothing is sent automatically.", wraplength=680).grid(row=13, column=0, columnspan=3, sticky="w", pady=8)
     display = tk.Text(frame, height=12, wrap="word", state="disabled")
-    display.grid(row=12, column=0, columnspan=3, sticky="nsew", pady=(12, 0))
-    frame.rowconfigure(12, weight=1)
+    display.grid(row=15, column=0, columnspan=3, sticky="nsew", pady=(12, 0))
+    frame.rowconfigure(15, weight=1)
     executor = ThreadPoolExecutor(max_workers=1)
     state = {"future": None, "lastReview": None, "lastOutput": None}
 
@@ -94,13 +95,13 @@ def create_window(root):
         dumps.set(False)
         reviewed.set(False)
         for key, widgets in fields.items():
-            visible = (key not in {'description', 'clips', 'context'} or
-                       key == 'description' and action == 'collect' or
+            visible = (key not in {'description', 'clips', 'context', 'app', 'symbols', 'crash'} or
+                       key in {'description', 'app', 'symbols', 'crash'} and action == 'collect' or
                        key == 'clips' and action == 'midi' or
                        key == 'context' and action != 'bundle')
             for widget in widgets:
                 widget.grid() if visible else widget.grid_remove()
-        for row, visible in ((8, action == 'collect'), (9, action == 'bundle')):
+        for row, visible in ((11, action == 'collect'), (12, action == 'bundle')):
             operation_controls[row].grid() if visible else operation_controls[row].grid_remove()
 
     def poll():
@@ -136,6 +137,9 @@ def create_window(root):
             args += ["--project" if action == "midi" else "--route-report", context]
         if action == "collect":
             args += ["--description", variables["description"].get()]
+            for key, option in (("app", "--app"), ("symbols", "--symbols"), ("crash", "--crash-report")):
+                if variables[key].get().strip():
+                    args += [option, variables[key].get().strip()]
             if dumps.get():
                 args.append("--include-dumps")
         if action == "midi":
@@ -153,7 +157,7 @@ def create_window(root):
         root.after(100, poll)
 
     button = ttk.Button(frame, text="Run selected operation", command=start)
-    button.grid(row=11, column=0, columnspan=3, sticky="w")
+    button.grid(row=14, column=0, columnspan=3, sticky="w")
     controls.append(button)
     def open_output():
         import os
@@ -173,7 +177,7 @@ def create_window(root):
         except OSError as exc:
             messagebox.showerror('Could not open folder', str(exc))
     folder_button = ttk.Button(frame, text='Open output folder', command=open_output)
-    folder_button.grid(row=11, column=1, columnspan=2, sticky='e')
+    folder_button.grid(row=14, column=1, columnspan=2, sticky='e')
     controls.append(folder_button)
     combo.bind("<<ComboboxSelected>>", selected)
     selected()

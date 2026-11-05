@@ -37,12 +37,25 @@ def run_selftest(output):
         close()
         with tempfile.TemporaryDirectory(prefix='support-self-test-') as directory:
             path = Path(directory)
+            from .collection import collect
+            from .identity import native_ids
+            import struct
+            import uuid
+            identity = uuid.UUID('00112233-4455-6677-8899-aabbccddeeff')
+            native = path / 'fixture.macho'
+            native.write_bytes(struct.pack('<8I', 0xfeedfacf, 0x100000c, 0, 2, 1, 24, 0, 0)
+                               + struct.pack('<II', 0x1b, 24) + identity.bytes)
+            assert native_ids(native) == ['macho:' + str(identity).upper()]
+            (path / 'PluginList.xml').write_text('<KNOWNPLUGINS><PLUGIN name="Fixture" format="VST3" pluginState="private"/></KNOWNPLUGINS>')
+            evidence, files, _ = collect([path])
+            assert len(files) == 1 and b'private' not in next(iter(files.values()))
             sf.write(path / 'silence.wav', np.zeros((16, 2)), 48000, subtype='PCM_16')
             assert sf.info(path / 'silence.wav').frames == 16
             project = path / 'test.osproj'
             project.write_text(json.dumps({'version': '1.2.0', 'tempo': 120, 'tracks': []}))
             assert prepare_project(project)['tracks'] == []
         result = {'status': 'pass', 'gui': 'constructed_hidden', 'audioDecoder': 'pass',
+                  'nativeIdentity': 'pass', 'pluginSettingsCollection': 'pass',
                   'embeddedMIDISerializer': 'pass', 'closedAppGuard': 'pass', 'displayScaling': display_check}
         if sys.platform == 'win32':
             import ctypes

@@ -33,7 +33,7 @@ def main():
         for name in ('OpenStudio', 'OpenStudioUpdateInstaller'):
             shutil.copy2('/bin/true', bundle / name)
         (bundle / 'OpenStudio.version').write_text(args.version)
-        (bundle / 'OpenStudio.build-policy.json').write_text(json.dumps({'version': args.version, 'callbackDiagnostics': False}))
+        (bundle / 'OpenStudio.build-policy.json').write_text(json.dumps({'version': args.version, 'callbackDiagnostics': False, 'araDiagnostics': False, 'hangMonitoring': False}))
         for name in ('webui/index.html', 'effects/fixture', 'scripts/fixture', 'licenses/fixture', 'models/basic_pitch_nmp.onnx'):
             path = bundle / name; path.parent.mkdir(exist_ok=True); path.write_text('QA fixture, not the DAW')
         native.validate_bundle(bundle, args.version)

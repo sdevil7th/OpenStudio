@@ -19,8 +19,16 @@ class ReleaseBuildPolicyTest(unittest.TestCase):
                     policy.write_text(json.dumps({'version': '0.1.09', 'callbackDiagnostics': value}))
                     with self.assertRaises(ValueError):
                         validate(bundle, '0.1.09')
-                policy.write_text(json.dumps({'version': '0.1.08', 'callbackDiagnostics': False}))
+                policy.write_text(json.dumps({'version': '0.1.08', 'callbackDiagnostics': False, 'araDiagnostics': False, 'hangMonitoring': False}))
                 with self.assertRaises(ValueError):
                     validate(bundle, '0.1.09')
-                policy.write_text(json.dumps({'version': '0.1.09', 'callbackDiagnostics': False}))
+                policy.write_text(json.dumps({'version': '0.1.09', 'callbackDiagnostics': False, 'araDiagnostics': False, 'hangMonitoring': False}))
                 validate(bundle, '0.1.09')
+                for key in ('araDiagnostics', 'hangMonitoring'):
+                    value = json.loads(policy.read_text())
+                    value[key] = True
+                    policy.write_text(json.dumps(value))
+                    with self.assertRaises(ValueError):
+                        validate(bundle, '0.1.09')
+                    value[key] = False
+                    policy.write_text(json.dumps(value))

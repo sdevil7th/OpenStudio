@@ -149,6 +149,10 @@ jobs:
         if: env.DOPPLER_CONFIGURED == 'true'
         uses: dopplerhq/cli-action@014df23b1329b615816a38eb5f473bb9000700b1 # v3
 
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
       - name: Configure CMake
         shell: pwsh
         env:
@@ -202,6 +206,15 @@ jobs:
       - name: Build OpenStudio
         shell: pwsh
         run: cmake --build $env:BUILD_DIR --config Release --target OpenStudio
+
+      - name: Archive matching native and frontend symbols (windows)
+        run: python tools/build-symbols.py archive --app "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe" --build-dir $env:BUILD_DIR --output output/symbols
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-debug-symbols
+          path: output/symbols/
+          retention-days: 90
+          if-no-files-found: error
 
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
@@ -594,6 +607,10 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
       - name: Configure CMake
         shell: bash
         env:
@@ -638,6 +655,15 @@ jobs:
       - name: Build OpenStudio
         shell: bash
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
+
+      - name: Archive matching native and frontend symbols (macos)
+        run: python tools/build-symbols.py archive --app "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.app" --build-dir "$BUILD_DIR" --output output/symbols
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-debug-symbols
+          path: output/symbols/
+          retention-days: 90
+          if-no-files-found: error
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -828,6 +854,10 @@ jobs:
         if: env.DOPPLER_CONFIGURED == 'true'
         uses: dopplerhq/cli-action@014df23b1329b615816a38eb5f473bb9000700b1 # v3
 
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
       - name: Configure CMake
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
@@ -870,6 +900,15 @@ jobs:
 
       - name: Build OpenStudio
         run: cmake --build "$BUILD_DIR" --config Release --target OpenStudio
+
+      - name: Archive matching native and frontend symbols (Linux)
+        run: python tools/build-symbols.py archive --app "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" --build-dir "$BUILD_DIR" --output output/symbols
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-debug-symbols
+          path: output/symbols/
+          retention-days: 90
+          if-no-files-found: error
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:

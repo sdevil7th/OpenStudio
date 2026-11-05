@@ -2763,6 +2763,9 @@ static void logPitchEditorFormant(const juce::String& msg)
 #ifndef OPENSTUDIO_AUDIO_PATH_DEBUG
  #define OPENSTUDIO_AUDIO_PATH_DEBUG 0
 #endif
+#if OPENSTUDIO_AUDIO_PATH_DEBUG && !OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+ #error Audio-path logging requires an explicit diagnostic build.
+#endif
 static constexpr bool kAudioPathDebugLogs = OPENSTUDIO_AUDIO_PATH_DEBUG != 0;
 
 static void logAudioTransport(const juce::String& msg)
@@ -6504,8 +6507,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // midway through a stopped callback must not advance that unrecorded block.
     const bool callbackPlaying = isPlaying.load(std::memory_order_acquire);
     const bool callbackRecording = isRecordMode.load(std::memory_order_acquire);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const bool firstCallbackAfterTransportStart = callbackPlaying
         && firstCallbackAfterTransportStartPending.exchange(false, std::memory_order_acq_rel);
+#endif
     const bool callbackStartedWhileRecording =
         callbackPlaying
         && callbackRecording;
@@ -6785,8 +6790,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         clearRealtimeBuffer(entry.sidechainOutputBuffer);
         clearRealtimeBuffer(entry.sendAccumBuffer);
     }
+#if OPENSTUDIO_AUDIO_PATH_DEBUG
     const bool shouldLogCallbackSummary = kAudioPathDebugLogs
         && (((callbackCounter % 50) == 1) || ((callbackPlaying || callbackRecording) && firstCallbackAfterTransportStart));
+#else
+    constexpr bool shouldLogCallbackSummary = false;
+#endif
 #if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const bool shouldSampleSignalChainPeaks =
         shouldSampleAudioCallbackStages
@@ -6891,7 +6900,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // Both execution modes share input preparation, raw recording and final
     // reduction. Only the independent per-track DSP runs on audio workers.
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     bool anyActiveARAInCallback = false;
+#endif
     const auto prepareTrack = [&](const RealtimeTrackEntry& trackEntry,
                                   RealtimeTrackWork& work) -> bool
     {
@@ -6901,6 +6912,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             return false;
 
         const bool hasActiveARA = track->hasActiveARA();
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         if (hasActiveARA)
         {
             anyActiveARAInCallback = true;
@@ -6913,6 +6925,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             }
         }
 
+#endif
         const bool excludedBySolo = anySoloed && !track->getSolo() && !track->getSoloSafe();
         const bool hasActiveAudioRecording = callbackRecording
             && track->getRecordArmed()
@@ -7651,6 +7664,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             std::memory_order_relaxed);
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     // Only measure callback duration when an ARA plugin is active — the QPC call is
     // non-trivial at 32-sample block sizes (1500/sec) and the result is only used for
     // ARA slow-block diagnostics.
@@ -7678,6 +7692,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     3));
         }
     }
+#endif
 
 #if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const double callbackEndWallTimeMs =
@@ -9631,6 +9646,7 @@ void AudioEngine::setTransportPlaying(bool playing)
     }
     else
     {
+        if (!isRecordMode) OpenStudioCrashDiagnostics::flushRealtimeFaults();
         logToDisk("Transport STOP at position: " + juce::String(getTransportPosition()) + "s");
         const juce::ScopedLock sl(mainProcessorGraph->getCallbackLock());
         queueAllNotesOffForAllTracks();
@@ -9650,6 +9666,7 @@ void AudioEngine::setTransportPlaying(bool playing)
         // Don't reset position here - let the stop() action control that
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const double currentPositionSeconds =
         getTransportPosition();
     const auto focusedEditorTarget = pluginWindowManager.getFocusedEditorTarget();
@@ -9670,9 +9687,12 @@ void AudioEngine::setTransportPlaying(bool playing)
                                                         editorFocusedAtPlayStart);
         }
     }
+#endif
     if (playing)
     {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         firstCallbackAfterTransportStartPending.store(true, std::memory_order_release);
+#endif
         isPlaying.store(true, std::memory_order_release);
     }
 }
@@ -10002,6 +10022,7 @@ void AudioEngine::setTransportRecording(bool recording)
         lastCompletedClips.insert(lastCompletedClips.end(),
                                   std::make_move_iterator(completedAudioTakes.begin()),
                                   std::make_move_iterator(completedAudioTakes.end()));
+        OpenStudioCrashDiagnostics::flushRealtimeFaults();
         logToDisk("Recordings stopped. Completed " + juce::String(lastCompletedClips.size()) + " audio clips.");
         logAudioRecord("record stop completedAudio=" + juce::String(static_cast<int>(lastCompletedClips.size()))
             + " completedMidi=" + juce::String(static_cast<int>(lastCompletedMIDIClips.size())));
@@ -76238,6 +76259,10 @@ juce::var AudioEngine::runRenderExportRegression(const juce::File& outputDirecto
                 && snapshot["audioCallbackStageTimings"].isVoid()
                 && compact["audioCallbackDeadlineMissCount"].isVoid()
                 && !stats.enabled && stats.published == 0 && stats.pending == 0;
+        int araArgumentEvaluations = 0;
+        logARADebugLine(juce::String(++araArgumentEvaluations));
+        addCheck("ara_logging_build_contract", araArgumentEvaluations == (expected ? 1 : 0),
+                 "ARA logging arguments are not evaluated in ordinary builds.");
         addCheck("callback_diagnostics_build_contract", availability && timing,
                  "Production omits measurements and cannot enable tracing; diagnostic builds collect explicit fixture callbacks. No hardware timing claim.");
     }

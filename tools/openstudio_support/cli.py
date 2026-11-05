@@ -16,6 +16,9 @@ def parser():
     collect = actions.add_parser("collect", help="Prepare existing evidence for review")
     collect.add_argument("--log-dir", type=Path, action="append", help="Additional exact log directory; not scanned recursively")
     collect.add_argument("--route-report", type=Path, action="append", default=[])
+    collect.add_argument('--app', type=Path, help='Installed app executable (or macOS .app) to identify offline')
+    collect.add_argument('--symbols', type=Path, help='Optional developer symbol archive directory to verify and match')
+    collect.add_argument('--crash-report', type=Path, action='append', default=[], help='Existing OS crash report text to redact; no OS configuration changes')
     collect.add_argument("--include-dumps", action="store_true", help="Include unredacted memory dumps; may contain private data")
     collect.add_argument("--description", default="", help="What happened and what you expected")
     collect.add_argument("--output", type=Path, required=True, help="New review directory (must not exist)")
@@ -46,7 +49,8 @@ def run(args):
     if args.action == "collect":
         from .collection import collect, default_directories
         result, artifacts, redactor = collect(args.log_dir or default_directories(), args.route_report,
-                                             args.include_dumps, args.description)
+                                             args.include_dumps, args.description, app=args.app,
+                                             symbols=args.symbols, crash_reports=args.crash_report)
         save_report(args.output, result, artifacts, redactor)
     elif args.action == "audio":
         from .audio import inspect_audio

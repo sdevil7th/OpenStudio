@@ -44,7 +44,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support -q
+          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support tests.test_support_identity -q
           if ($LASTEXITCODE -ne 0) { throw 'Support tests failed' }
           $env:OPENSTUDIO_SUPPORT_TEST_BUNDLE = "$PWD/output/support-package/OpenStudioSupport"
           python tests/test_windows_installer.py --require-tools
@@ -56,13 +56,13 @@ jobs:
         if: runner.os == 'macOS'
         timeout-minutes: 6
         run: |
-          .venv-support/bin/python -c "import faulthandler, unittest; faulthandler.dump_traceback_later(180, exit=True); unittest.main(module=None, argv=['unittest', 'tools.test_openstudio_support', '-v'])"
+          .venv-support/bin/python -c "import faulthandler, unittest; faulthandler.dump_traceback_later(180, exit=True); unittest.main(module=None, argv=['unittest', 'tools.test_openstudio_support', 'tests.test_support_identity', '-v'])"
           python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport.app
           codesign --verify --deep --strict output/support-package/OpenStudioSupport.app
       - name: Linux support tests and native packaging
         if: runner.os == 'Linux'
         run: |
-          xvfb-run -a .venv-support/bin/python -m unittest tools.test_openstudio_support -q
+          xvfb-run -a .venv-support/bin/python -m unittest tools.test_openstudio_support tests.test_support_identity -q
           python -m unittest tests.test_linux_native_packaging tests.test_linux_abi tests.test_release_notes -q
           xvfb-run -a python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport
           xvfb-run -a python tools/test-support-linux.py --bundle output/support-package/OpenStudioSupport --version "$SUPPORT_VERSION"

@@ -1,6 +1,7 @@
 #include "RuntimeLocation.h"
 #include "AppPaths.h"
 #include "CrashDiagnostics.h"
+#include "RealtimeDiagnosticsConfig.h"
 
 #include <array>
 #include <atomic>
@@ -53,7 +54,7 @@ void flushBreadcrumbs()
 
 #if JUCE_WINDOWS
 HANDLE crashRequested = nullptr, crashFinished = nullptr, fallbackRequested = nullptr;
-HANDLE externalReporter = nullptr, reporterMapping = nullptr;
+HANDLE externalReporter = nullptr, reporterMapping = nullptr, monitorChanged = nullptr;
 CrashReporterProtocol::SharedState fallbackReport {};
 CrashReporterProtocol::SharedState* reportState = &fallbackReport;
 volatile LONG crashStarted = 0;
@@ -73,7 +74,7 @@ bool launchExternalReporter()
         if (ready) CloseHandle(ready);
         return false;
     }
-    HANDLE inherited[] = { reporterMapping, crashRequested, crashFinished, ready, parent };
+    HANDLE inherited[] = { reporterMapping, crashRequested, crashFinished, ready, parent, monitorChanged };
     SIZE_T attributeBytes = 0;
     InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
     std::vector<unsigned char> attributeStorage(attributeBytes);
@@ -230,7 +231,8 @@ void installCrashHandlers()
         crashRequested = CreateEventW(&security, TRUE, FALSE, nullptr);
         crashFinished = CreateEventW(&security, TRUE, FALSE, nullptr);
         fallbackRequested = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (crashRequested && crashFinished && fallbackRequested)
+        monitorChanged = CreateEventW(&security, FALSE, FALSE, nullptr);
+        if (crashRequested && crashFinished && fallbackRequested && monitorChanged)
         {
             HANDLE thread = CreateThread(nullptr, 0, writeCrashDump, nullptr, 0, nullptr);
             if (thread != nullptr)
@@ -251,18 +253,21 @@ void pulseMessageThread() noexcept
 {
 #if JUCE_WINDOWS
     InterlockedExchange64(&reportState->heartbeatTicks, static_cast<LONG64>(GetTickCount64()));
-    InterlockedExchange(&reportState->watchdogArmed, 1);
+    if (InterlockedExchange(&reportState->watchdogArmed, 1) == 0 && monitorChanged != nullptr)
+        SetEvent(monitorChanged);
 #endif
 }
 
 void beginFinalShutdown()
 {
+    flushRealtimeFaults();
     recordBreadcrumb("final_shutdown_committed", "Drain owned workers; preserve recovery evidence if a native call cannot return.");
 #if JUCE_WINDOWS
     // Refresh heartbeat so a slow but healthy operation before Quit does not
     // consume shutdown's diagnostic grace period.
     pulseMessageThread();
     InterlockedExchange(&reportState->finalQuitRequested, 1);
+    if (monitorChanged != nullptr) SetEvent(monitorChanged);
     if (externalReporter == nullptr || WaitForSingleObject(externalReporter, 0) != WAIT_TIMEOUT)
         recordBreadcrumb("shutdown_watchdog_failed", "External reporter unavailable; safe joins may still wait indefinitely.");
 #endif
@@ -274,6 +279,20 @@ int runSelfTest(const juce::File& isolatedDirectory, bool simulateCrash, bool si
     selfTestReporterUnavailable = simulateReporterUnavailable;
     if (! selfTestDirectory.createDirectory() || getBreadcrumbLogFile().existsAsFile()) return 2;
     installCrashHandlers();
+   #if JUCE_WINDOWS
+    if (reportState->watchdogArmed != 0 || reportState->finalQuitRequested != 0) return 11;
+    if (!simulateCrash && !simulateHang && !simulateShutdownHang)
+    {
+        // An old heartbeat must do nothing until explicitly armed. The reporter
+        // is blocked on events during ordinary app use, including recording.
+        reportState->hangTimeoutMs = 1;
+        reportState->heartbeatTicks = 1;
+        juce::Thread::sleep(1500);
+        if (reportState->hangReportState != 0) return 12;
+        reportState->heartbeatTicks = 0;
+        reportState->hangTimeoutMs = 30000;
+    }
+   #endif
     for (int index = 0; index < 128; ++index)
         recordBreadcrumb("fixture_operation", "sequence=" + juce::String(index) + ";");
     if (getBreadcrumbLogFile().existsAsFile()) return 3;

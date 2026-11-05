@@ -3,7 +3,8 @@
 Unreleased development work added after app commit `f45637be`. The support companion
 is packaged separately for Windows, macOS and Linux. It adds no collectors, timers,
 threads, buffers, callbacks, uploads, or logging to the running DAW. Ordinary
-0.1.09 candidate builds also compile out callback timing profiling and trace storage.
+0.1.09 candidate builds also compile out callback timing profiling, trace storage,
+ARA callback timing/log formatting and per-block ARA debug-state updates.
 Essential engine scheduling, meters and existing fault handling remain; this is
 not a claim that those engine operations cost zero. Missing timing is reported as
 unavailable, never as zero failures. See [candidate qualification](certification-0.1.09.md).
@@ -40,8 +41,10 @@ Users install no Python, Node.js, libraries, or terminal tools. The companion
 bundles its interpreter, Tk window, audio decoder and a bounded JavaScript engine
 containing the app's MIDI serializer. Nothing is registered to run at login,
 DAW startup, recording, export, crash or shutdown. Installation space increases;
-normal DAW execution loads none of this payload. Existing native crash reporting
-is unaffected. Explicitly launching this companion does consume resources.
+normal DAW execution loads none of this payload. Native crash capture remains;
+the Windows crash helper waits on events during normal use. Automatic periodic
+UI-hang monitoring is disabled in ordinary builds. Its final-Quit watchdog starts
+only after Quit is committed. Explicitly launching Support does consume resources.
 
 ## Developer source launch
 
@@ -83,7 +86,15 @@ Automatic discovery checks the platform's existing OpenStudio diagnostic locatio
 On Windows this includes the actual Documents known folder, including relocation,
 and `%APPDATA%/OpenStudio/logs`. Use `--log-dir "path"` (repeatable) to replace the
 default locations, for example when collecting a startup log beside an executable.
-Only exact known startup/debug/crash/hang filenames are read, without recursion.
+Only exact known startup/debug/crash/hang/plugin-scan filenames and allowlisted
+settings files are read, without recursion. The added `plugin_scan_debug.txt`
+preserves scanner failures. Structured snapshots of `PluginList.xml`,
+`PluginSearchPaths.xml`, `PluginBlacklist.txt`, `PluginScanDeadMansPedal.txt` and
+`PluginHosting.json` retain plugin inventory, versions, paths after redaction,
+blacklist/unfinished-scan entries and isolation choices. Only selected device-type,
+rate, buffer and channel-mask fields from `audio_device_settings.xml` are included.
+Plugin state, arbitrary XML fields and device names are excluded. No plugin is loaded,
+scanned or executed. Settings describe collection time, not the original incident.
 Use `--route-report "mix_render_route_report.json"` to select existing render reports
 and `--description "What happened and what I expected"` to supply context.
 
@@ -92,6 +103,27 @@ The output contains `summary.txt`, `report.json`, explicitly selected evidence a
 **at collection time**, not evidence of conditions during an earlier incident.
 Logs may span sessions and builds; their contents are not automatically assigned
 to a particular incident. Missing evidence is `not_asserted`, not a successful check.
+Original filenames, sizes, modification times and tail truncation are recorded;
+modification time is not treated as the time of an incident.
+
+The window also offers optional **App executable**, **Symbol archive** and
+**OS crash report** fields. The installed app is found beside the frozen companion
+or in its enclosing macOS app when possible. Separate AppImages cannot inspect an
+unmounted sibling image: use an extracted app executable to identify its payload.
+Source launches and other portable layouts can also select the app explicitly.
+Equivalent developer flags are `--app`, `--symbols` and repeatable `--crash-report`.
+OS reports must be existing `.ips`, `.crash`, `.txt`, `.log` or `.json` files.
+Support does not enable OS dumps, modify system settings, run a debugger, collect a
+live process dump, or query unrelated system events. Text is redacted for review.
+
+Windows dump module IDs are extracted even when **Include unredacted crash dumps**
+is unticked; only module basenames and debug IDs are retained, not memory. This
+metadata inspection is bounded to dumps of 512 MiB or less, and does not change the
+32 MiB limit for copying a dump. Apple image UUIDs and explicit Linux build-ID
+fields are recognized in selected OS report formats. Missing/unrecognized IDs stay
+unavailable. The current installed binary has its own hash and debug identity and
+is never silently assigned to an older crash. Matching IDs establish a debug-file
+match, not a diagnosis or a trustworthy signature.
 
 Privacy and bounds:
 
@@ -101,6 +133,8 @@ Privacy and bounds:
   addresses and common credential fields. **Redaction is best effort.** Free-form
   text can still contain private information. Read every file before sharing.
 - Only the latest 512 KiB of each log is retained, with truncation disclosed.
+- Settings and OS report identity parsing are bounded to 2 MiB; at most 90 evidence
+  files are copied. XML entities/DTDs, symbolic-link files and special files are rejected.
 - Dumps are excluded unless `--include-dumps` is explicitly selected. Included
   dumps are **unredacted memory** and can contain credentials or audio fragments.
   Each dump is limited to 32 MiB; the collection is limited to 128 MiB. Oversized
@@ -203,8 +237,55 @@ python -m unittest tools.test_openstudio_support -v
 
 Tests use synthetic files and temporary folders, never audio devices or user media.
 Production crash analysis also requires symbols/source maps matching the original
-build. Optional diagnostic re-exports and new runtime telemetry are outside this
+build. The mechanisms below preserve and match those files; they do not create a
+missing JavaScript stack trace or reconstruct past resource pressure. Optional
+diagnostic re-exports and new runtime telemetry are outside this
 implementation; neither is enabled by installing or running these tools.
+
+## Build identities and developer symbols
+
+CMake writes `OpenStudio.build-identity.json` beside runtime assets after building.
+It records the build version/configuration, source revision and dirty-state flag,
+native debug IDs, pre-signing binary hashes and packaged JavaScript hashes. The DAW
+never reads it. Build hosts need Python 3.11+; installed users still need no Python.
+Signing, stripping or packaging can change the file hash while preserving debug IDs.
+An identity match is therefore separate from a pre-signing byte match.
+
+`build.py prod` and the release workflow archive symbols before signing/packaging:
+
+```sh
+python tools/build-symbols.py archive --app build/OpenStudio_artefacts/Release/OpenStudio.exe --build-dir build
+```
+
+Use `OpenStudio.app` on macOS or `OpenStudio` on Linux. The existing PowerShell
+`archive-runtime-symbols.ps1` delegates to this cross-platform archiver. Each
+`output/symbols/<native-sha256>` directory is immutable; mismatched or missing
+symbols, stale frontend maps and changed binaries fail the archive operation.
+Windows checks PE/PDB GUID plus age, macOS checks all Mach-O/dSYM UUIDs, and Linux
+checks ELF/GNU build IDs against extracted debug files. Native binaries are retained
+with their symbols. macOS also retains the dSYM bundle for standard Apple tools.
+
+Frontend builds place hidden JavaScript maps and matching JavaScript in
+`frontend/debug-symbols`, outside `dist`. Maps include source content; do not add
+this directory or native symbols to installers. There is no `sourceMappingURL`
+and no map code or collector in the app. CSS source mapping is not qualified.
+Archives include a hash-checked frontend inventory; native symbol matching does
+not assert that a supplied frontend error came from that JavaScript build.
+
+Release CI retains separate `*-debug-symbols` Actions artifacts for up to 90 days,
+subject to repository retention settings. They are not release attachments or
+Store payloads, and Actions artifact access follows repository permissions.
+Before a future release, retain the exact archive and source commit in the team's
+long-term support storage; CI retention is not permanent. Rebuilding the same
+version later is not a substitute. No release workflow was invoked for this work.
+
+Ordinary builds also omit message-thread heartbeat/fault polling. Existing
+failure-only recording/processor protection remains; pending fault counts are
+flushed from control-side stop/shutdown paths. Explicit diagnostic builds can opt
+into timing and ARA logs with `OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS=ON`, and incur
+overhead. Release packaging rejects those builds. The removed normal UI-hang
+watchdog means a freeze during a running session no longer automatically produces
+a timed dump; crash capture and committed-final-Quit protection are separate.
 
 ## Packaging and qualification
 

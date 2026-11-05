@@ -3111,6 +3111,13 @@ from the DMG), or Linux application menu/companion AppImage. Collect existing ev
 an audio/MIDI export, and use **Open output folder** to review the report. Choose
 **Create reviewed ZIP** to prepare an attachment for support. No Python or terminal
 is needed in packaged builds. Nothing is uploaded automatically.
+Collection includes plugin scan logs and filtered plugin/audio settings. Optional
+fields accept the app executable, an existing OS crash report, and a developer's
+matching symbol archive. Incident debug IDs remain separate from the currently
+installed build; later settings cannot establish conditions at an earlier glitch.
+Ordinary builds omit ARA callback logging and periodic hang monitoring. Crash
+capture and final-Quit protection remain; a running-session freeze does not
+automatically start Support or a timed hang dump.
 Close the support window before reopening the DAW. This adds no work to normal
 recording, playback or exports; the explicitly opened tool uses CPU, RAM and disk.
 Dumps are optional and unredacted. See [Offline support and export inspection](offline-support.md)

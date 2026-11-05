@@ -17658,9 +17658,11 @@ void MainComponent::timerCallback()
     // acquires the recorder's audio-writer lock.
     if (isMainWindow())
         audioEngine.maintainRecordingPreviews();
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (isMainWindow() && frontendStartupState == FrontendStartupState::ready)
         OpenStudioCrashDiagnostics::pulseMessageThread();
     OpenStudioCrashDiagnostics::flushRealtimeFaults();
+#endif
     if (secondaryWindowClosing)
         return;
     const auto faultGeneration = ProcessorSafety::changeGeneration.load(std::memory_order_acquire);

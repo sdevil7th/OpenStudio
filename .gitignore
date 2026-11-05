@@ -189,3 +189,4 @@ Desktop.ini
 
 # Download cache for local AI runtime assembly
 /.cache/
+/frontend/debug-symbols/

@@ -6,6 +6,12 @@ The user requested certification checks and a release PR, with publication held.
 
 ## Current evidence
 
+Further offline collection, symbol matching and diagnostic-removal changes after
+`93d03c15` change the native binary and Support payload. The older installer,
+WACK and Linux package results below do **not** certify these new artifacts.
+The local verification recorded under "Offline support follow-up" applies to
+the new source. No release, Store submission or website deployment was performed.
+
 The 5 November local investigation below changes native NAM preparation and the
 explicit diagnostic probe. Final Windows/Linux package checks and WACK passed
 at `b6aba8ae`, including the warning-only follow-up to the functional NAM fix.
@@ -13,7 +19,7 @@ Each result applies to its listed artifact. The remaining Linux browser check
 passed; the strict 8-sample hardware gate still fails. An automatic Mac run also
 exposed three geometry-check failures after successful frontend startup.
 PR #36 remains a draft, with no submitted formal review approval. Subsequent
-qualification/release-note edits do not change the tested application source.
+qualification/release-note edits through `93d03c15` did not change that tested application source.
 
 - **Pass — Linux qualification after the NAM preparation/insertion fix:**
   [job 126802823878](https://github.com/sdevil7th/OpenStudio/actions/runs/41895223774/job/126802823878)
@@ -523,3 +529,53 @@ provided by the OS/device. No such monitor is added to normal DAW use.
 Official references: [Microsoft's WACK prerequisites and commands](https://learn.microsoft.com/en-us/windows/uwp/debug-test-perf/windows-app-certification-kit),
 [manual Store publishing holds](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/manage-submission-options),
 and [Apple's notarization requirements](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+
+
+## Offline support follow-up — 5 November 2026
+
+This is local, unpublished development verification. The release executable SHA-256
+is `4d6161e54da1638406acead9e32103f72766ac4f80af525e08f67bffbb04d163`;
+its debug identity is `pdb:44C93176-1CDA-4CA2-A53F-26FB29CE1FCB:101`.
+Build metadata records the pre-commit working tree after `93d03c15`, including its
+dirty-state flag; it does not pretend that these bytes came from that older commit.
+The matching helper identity is `pdb:C645676D-7ED4-40C8-8EC5-30CE705D7A5F:11`.
+
+- **Pass:** Windows CMake Debug and Release builds, zero compiler warnings.
+  Current frontend assets are copied to both; no pre-running Vite server is needed.
+- **Pass:** final Release runtime safety: 388 native contracts and all crash,
+  dedicated-thread fallback, dump-write failure, explicit hang, hang-then-crash,
+  recovery and bounded-final-Quit fixtures. The idle-reporter fixture confirms
+  that an old heartbeat does not arm normal-use hang collection.
+  Local evidence: `output/review/runtime-Release-20261105-093549-111955/qualification.json`.
+- **Pass:** final Release render/export suite: 423 objective checks, zero failures,
+  including disabled callback instrumentation and unevaluated ARA log arguments.
+  Local evidence: `output/support-improvements-render-final/20261105_093549_render-export-regression/render_export_regression_result.json`.
+- **Pass:** 50 support/policy checks; nine native Unix/package cases are skipped
+  on this Windows host. Separate release-tool checks passed (35 run, three skipped).
+  Cases include invalid/truncated PE/PDB/Mach-O/ELF/dump metadata, wrong symbols,
+  changed runtime JavaScript, XML entities, privacy filtering, review and no-overwrite.
+- **Pass:** frozen Support tests with external Python/Node absent from PATH,
+  including GUI construction, MIDI/audio inspection, plugin settings and native
+  identity parsing. Production policy validation and all 1,052 Support inventory
+  files validate. No Support autostart registration or DAW launch hook was added.
+- **Pass:** Windows executable/PDB and frontend archives. All 68 JavaScript chunk
+  hashes match emitted files; maps are absent from runtime `dist`. Original source
+  locations were resolved in 60 application chunks (the others are vendor chunks).
+  Frontend build completes; its CSS source-map warning is not a CSS-map qualification.
+- **Diagnostic only:** Support can match exact native IDs in incident evidence;
+  this does not identify crash cause or assert complete third-party symbols.
+  Dump memory is excluded unless explicitly selected. Ordinary app use no longer
+  polls UI heartbeats, flushes fault counters periodically or emits ARA callback logs.
+  Existing crash capture and failure protection remain, and final-Quit monitoring
+  arms only when quitting (or in an explicit diagnostic build/self-test).
+- **Not asserted:** new full macOS/Linux app builds, native dSYM/ELF extraction on
+  those hosts, installer/Store recertification, notarization, physical recording,
+  subjective audio quality or resolution of the earlier strict 8-sample failure.
+  Synthetic cross-platform identity fixtures pass here; native compiler fixtures
+  are wired into the existing support qualification workflow for those platforms.
+
+Symbol archives are separate from installers and Store inputs. Release CI will
+retain them as separate Actions artifacts; the workflow was not invoked here.
+Automatic timed dumps of running-session UI hangs are deliberately disabled in
+ordinary builds. No claim of zero total DAW cost or historical CPU/RAM attribution
+is made from the offline reports.

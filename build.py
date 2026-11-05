@@ -321,6 +321,8 @@ def main():
                              "--output", support_output,
                              "--stage", (str(Path(get_cpp_exe_path("Release")).parents[2]) if platform.system() == "Darwin"
                                          else os.path.dirname(get_cpp_exe_path("Release")))], shell=False)
+        run_command([sys.executable, "tools/build-symbols.py", "archive",
+                     "--app", get_cpp_exe_path("Release"), "--build-dir", "build"], shell=False)
         print("\nProduction Build Complete.")
         print(f"Run: {get_cpp_exe_path('Release')}")
 

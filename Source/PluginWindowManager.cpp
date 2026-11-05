@@ -9,10 +9,8 @@
 
 namespace
 {
-void logPluginWindowDebug(const juce::String& msg)
-{
-    logARADebugLine(msg);
-}
+// Preserve compile-time argument elision through this local logging wrapper.
+#define logPluginWindowDebug(...) logARADebugLine(__VA_ARGS__)
 
 juce::String scopeToString(PluginWindowManager::PluginEditorTarget::Scope scope)
 {
@@ -271,7 +269,7 @@ PluginWindowManager::PluginWindow::PluginWindow(PluginWindowManager& ownerIn,
         owner.positionWindow(*this);
         setVisible(true);
         toFront(true);
-        owner.logWindowEvent(target, "editor_opened", "title=" + title);
+        if constexpr (kEnableARADebugDiagnostics) owner.logWindowEvent(target, "editor_opened", "title=" + title);
     }
 }
 
@@ -284,7 +282,7 @@ PluginWindowManager::PluginWindow::~PluginWindow()
 
 void PluginWindowManager::PluginWindow::closeButtonPressed()
 {
-    owner.logWindowEvent(target, "editor_close_requested");
+    if constexpr (kEnableARADebugDiagnostics) owner.logWindowEvent(target, "editor_close_requested");
     setVisible(false);
 }
 
@@ -297,7 +295,7 @@ bool PluginWindowManager::PluginWindow::keyPressed(const juce::KeyPress& key)
     // unhandled Undo/Redo chords before any application-level forwarding.
     if (isNativePluginHistoryShortcut(key))
     {
-        owner.logWindowEvent(target, "host_claimed_plugin_history_key",
+        if constexpr (kEnableARADebugDiagnostics) owner.logWindowEvent(target, "host_claimed_plugin_history_key",
                              "key=" + normaliseKeyForDom(key) + " code=" + normaliseCodeForDom(key));
         return true;
     }
@@ -305,7 +303,7 @@ bool PluginWindowManager::PluginWindow::keyPressed(const juce::KeyPress& key)
     if (DocumentWindow::keyPressed(key))
     {
         if (shouldLogForwardedShortcut(key))
-            owner.logWindowEvent(target, "plugin_consumed_key",
+            if constexpr (kEnableARADebugDiagnostics) owner.logWindowEvent(target, "plugin_consumed_key",
                                  "key=" + normaliseKeyForDom(key) + " code=" + normaliseCodeForDom(key));
         return true;
     }
@@ -322,7 +320,7 @@ void PluginWindowManager::PluginWindow::activeWindowStatusChanged()
              && owner.focusedEditorTarget->getStableKey() == target.getStableKey())
         owner.focusedEditorTarget.reset();
 
-    owner.logWindowEvent(target, isActiveWindow() ? "editor_focused" : "editor_unfocused");
+    if constexpr (kEnableARADebugDiagnostics) owner.logWindowEvent(target, isActiveWindow() ? "editor_focused" : "editor_unfocused");
 }
 
 //==============================================================================
@@ -370,7 +368,7 @@ void PluginWindowManager::openEditor(juce::AudioProcessor* processor, const juce
             it->second->setVisible(true);
             positionWindow(*it->second);
             it->second->toFront(true);
-            logWindowEvent(target, "editor_reopened_to_front");
+            if constexpr (kEnableARADebugDiagnostics) logWindowEvent(target, "editor_reopened_to_front");
         }
         return;
     }
@@ -400,7 +398,7 @@ void PluginWindowManager::openEditor(std::shared_ptr<juce::AudioProcessor> proce
             it->second->setVisible(true);
             positionWindow(*it->second);
             it->second->toFront(true);
-            logWindowEvent(target, "editor_reopened_to_front");
+            if constexpr (kEnableARADebugDiagnostics) logWindowEvent(target, "editor_reopened_to_front");
         }
         return;
     }
@@ -427,7 +425,7 @@ void PluginWindowManager::closeEditor(juce::AudioProcessor* processor)
         if (focusedEditorTarget.has_value()
             && focusedEditorTarget->getStableKey() == it->second->target.getStableKey())
             focusedEditorTarget.reset();
-        logWindowEvent(it->second->target, "editor_closed");
+        if constexpr (kEnableARADebugDiagnostics) logWindowEvent(it->second->target, "editor_closed");
         activeWindows.erase(it);
         juce::Logger::writeToLog("PluginWindowManager: Closed window for " + name);
     }
@@ -445,7 +443,7 @@ void PluginWindowManager::closeEditorSync(juce::AudioProcessor* processor)
         if (focusedEditorTarget.has_value()
             && focusedEditorTarget->getStableKey() == it->second->target.getStableKey())
             focusedEditorTarget.reset();
-        logWindowEvent(it->second->target, "editor_closed_sync");
+        if constexpr (kEnableARADebugDiagnostics) logWindowEvent(it->second->target, "editor_closed_sync");
         activeWindows.erase(it);
     }
 }
@@ -464,7 +462,7 @@ void PluginWindowManager::closeEditorsForTrack(const std::vector<juce::AudioProc
             if (focusedEditorTarget.has_value()
                 && focusedEditorTarget->getStableKey() == it->second->target.getStableKey())
                 focusedEditorTarget.reset();
-            logWindowEvent(it->second->target, "editor_closed_for_track");
+            if constexpr (kEnableARADebugDiagnostics) logWindowEvent(it->second->target, "editor_closed_for_track");
             activeWindows.erase(it);
         }
     }
@@ -613,7 +611,7 @@ void PluginWindowManager::timerCallback()
             if (focusedEditorTarget.has_value()
                 && focusedEditorTarget->getStableKey() == window.target.getStableKey())
                 focusedEditorTarget.reset();
-            logWindowEvent(window.target, "editor_closed_after_hidden");
+            if constexpr (kEnableARADebugDiagnostics) logWindowEvent(window.target, "editor_closed_after_hidden");
             it = activeWindows.erase(it);
             continue;
         }
@@ -624,6 +622,7 @@ void PluginWindowManager::timerCallback()
 void PluginWindowManager::logWindowEvent(const PluginEditorTarget& target, const juce::String& event,
                                          const juce::String& extra) const
 {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     juce::String line = "PluginWindow event: event=" + event
         + " scope=" + scopeToString(target.scope)
         + " trackId=" + (target.trackId.isNotEmpty() ? target.trackId : juce::String("<none>"))
@@ -631,6 +630,9 @@ void PluginWindowManager::logWindowEvent(const PluginEditorTarget& target, const
     if (extra.isNotEmpty())
         line += " " + extra;
     logPluginWindowDebug(line);
+#else
+    juce::ignoreUnused(target, event, extra);
+#endif
 }
 
 //==============================================================================

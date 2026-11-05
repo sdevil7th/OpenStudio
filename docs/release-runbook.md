@@ -921,3 +921,13 @@ payloads with a dummy DAW and disposable package identities. They do not replace
 final signed-artifact testing, Store certification, Gatekeeper/notarization,
 oldest-supported-OS testing or full-DAW hardware qualification. Retain those release
 gates and verify that support remains absent until explicitly opened.
+
+Build-time symbol retention now uses `tools/build-symbols.py`: exact PE/PDB IDs,
+Mach-O/dSYM UUIDs and ELF build IDs must match; packaged JavaScript must match the
+hidden maps in `frontend/debug-symbols`. `build.py prod` and release CI fail the
+archive step for missing/stale companions. Keep `OpenStudio.build-identity.json`
+in the payload, but keep symbol archives/maps outside installer and Store inputs.
+Signing can change binary hashes without changing debug IDs. Retain Actions
+`*-debug-symbols` archives in long-term support storage before their 90-day maximum
+retention expires; artifacts inherit repository permissions. Never substitute a
+later rebuild with the same app version. See [offline support](offline-support.md#build-identities-and-developer-symbols).

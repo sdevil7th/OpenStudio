@@ -30,7 +30,7 @@ class NativePackageTests(unittest.TestCase):
             shutil.copyfile('/bin/true', self.bundle / name)
             (self.bundle / name).chmod(0o755)
         (self.bundle / 'OpenStudio.version').write_text('1.2.3\n')
-        (self.bundle / 'OpenStudio.build-policy.json').write_text('{"version":"1.2.3","callbackDiagnostics":false}')
+        (self.bundle / 'OpenStudio.build-policy.json').write_text('{"version":"1.2.3","callbackDiagnostics":false,"araDiagnostics":false,"hangMonitoring":false}')
         shutil.copy2('/bin/true', self.bundle / 'OpenStudioSupport')
         resources = self.bundle / 'support-runtime'
         (resources / 'support-licenses').mkdir(parents=True)

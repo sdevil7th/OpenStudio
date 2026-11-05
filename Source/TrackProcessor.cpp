@@ -500,13 +500,15 @@ static bool hasInternalAuditionSourceActive(
     return false;
 }
 
-// Debug logging — always active for FX diagnostics
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+// Explicit diagnostic builds only; never used by ordinary recording.
 static void logToDisk(const juce::String& msg)
 {
     auto f = AppPaths::diagnostics().getChildFile("debug_log.txt");
     f.getParentDirectory().createDirectory();
     f.appendText(juce::Time::getCurrentTime().toString(true, true) + ": " + msg + "\n");
 }
+#endif
 
 static int getSafeHostedPluginBlockSize(int requestedBlockSize,
                                        const juce::AudioProcessor* processor = nullptr)
@@ -3636,6 +3638,7 @@ bool TrackProcessor::tryProcessTinyEmptyGraph(juce::AudioBuffer<float>& buffer, 
 void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages,
                                            const RealtimeGraphSnapshot* workerGraph)
 {
+ #if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const int activeARAFXIndexForBlock =
         workerGraph != nullptr ? -1
             : araFXIndexForRealtime.load(std::memory_order_acquire);
@@ -3649,6 +3652,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     const bool isARATrack = kEnableARADebugDiagnostics
                          && activeARAControllerForBlock != nullptr;
     const double trackProcessStartMs = isARATrack ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+#endif
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -3877,11 +3881,13 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     if (activeARAControllerForBlock != nullptr)
         activeARAControllerForBlock->updateTransportDebugState(
             araTransportPlayingDebugState.load(
                 std::memory_order_acquire),
             blockTimeSeconds);
+#endif
 
     // Safety: only clear channels that actually exist in the buffer
     int bufferChannels = buffer.getNumChannels();
@@ -3902,66 +3908,6 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
     }
 
     processTrackPDC(buffer);
-
-    bool hasAnyFX = (inputFXSnapshot && !inputFXSnapshot->empty())
-                 || (trackFXSnapshot && !trackFXSnapshot->empty());
-
-    // One-time diagnostic log on first processBlock call with FX loaded
-    // (helps diagnose crashes — last log entry before crash shows where it stopped)
-    static bool enableRealtimeFirstFXLog = false;
-    static bool loggedFirstFXProcess = false;
-    if (enableRealtimeFirstFXLog && hasAnyFX && !loggedFirstFXProcess)
-    {
-        loggedFirstFXProcess = true;
-        logToDisk("TrackProcessor::processBlock FIRST CALL WITH FX");
-        logToDisk("  buffer channels: " + juce::String(bufferChannels) +
-                  " samples: " + juce::String(buffer.getNumSamples()));
-        logToDisk("  totalNumInputChannels: " + juce::String(totalNumInputChannels) +
-                  " totalNumOutputChannels: " + juce::String(totalNumOutputChannels));
-        logToDisk("  inputFX count: " + juce::String(inputFXSnapshot ? (int)inputFXSnapshot->size() : 0) +
-                  " trackFX count: " + juce::String(trackFXSnapshot ? (int)trackFXSnapshot->size() : 0));
-        logToDisk("  fxProcessBuffer channels: " + juce::String(fxProcessBuffer.getNumChannels()) +
-                  " samples: " + juce::String(fxProcessBuffer.getNumSamples()));
-        logToDisk("  sampleRate: " + juce::String(getSampleRate()) +
-                  " blockSize: " + juce::String(getBlockSize()));
-
-        for (int i = 0; inputFXSnapshot && i < (int)inputFXSnapshot->size(); ++i)
-        {
-            auto* proc = (*inputFXSnapshot)[i].get();
-            if (proc)
-            {
-                logToDisk("  inputFX[" + juce::String(i) + "]: " + proc->getName() +
-                          " inCh=" + juce::String(proc->getTotalNumInputChannels()) +
-                          " outCh=" + juce::String(proc->getTotalNumOutputChannels()) +
-                          " sr=" + juce::String(proc->getSampleRate()) +
-                          " bs=" + juce::String(proc->getBlockSize()));
-            }
-        }
-
-        for (int i = 0; trackFXSnapshot && i < (int)trackFXSnapshot->size(); ++i)
-        {
-            auto* proc = (*trackFXSnapshot)[i].get();
-            if (proc)
-            {
-                logToDisk("  trackFX[" + juce::String(i) + "]: " + proc->getName() +
-                          " inCh=" + juce::String(proc->getTotalNumInputChannels()) +
-                          " outCh=" + juce::String(proc->getTotalNumOutputChannels()) +
-                          " sr=" + juce::String(proc->getSampleRate()) +
-                          " bs=" + juce::String(proc->getBlockSize()));
-            }
-        }
-
-        // Log safeProcessFX path decision for first plugin
-        if (trackFXSnapshot && !trackFXSnapshot->empty() && (*trackFXSnapshot)[0])
-        {
-            auto* proc = (*trackFXSnapshot)[0].get();
-            int pluginChannels = juce::jmax(proc->getTotalNumInputChannels(),
-                                             proc->getTotalNumOutputChannels());
-            logToDisk("  safeProcessFX: pluginChannels=" + juce::String(pluginChannels) +
-                      " bufferChannels=" + juce::String(bufferChannels) +
-                      " path=" + juce::String(pluginChannels == bufferChannels ? "DIRECT" : "EXPANDED"));
-        }
-    }
 
     const auto resolveFXContinuity =
         [&] (juce::AudioProcessor* proc,
@@ -4145,6 +4091,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             pluginAutomationRoutesForBlock, buffer.getNumSamples());
 
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         const bool isARAProcessor =
             activeARAControllerForBlock != nullptr
             && trackFXSnapshot
@@ -4156,6 +4103,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                        activeARAFXIndexForBlock)]
                    .get() == proc;
         const double envelopeStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+#endif
         const bool useDoublePrecision =
             processingPrecisionMode == ProcessingPrecisionMode::Hybrid64
             && !forceFloat
@@ -4164,6 +4112,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         const int expandedCh = useDoublePrecision
             ? juce::jmin(pluginChannels, fxProcessBufferDouble.getNumChannels())
             : juce::jmin(pluginChannels, fxProcessBuffer.getNumChannels());
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         double preProcessMs = 0.0;
         double processDurationMs = 0.0;
         auto logARAProcessDuration = [&](double postProcessMs)
@@ -4225,12 +4174,17 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             }
         };
 
+#endif
         if (!useDoublePrecision && pluginChannels == bufferChannels)
         {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
             const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
             preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
+#endif
             if (!safety->process(*proc, buffer, midiMessages)) return false;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
             processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
+#endif
             // Mono plugin on stereo track: duplicate processed output to all channels
             // (matches Reaper behaviour — avoids dry right channel when plugin is mono out)
             int outCh = proc->getTotalNumOutputChannels();
@@ -4239,7 +4193,9 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                 for (int ch = outCh; ch < juce::jmin(2, bufferChannels); ++ch)
                     buffer.copyFrom (ch, 0, buffer, 0, 0, numSamps);
             }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
             logARAProcessDuration(isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs)) : 0.0);
+#endif
         }
         else
         {
@@ -4265,10 +4221,14 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     channelPtrs[ch] = fxProcessBufferDouble.getWritePointer(ch);
 
                 juce::AudioBuffer<double> pluginBuffer(channelPtrs, expandedCh, numSamps);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
                 const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
                 preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
+#endif
                 if (!safety->process(*proc, pluginBuffer, midiMessages)) return false;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
                 processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
+#endif
 
                 if (expandedCh == 1 && bufferChannels > 1)
                 {
@@ -4290,7 +4250,9 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                             dest[sample] = static_cast<float>(src[sample]);
                     }
                 }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
                 logARAProcessDuration(isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs)) : 0.0);
+#endif
             }
             else
             {
@@ -4316,10 +4278,14 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     channelPtrs[ch] = fxProcessBuffer.getWritePointer(ch);
 
                 juce::AudioBuffer<float> pluginBuffer(channelPtrs, expandedCh, numSamps);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
                 const double processStartMs = isARAProcessor ? juce::Time::getMillisecondCounterHiRes() : 0.0;
                 preProcessMs = isARAProcessor ? (processStartMs - envelopeStartMs) : 0.0;
+#endif
                 if (!safety->process(*proc, pluginBuffer, midiMessages)) return false;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
                 processDurationMs = isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - processStartMs) : 0.0;
+#endif
 
                 if (expandedCh == 1 && bufferChannels > 1)
                 {
@@ -4331,7 +4297,9 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
                     for (int ch = 0; ch < juce::jmin(bufferChannels, proc->getTotalNumOutputChannels()); ++ch)
                         buffer.copyFrom(ch, 0, pluginBuffer, ch < expandedCh ? ch : 0, 0, numSamps);
                 }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
                 logARAProcessDuration(isARAProcessor ? (juce::Time::getMillisecondCounterHiRes() - (processStartMs + processDurationMs)) : 0.0);
+#endif
             }
         }
         for (const auto metadata : midiMessages)
@@ -5128,6 +5096,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const double trackProcessDurationMs = isARATrack ? (juce::Time::getMillisecondCounterHiRes() - trackProcessStartMs) : 0.0;
     if (kEnableARADebugDiagnostics
         && trackProcessDurationMs > 10.0
@@ -5141,6 +5110,7 @@ void TrackProcessor::processBlockInternal (juce::AudioBuffer<float>& buffer, juc
             + " numSamples=" + juce::String(buffer.getNumSamples()));
     }
 
+#endif
     const float peak = processTrackOutput(buffer, sendSnapshot && !sendSnapshot->empty(),
         blockTimeSeconds, processingSampleRate, blockPanLaw);
     finishRealtimeFXTailDrain(peak);
@@ -7995,6 +7965,7 @@ void TrackProcessor::noteARATransportPlaybackStateChanged(const juce::String& tr
     if (playing)
     {
         araEditorFocusedAtPlaybackStart.store(editorFocusedAtPlayStart, std::memory_order_release);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         const auto snapshotBeforeStart = araController->getDebugSnapshot();
         const uint64 playbackRun = araPlaybackRunCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
         araStructuredPlaySessionLogged.store(true, std::memory_order_release);
@@ -8022,6 +7993,7 @@ void TrackProcessor::noteARATransportPlaybackStateChanged(const juce::String& tr
                 + " audioSourceSamplesAccessEnabled=" + juce::String(snapshotBeforeStart.audioSourceSamplesAccessEnabled ? "true" : "false"));
         }
 
+#endif
         araController->notePlaybackStart(positionSeconds);
     }
     else

@@ -9,11 +9,14 @@ import re
 import sys
 import uuid
 import zipfile
+from datetime import datetime, timezone
 
 from .common import Redactor, check, collection_environment, read_json, regular_file, report
+from .identity import dump_modules, match_ids, os_report_ids
+from .snapshots import PLUGIN_FILES, installed_app, installed_snapshot, plugin_snapshot, symbol_archive_ids
 
 LOG_NAMES = ("OpenStudio_Startup.log", "OpenStudio_Debug.log", "debug_log.txt",
-             "crash_breadcrumbs.log", "crash_breadcrumbs.previous.log", "hang_breadcrumbs.log")
+             "crash_breadcrumbs.log", "crash_breadcrumbs.previous.log", "hang_breadcrumbs.log", "plugin_scan_debug.txt")
 DUMP_NAMES = ("last_crash.dmp", "last_crash.previous.dmp", "last_hang.dmp", "last_hang.previous.dmp")
 LOG_LIMIT = 512 * 1024
 DUMP_LIMIT = 32 * 1024 * 1024
@@ -30,13 +33,16 @@ def default_directories():
         if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(value)) == 0:
             documents = Path(value.value)
             ctypes.windll.ole32.CoTaskMemFree(value)
-        return [documents / "OpenStudio", Path(os.environ.get("APPDATA", home / "AppData/Roaming")) / "OpenStudio/logs"]
+        settings = Path(os.environ.get("APPDATA", home / "AppData/Roaming")) / "OpenStudio"
+        return [documents / "OpenStudio", settings / "logs", settings]
     if sys.platform == "darwin":
-        return [home / "Library/Logs/OpenStudio", home / "Library/OpenStudio/logs"]
-    return [home / "Documents/OpenStudio", Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "OpenStudio/logs"]
+        return [home / "Library/Logs/OpenStudio", home / "Library/OpenStudio/logs",
+                home / "Library/Application Support/OpenStudio/Plugins", home / "Library/OpenStudio"]
+    settings = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "OpenStudio"
+    return [home / "Documents/OpenStudio", settings / "logs", settings]
 
 
-def collect(directories, route_reports=(), include_dumps=False, description=""):
+def collect(directories, route_reports=(), include_dumps=False, description="", *, app=None, symbols=None, crash_reports=()):
     result = report("existing_evidence")
     result["environment"] = collection_environment()
     result["userDescription"] = description[:8000]
@@ -46,9 +52,42 @@ def collect(directories, route_reports=(), include_dumps=False, description=""):
     artifacts = {}
     seen = set()
     total = 0
+    result['installedBuild'] = {'status': 'not_asserted', 'detail': 'Installed application not located; choose its executable if needed.'}
+    app = app or installed_app()
+    if app:
+        try:
+            result['installedBuild'] = installed_snapshot(app)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            check(result, 'installed_identity_unavailable', 'not_asserted', str(exc))
+    symbol_ids = set()
+    if symbols:
+        try:
+            symbol_ids = symbol_archive_ids(symbols)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            check(result, 'symbol_archive_invalid', 'fail', str(exc))
+    result['incidentModules'] = []
+    # Inspect only module metadata even when unredacted memory is not requested.
+    for path in dict.fromkeys(directory / name for directory in directories for name in DUMP_NAMES):
+        if path.exists():
+            try:
+                modules = dump_modules(path)
+                result['incidentModules'].append({'source': str(path), 'modules': modules,
+                    'symbolMatches': match_ids([identity for module in modules for identity in module['debugIds']], symbol_ids)})
+            except (OSError, ValueError) as exc:
+                check(result, 'dump_identity_unavailable', 'not_asserted', str(exc), source=str(path))
     candidates = [(directory / name, False) for directory in directories
-                  for name in (*LOG_NAMES, *(DUMP_NAMES if include_dumps else ()))]
+                  for name in (*LOG_NAMES, *PLUGIN_FILES, *(DUMP_NAMES if include_dumps else ()))]
     candidates += [(path, True) for path in route_reports]
+    for path in crash_reports:
+        if path.suffix.lower() not in {'.txt', '.log', '.ips', '.crash', '.json'}:
+            raise ValueError('Select an existing OS crash text report (.ips, .crash, .txt, .log or .json)')
+        try:
+            ids = os_report_ids(path)
+            result.setdefault('osReportIdentities', []).append({'source': str(path), 'debugIds': ids,
+                'symbolMatches': match_ids(ids, symbol_ids), 'recognizedIdentity': bool(ids)})
+        except (OSError, ValueError, TypeError) as exc:
+            check(result, 'os_report_identity_unavailable', 'not_asserted', str(exc), source=str(path))
+    candidates += [(path, False) for path in crash_reports]
     for path, route in candidates:
         if path.absolute() in seen:
             continue
@@ -58,14 +97,21 @@ def collect(directories, route_reports=(), include_dumps=False, description=""):
                 check(result, "route_report_missing", "fail", "The selected route report does not exist.")
             continue
         dump = path.suffix == ".dmp"
-        name = f"evidence-{len(artifacts) + 1:02d}" + (".dmp" if dump else ".json" if route else ".txt")
+        settings = path.name in PLUGIN_FILES
+        name = f"evidence-{len(artifacts) + 1:02d}" + (".dmp" if dump else ".json" if route or settings else ".txt")
         try:
             info = regular_file(path)
             truncated = False
+            if len(artifacts) >= 90:
+                raise ValueError('Evidence file count exceeds 90')
             if dump:
+                if not include_dumps:
+                    raise ValueError('Memory dumps require explicit inclusion')
                 if info.st_size > DUMP_LIMIT:
                     raise ValueError("Dump exceeds 32 MiB; not copied. Share separately only after review.")
                 data = path.read_bytes()
+            elif settings:
+                data = json.dumps(plugin_snapshot(path, redactor), indent=2).encode('utf-8')
             elif route:
                 value = read_json(path)
                 if not isinstance(value, dict) or value.get("purpose") != "manual_render_route_report":
@@ -83,14 +129,26 @@ def collect(directories, route_reports=(), include_dumps=False, description=""):
             artifacts[name] = data
             total += len(data)
             result["artifacts"].append({"file": name, "source": str(path.absolute()),
+                                        "sourceKind": path.name if path.name in (*LOG_NAMES, *DUMP_NAMES, *PLUGIN_FILES) else 'selected_report',
+                                        "modifiedAtUtc": datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat(),
                                         "sourceBytes": info.st_size, "tailOnly": truncated,
                                         "unredactedDump": dump})
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, UnicodeError) as exc:
             check(result, "evidence_not_collected", "not_asserted", str(exc), source=str(path))
     check(result, "existing_evidence", "pass" if artifacts else "not_asserted",
           f"Collected {len(artifacts)} existing evidence files; original files were not modified.")
     if include_dumps:
         result["limitations"].append("Included dumps are unredacted and can contain private memory, audio fragments, and credentials.")
+    incident_ids = {identity for evidence in result['incidentModules'] for module in evidence['modules']
+                    for identity in module['debugIds']}
+    incident_ids.update(identity for evidence in result.get('osReportIdentities', []) for identity in evidence['debugIds'])
+    check(result, 'incident_debug_identities', 'diagnostic_only' if incident_ids else 'not_asserted',
+          f'{len(incident_ids)} native debug identities found in incident evidence; logs without IDs are not assigned to the installed build.')
+    if symbols:
+        matched = incident_ids & symbol_ids
+        check(result, 'matching_native_symbols', 'diagnostic_only' if matched else 'not_asserted',
+              f'{len(matched)} of {len(incident_ids)} incident identities match verified symbol files. Unmatched modules need their own symbols; cause and stack symbolication are not asserted.')
+    result['limitations'].append('File modification times are not incident times. Plugin settings and installed build are later snapshots. Symbol identity matching does not determine the cause of a crash. OS report text is collected only when selected; no OS dump settings are changed.')
     return result, artifacts, redactor
 
 
