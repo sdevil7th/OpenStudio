@@ -48,6 +48,8 @@ jobs:
         run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-desktop --desktop --render
       - name: Qualify installed recovery windows
         run: xvfb-run -a python3 tools/run-linux-qualification.py --app output/snap-launch --output output/snap-safe --desktop --safe-mode
+      - name: Prove the installed browser uses the Snap dependency stack
+        run: xvfb-run -a python3 tools/check-snap-browser-stack.py --root /snap/openstudio/current --output output/snap-browser-stack
       - name: Qualify explicitly opened frozen Support
         run: |
           xvfb-run -a snap run openstudio.support --self-test "$GITHUB_WORKSPACE/output/snap-support.json"
@@ -65,6 +67,7 @@ jobs:
           path: |
             output/snap-desktop
             output/snap-safe
+            output/snap-browser-stack
             output/snap-support.json
             output/snap-updater/result.json
             output/snap-project/input-receipt.json

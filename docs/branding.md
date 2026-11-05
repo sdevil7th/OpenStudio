@@ -23,6 +23,7 @@ The script resizes the master directly, preserving transparency. Do not generate
 | Web manifest | `frontend/public/android-chrome-{192x192,512x512}.png` and `site.webmanifest` |
 | JUCE native app icons | `assets/icon-1024x1024.png` and `assets/icon-16x16.png`, selected in `CMakeLists.txt` |
 | Linux AppImage / desktop launcher | `assets/icon-256x256.png`, copied by `tools/package-linux-release.sh` |
+| Ubuntu App Center / Snap candidate Store icon | `frontend/public/icon.png`, approved 512 px export; staged by `tools/prepare-snap-project.py` |
 | Windows Store MSIX tiles | `assets/icon-1024x1024.png`, resized by `tools/package-windows-store.ps1` |
 
 Old `frontend/public/icon.svg` and `logo.svg` were retired. When changing the master again, regenerate all sizes and bump the frontend favicon/manifest query version. Rebuild the frontend and the native configuration that will be shipped; already-built executables and published releases retain their previous embedded resources.

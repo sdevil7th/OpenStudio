@@ -12,7 +12,9 @@ for (const source of ["linux-package", "snap-store"] as const) {
     await page.evaluate(async (updateSource) => {
       const moduleUrl = "/src/store/appUpdateStore.ts";
       const { useAppUpdateStore } = await import(/* @vite-ignore */ moduleUrl);
-      useAppUpdateStore.getState().acceptStatus({ status: "manual-update", updateSource, currentVersion: "0.1.04", message: "Download the matching .deb installer for your distribution.", releasePageUrl: "https://openstudio.org.in/download" });
+      useAppUpdateStore.getState().acceptStatus({ status: "manual-update", updateSource, currentVersion: "0.1.09",
+        message: updateSource === "snap-store" ? "Use Ubuntu App Center to update OpenStudio." : "Download the matching .deb installer for your distribution.",
+        releasePageUrl: updateSource === "snap-store" ? "https://snapcraft.io/openstudio" : "https://openstudio.org.in/download" });
       useAppUpdateStore.getState().setOpen(true);
     }, source);
     const dialog = page.getByRole("dialog", { name: "OpenStudio updates" });

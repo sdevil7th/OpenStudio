@@ -103,6 +103,13 @@ does not bundle an arbitrary host FFmpeg binary. AppImage availability does not
 establish compatibility with every distribution. See the
 [package qualification evidence](linux-installation-and-qualification-plan.md#published-package-recheck-2026-10-22-issue-23).
 
+**Development Snap candidate:** Ubuntu App Center delivery is being prepared and
+is not a published channel yet. Snap candidates show **Open Snap Store** in
+**Help > Check for Updates...** and use the Store's update process instead of an
+AppImage replacement. OpenStudio Support has its own launcher and stays inactive
+until opened. See [Snap release readiness](snap-store-release.md) for qualification
+and account prerequisites.
+
 If double-clicking a `.deb` opens **Archive Manager**, close that window; do not
 extract the package. In Files, right-click the downloaded `.deb`, choose **Open
 With Other Application**, select **Software Install**, then click **Select**.

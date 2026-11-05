@@ -151,10 +151,14 @@ jobs:
         # ERR_NO_BUFFER_SPACE failure in the full suite. Keep every test and
         # assertion; do not retry a failed navigation or extend UI deadlines.
         include:
-          - { os: windows-latest, shard: '1/4', artifact: windows-1 }
-          - { os: windows-latest, shard: '2/4', artifact: windows-2 }
-          - { os: windows-latest, shard: '3/4', artifact: windows-3 }
-          - { os: windows-latest, shard: '4/4', artifact: windows-4 }
+          - { os: windows-latest, shard: '1/8', artifact: windows-1 }
+          - { os: windows-latest, shard: '2/8', artifact: windows-2 }
+          - { os: windows-latest, shard: '3/8', artifact: windows-3 }
+          - { os: windows-latest, shard: '4/8', artifact: windows-4 }
+          - { os: windows-latest, shard: '5/8', artifact: windows-5 }
+          - { os: windows-latest, shard: '6/8', artifact: windows-6 }
+          - { os: windows-latest, shard: '7/8', artifact: windows-7 }
+          - { os: windows-latest, shard: '8/8', artifact: windows-8 }
           - { os: macos-15, shard: '1/1', artifact: macos }
           - { os: ubuntu-24.04, shard: '1/4', artifact: linux-1 }
           - { os: ubuntu-24.04, shard: '2/4', artifact: linux-2 }

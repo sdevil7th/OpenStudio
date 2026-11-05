@@ -9,6 +9,11 @@ description: |
   additional runtime and model downloads. OpenStudio Support runs separately,
   only when explicitly opened, and collects existing evidence for user review.
 license: AGPL-3.0-only
+icon: icon.png
+website: https://openstudio.org.in
+issues: https://github.com/sdevil7th/OpenStudio/issues
+source-code: https://github.com/sdevil7th/OpenStudio
+contact: mailto:support@openstudio.org.in
 grade: stable
 # External native plugins and projects may live anywhere on the host. Classic
 # distribution requires Canonical review; local installation is not approval.

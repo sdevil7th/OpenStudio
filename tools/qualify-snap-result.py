@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import yaml
+from openstudio_support.identity import native_ids
 
 
 def qualify(root, snap, project, desktop, safe, support, updater, version):
@@ -32,6 +33,11 @@ def qualify(root, snap, project, desktop, safe, support, updater, version):
             for item in report.get('checks', [])):
         raise ValueError('Installed Snap update routing was not qualified')
     receipt = json.loads((project / 'input-receipt.json').read_text())
+    installed_ids = native_ids(root / 'usr/lib/openstudio/OpenStudio')
+    if not installed_ids or installed_ids != receipt.get('nativeDebugIds'):
+        raise ValueError('Snap ELF patching changed native symbol identity')
+    if any((root / 'usr/lib/openstudio/webui').rglob('*.map')):
+        raise ValueError('Frontend symbol maps must stay outside runtime packages')
     return {**receipt, 'status': 'pass', 'published': False,
             'snapSha256': hashlib.sha256(snap.read_bytes()).hexdigest(),
             'supportLaunch': 'explicit_only', 'installedDesktopAndExports': 'pass',

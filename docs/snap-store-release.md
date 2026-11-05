@@ -3,8 +3,11 @@
 OpenStudio's publisher account is `sdevil7th` (displayed as Sourav Das). The
 `openstudio` name is registered with Snap ID
 `Qde7k3B7zO9NGOR8QIyMUWs8l6z6hkZ7`. No revision has been uploaded or released.
-The GitHub `snap-store` environment permits only `v*` tags and currently has no
-publishing credential. These are setup facts, not Store distribution approval.
+The GitHub `snap-store` environment permits only `v*` tags. A credential scoped
+to `openstudio`, stable, access/push/release is configured, expiring 3 February
+2027. Read-only account and registered-snap checks passed. The temporary export
+was removed after encrypted GitHub storage. These facts do not establish Store
+distribution approval.
 
 The candidate package uses the exact versioned Ubuntu 22.04 DEB payload, plus a
 coherent core22 dependency stack. Snapcraft's classic ELF patching handles its
@@ -19,17 +22,31 @@ is a service or an autostart entry. Collecting evidence remains an explicit
 operation requiring OpenStudio closed. Snap installations use Ubuntu App Center
 or `snap refresh`; the app never stages or runs an AppImage replacement.
 
+## Listing and branding
+
+`packaging/snap/listing.json` is the reviewed source for the Store title,
+summary, description, search keywords, Music & Audio category, license and
+public support links. The project generator uses the same text and links in
+the package recipe. The icon is the approved 512 px export at
+`frontend/public/icon.png`; Linux launchers use the existing 256 px export.
+
+Store-side application is tracked separately from package preparation. The
+dashboard currently requires a first revision before exposing its listing
+editor; Canonical's metadata API supports setting text and the icon without
+uploading or releasing a revision. Verify text readback and the icon SHA-256
+before recording this step as complete. Preserve other media and listing
+settings. Real Linux candidate screenshots remain required for the gallery;
+do not use captures of another platform as Linux screenshots.
+
 ## Remaining owner setup
 
 1. Request and obtain Canonical's classic-confinement approval. Arbitrary native
    plugins, plugin executables and projects may live outside a confined home.
    Approval is a Store decision, not established by the local `--classic` test.
    Record the reviewed decision URL in `OPENSTUDIO_SNAP_CLASSIC_APPROVAL_URL`.
-2. On an Ubuntu machine with Snapcraft, export a time-limited credential scoped
-   to `openstudio`, channel `stable`, and only the access/push/release ACLs needed
-   by this workflow. Complete authentication yourself. Store the exported value
-   directly as `SNAPCRAFT_STORE_CREDENTIALS` in the GitHub `snap-store` environment;
-   never send it in chat or commit it. Record its expiry privately.
+2. Keep `SNAPCRAFT_STORE_CREDENTIALS` in the GitHub `snap-store` environment
+   current. Renew the scoped credential before its expiry; never send it in chat
+   or commit it. Account authentication remains an owner-operated step.
 3. Review the installed candidate results. Physical audio/MIDI devices, native
    plugin compatibility, desktop integration, and refresh while an older version
    is running need hardware/desktop testing. Automated checks do not establish
