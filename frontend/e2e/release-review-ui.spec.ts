@@ -71,7 +71,10 @@ test("NAM output protection distinguishes recent reductions from history and kee
   await expect(status).toContainText("NAM Rack safety mute is active");
   await expect(status).toHaveAttribute("data-tone", "error");
   await page.evaluate(() => { window.namReleaseQA.emergency = false; window.namReleaseQA.frames = 0; window.namReleaseQA.blocks = 0; });
-  await expect(status).not.toContainText("output peaks were reduced");
+  await expect(page.locator(".nam-rack-design-port.nam-native-design-surface").first()).toBeVisible();
+  // Idle legitimately removes the status element. Require all protection
+  // messages to clear while keeping the editor alive, with or without a banner.
+  await expect(status.filter({ hasText: /Earlier output peaks were reduced|Output peaks reduced recently|NAM Rack safety mute is active/ })).toHaveCount(0);
 });
 
 test("NAM metadata rejects failed disk saves without updating its cache, and portable export uses the JSON writer", async ({ page }) => {
