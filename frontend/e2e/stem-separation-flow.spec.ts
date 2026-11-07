@@ -160,12 +160,23 @@ test("memory details and idle release remain usable in compact windows", async (
   });
 });
 
+test("macOS offers section processing while rolling buffers are unavailable", async ({ page }) => {
+  await page.evaluate(async () => {
+    const url = "/src/store/useDAWStore.ts";
+    const { useDAWStore } = await import(/* @vite-ignore */ url);
+    useDAWStore.setState({ aiToolsStatus: { ...useDAWStore.getState().aiToolsStatus,
+      hardware: { platform: "macos", gpuBackend: "mps", gpuName: "Apple Silicon" } } });
+  });
+  await expect(page.getByRole("checkbox", { name: "Use rolling output buffers" })).toBeDisabled();
+  await expect(page.getByRole("checkbox", { name: "Process in 30-second sections to reduce memory use" })).toBeEnabled();
+});
+
 test("rolling buffers and the qualified AMD request reach the worker options", async ({ page }) => {
   await page.evaluate(async () => {
     const url = "/src/store/useDAWStore.ts";
     const { useDAWStore } = await import(/* @vite-ignore */ url);
     useDAWStore.setState({ aiToolsStatus: { ...useDAWStore.getState().aiToolsStatus,
-      hardware: { gpuBackend: "rocm", gpuName: "Qualification fixture" } } });
+      hardware: { platform: "linux", gpuBackend: "rocm", gpuArchitecture: "gfx1151", gpuName: "Radeon 8060S" } } });
   });
   await page.getByLabel("AMD performance").selectOption("qualified-fast");
   await page.getByText("Use rolling output buffers", { exact: true }).click();
