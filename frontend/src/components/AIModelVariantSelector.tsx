@@ -33,7 +33,7 @@ export function AIModelVariantSelector({ modelId, value, status, onChange, disab
       <select id={id} value={value} onChange={(event) => onChange(event.target.value as AIModelVariant)}
         disabled={disabled} aria-describedby={`${id}-help ${id}-detail`}
         className="w-full min-w-0 rounded border border-daw-border bg-daw-dark px-3 py-2 text-sm text-daw-text focus-visible:outline-2 focus-visible:outline-daw-accent disabled:opacity-50">
-        <option value="original">Original — full precision</option>
+        <option value="original">Original — standard model files</option>
         <option value="int8" disabled={!cuda}>INT8 — lower memory{installed ? " (installed)" : " (setup needed)"}</option>
       </select>
       <p id={`${id}-detail`} className="text-xs leading-5 text-daw-text-muted">

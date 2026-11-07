@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include <thread>
+#include <string>
 #include "OwnedChildProcess.h"
 
 /**
@@ -127,6 +128,8 @@ public:
         juce::String backend { "cpu" };
         juce::String accelerationMode { "auto" };
         int threadCap = 0;
+        juce::String fallbackReason;
+        juce::var diagnostics {};
     };
 
     /**
@@ -144,13 +147,16 @@ public:
                           const juce::File& outputDir,
                           const juce::StringArray& stemNames,
                           const juce::String& accelerationMode = "auto",
-                          const juce::String& modelName = "BS-Roformer-SW.ckpt");
+                          const juce::String& modelName = "BS-Roformer-SW.ckpt",
+                          int chunkDuration = 0,
+                          const juce::String& memoryMode = "automatic",
+                          const juce::String& performanceMode = "standard");
 
     /** Poll the child process for progress. Returns current state. */
     SeparationProgress pollProgress();
 
     /** Cancel the running separation (kills child process). */
-    void cancel();
+    bool cancel();
 
     /** Is a separation currently running? */
     bool isRunning() const;
@@ -161,6 +167,24 @@ public:
 
 private:
     friend class RuntimeSafetyRegression;
+    friend class AIQualificationHarness;
+    juce::File qualificationDataRoot;
+    juce::String qualificationManifestUrl;
+    double qualificationGpuFraction = 0;
+    juce::String separationJobId;
+    unsigned long separationWorkerPid = 0;
+    bool separationOutputPublished = false;
+    void cleanupSeparationWorkspace();
+    struct SeparationRequest
+    {
+        juce::File input, output;
+        juce::StringArray stems;
+        juce::String mode, model, memoryMode, performanceMode;
+        int chunkDuration = 0;
+    };
+    SeparationRequest separationRequest;
+    int separationRecoveryCount = 0;
+    juce::String separationRecoveryReason;
     /** Get the OpenStudio app-data root directory. */
     juce::File getUserDataRoot() const;
 
@@ -258,6 +282,9 @@ private:
     struct InstallOptions
     {
         bool userConfirmedDownload = false;
+        bool cpuOnly = false;
+        bool repairRuntime = false;
+        juce::String prepareOptimization;
         juce::StringArray selectedFeatures;
         juce::String requestedFeature;
         juce::String modelId;
@@ -272,6 +299,7 @@ private:
         juce::int64 systemRamMb = 0;
         juce::String gpuBackend { "none" };
         juce::String gpuName;
+        juce::String gpuArchitecture;
         juce::int64 gpuMemoryMb = 0;
         bool gpuMemoryDetected = false;
         bool audioGenerationGpuSupported = false;
@@ -283,6 +311,7 @@ private:
 
     /** Parse feature-aware install options while preserving legacy bool behavior. */
     InstallOptions parseInstallOptions (const juce::String& optionsJson, bool legacyConfirmed) const;
+    static juce::StringArray featuresForRuntimeCandidate(const InstallOptions&, const AiToolsStatus&);
 
     /** Probe local hardware for conservative AI feature gating. */
     HardwareStatus probeHardwareStatus() const;
@@ -343,6 +372,8 @@ private:
 
     /** Parse a JSON line from the child process stdout. */
     SeparationProgress parseJsonLine (const juce::String& line) const;
+    void consumeSeparationOutput(const char* bytes, int count);
+    void consumeSeparationLine();
 
     /** Parse a JSON line from the installer child process stdout. */
     AiToolsStatus parseInstallJsonLine (const juce::String& line) const;
@@ -371,7 +402,13 @@ private:
     std::unique_ptr<OwnedChildProcess> childProcess;
     std::shared_ptr<OwnedChildProcess> installProcess;
     std::shared_ptr<OwnedChildProcess> diffusersInstallProcess;
-    juce::String outputBuffer;  // Accumulated stdout from child
+    std::string outputBuffer; // Decode UTF-8 only after assembling a complete line.
+    std::unique_ptr<juce::FileOutputStream> separationLog;
+    juce::File separationLogFile;
+    juce::String separationPhase;
+    juce::int64 separationLogBytes = 0;
+    bool separationLineOverflow = false;
+    bool separationExitHandled = false;
     juce::String installOutputBuffer;
     juce::int64 installLogReadOffset = 0;
     juce::StringArray installDiagnosticLines;

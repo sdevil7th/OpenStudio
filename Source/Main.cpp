@@ -9,6 +9,7 @@
 #include "RecordingQualification.h"
 #include "CrashDiagnostics.h"
 #include "RuntimeSafetyRegression.h"
+#include "AIQualificationHarness.h"
 #include "RecordingRecoveryRegression.h"
 #include "MetronomeRegression.h"
 #include "FreePluginRegression.h"
@@ -1426,6 +1427,20 @@ public:
             // test child waits; it never opens the user's project or audio device.
             const juce::File fixtureDirectory(ownedWorkerFixture);
             if (!fixtureDirectory.isDirectory()) { setApplicationReturnValue(2); quit(); return; }
+            const auto stemDiagnostic = getCommandLineOptionValue(commandLine, "--owned-stem-diagnostic");
+            if (stemDiagnostic.isNotEmpty())
+            {
+                std::fputs("native dependency diagnostic\n", stderr);
+                std::fputs("{\"state\":\"loading\",\"phase\":\"load_model\"}\n", stdout);
+                if (stemDiagnostic == "structured")
+                    std::fputs("{\"state\":\"error\",\"error\":\"model failed\"}", stdout);
+                if (stemDiagnostic == "done")
+                    std::fputs("{\"state\":\"done\",\"progress\":1}", stdout);
+                std::fflush(stdout); std::fflush(stderr);
+                setApplicationReturnValue(stemDiagnostic == "crash" ? static_cast<int>(0xc0000409u)
+                    : stemDiagnostic == "structured" ? 1 : 0);
+                quit(); return;
+            }
             if (commandLineHasFlag(commandLine, "--owned-worker-environment"))
             {
                 const auto value = juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_PROCESS_ENV_TEST", "missing");
@@ -1523,6 +1538,12 @@ public:
             setApplicationReturnValue(output.isNotEmpty()
                 ? AudioDeviceProbe::run(audioProbeName, juce::File(output),
                     seconds.isEmpty() ? 10 : seconds.getIntValue(), buffer.isEmpty() ? 512 : buffer.getIntValue()) : 2);
+            quit(); return;
+        }
+        const auto aiQualification = getCommandLineOptionValue(commandLine, "--ai-native-qualification");
+        if (aiQualification.isNotEmpty())
+        {
+            setApplicationReturnValue(AIQualificationHarness::run(juce::File(aiQualification)));
             quit(); return;
         }
         const auto runtimeTestPath = getCommandLineOptionValue(commandLine, "--runtime-safety-self-test");

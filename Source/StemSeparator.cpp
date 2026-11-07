@@ -1,6 +1,7 @@
 #include "RuntimeLocation.h"
 #include "StemSeparator.h"
 #include "AIManagedRuntime.h"
+#include "AIStemWorkspace.h"
 #include "AIHardwareProbe.h"
 
 #if JUCE_MAC || JUCE_LINUX
@@ -254,6 +255,7 @@ StemSeparator::~StemSeparator()
 
 juce::File StemSeparator::getUserDataRoot() const
 {
+    if (qualificationDataRoot != juce::File()) return qualificationDataRoot;
    #if JUCE_WINDOWS
     const auto localAppData = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
     if (localAppData.isNotEmpty())
@@ -297,6 +299,8 @@ juce::File StemSeparator::getUserModelsDir() const
 
 juce::File StemSeparator::getMusicGenerationCheckpointRoot() const
 {
+    if (qualificationDataRoot != juce::File())
+        return qualificationDataRoot.getChildFile("generation-models");
     return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
         .getChildFile(".cache")
         .getChildFile("ace-step")
@@ -325,6 +329,7 @@ juce::File StemSeparator::getAiRuntimeDownloadsDir() const
 
 juce::String StemSeparator::getAiRuntimeManifestUrl() const
 {
+    if (qualificationManifestUrl.isNotEmpty()) return qualificationManifestUrl;
 #if defined(OPENSTUDIO_AI_RUNTIME_MANIFEST_URL)
     return OPENSTUDIO_AI_RUNTIME_MANIFEST_URL;
 #else
@@ -770,6 +775,7 @@ bool StemSeparator::isStableAudioModelFolderValid (const juce::File& modelRoot) 
 
 bool StemSeparator::isExternalPythonFallbackEnabled() const
 {
+    if (qualificationDataRoot != juce::File()) return false;
 #if OPENSTUDIO_ENABLE_EXTERNAL_PYTHON_AI_FALLBACK
     return true;
 #else
@@ -784,6 +790,17 @@ bool StemSeparator::hasStableAudioRuntime() const
         && getStableAudioRuntimeRoot()
             .getChildFile(".openstudio-diffusers-audio-ready-v1")
             .existsAsFile();
+}
+
+juce::StringArray StemSeparator::featuresForRuntimeCandidate(const InstallOptions& options, const AiToolsStatus& status)
+{
+    auto features = options.selectedFeatures;
+    for (const auto& feature : status.installedFeatures) addFeatureIfMissing(features, feature);
+    if (status.scriptAvailable && status.runtimeInstalled && status.modelInstalled)
+        addFeatureIfMissing(features, kFeatureStemSeparation);
+    if (status.musicGenerationReady && status.musicGenerationLayoutValid)
+        addFeatureIfMissing(features, kFeatureAudioGeneration);
+    return features;
 }
 
 StemSeparator::InstallOptions StemSeparator::parseInstallOptions (const juce::String& optionsJson, bool legacyConfirmed) const
@@ -802,6 +819,9 @@ StemSeparator::InstallOptions StemSeparator::parseInstallOptions (const juce::St
 
     if (parsed.hasProperty("userConfirmedDownload"))
         options.userConfirmedDownload = static_cast<bool>(parsed["userConfirmedDownload"]);
+    options.cpuOnly = parsed.getProperty("accelerationMode", "auto").toString() == "cpu-only";
+    options.repairRuntime = static_cast<bool>(parsed.getProperty("repairRuntime", false));
+    options.prepareOptimization = parsed.getProperty("prepareOptimization", "").toString();
 
     if (parsed.hasProperty("requestedFeature"))
         options.requestedFeature = normaliseFeatureId(parsed["requestedFeature"].toString());
@@ -877,7 +897,10 @@ StemSeparator::HardwareStatus StemSeparator::probeHardwareStatus() const
         juce::String output;
         juce::int64 memoryMb = 0;
         if (OpenStudioAI::readCommandOutput({ "rocminfo" }, output))
+        {
             memoryMb = OpenStudioAI::rocmGpuPoolMemoryMb(output);
+            hardware.gpuArchitecture = OpenStudioAI::rocmGpuArchitecture(output);
+        }
         if (memoryMb == 0 && OpenStudioAI::readCommandOutput({ "rocm-smi", "--showmeminfo", "vram" }, output))
             for (const auto& line : juce::StringArray::fromLines(output))
                 if (line.contains("VRAM Total Memory (B):"))
@@ -929,10 +952,18 @@ juce::var StemSeparator::hardwareStatusToVar (const HardwareStatus& hardware)
 
     auto obj = std::make_unique<juce::DynamicObject>();
     obj->setProperty("schemaVersion", 1);
+   #if JUCE_WINDOWS
+    obj->setProperty("platform", "windows");
+   #elif JUCE_LINUX
+    obj->setProperty("platform", "linux");
+   #elif JUCE_MAC
+    obj->setProperty("platform", "darwin");
+   #endif
     obj->setProperty("systemRamMb", static_cast<double>(hardware.systemRamMb));
     obj->setProperty("systemRamGb", hardware.systemRamMb > 0 ? hardware.systemRamMb / 1024.0 : 0.0);
     obj->setProperty("gpuBackend", hardware.gpuBackend);
     obj->setProperty("gpuName", hardware.gpuName);
+    obj->setProperty("gpuArchitecture", hardware.gpuArchitecture);
     obj->setProperty("gpuMemoryMb", static_cast<double>(hardware.gpuMemoryMb));
     obj->setProperty("gpuMemoryGb", hardware.gpuMemoryMb > 0 ? hardware.gpuMemoryMb / 1024.0 : 0.0);
     obj->setProperty("gpuMemoryDetected", hardware.gpuMemoryDetected);
@@ -1664,10 +1695,13 @@ bool StemSeparator::verifyFileSha256 (const juce::File& file, const juce::String
 }
 
 bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
-                                           const juce::File& destinationRoot,
+                                           const juce::File& targetRoot,
                                            juce::String& error,
                                            juce::String& errorCode) const
 {
+    // Runtime packages contain deep paths. The extended Win32 form works
+    // without changing the machine-wide long-path registry setting.
+    const auto destinationRoot = AIManagedRuntime::fileForIO(targetRoot);
     if (! archiveFile.existsAsFile())
     {
         error = "The AI runtime archive was not found for extraction.";
@@ -1906,6 +1940,14 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status) const
     stableModel->setProperty("modelPath", stableRoot.getFullPathName());
     stableModel->setProperty("runtimePath", getStableAudioRuntimeRoot().getFullPathName());
     stableModel->setProperty("runtimeReady", stableRuntimeReady);
+    auto* compilation = new juce::DynamicObject();
+    const auto compilerRoot = AIManagedRuntime::getActiveCompilerRuntimeRoot(getUserDataRoot(),
+        findInstallerScript().getSiblingFile("ai-compiler-runtime-requirements-windows.txt"));
+    compilation->setProperty("ready", compilerRoot.isDirectory() && findPythonInRuntimeRoot(compilerRoot).existsAsFile());
+    compilation->setProperty("runtimePath", compilerRoot.getFullPathName());
+    auto* optimizations = new juce::DynamicObject();
+    optimizations->setProperty("compile", juce::var(compilation));
+    stableModel->setProperty("optimizations", juce::var(optimizations));
     stableModel->setProperty("modelReady", stableModelReady);
     stableModel->setProperty("attribution", kStableAudioAttribution);
     stableModel->setProperty("licenseAccepted", stableModelReady);
@@ -2000,7 +2042,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         ++aiToolsStatusRevision;
     }
 
-    const auto installOptions = parseInstallOptions(optionsJson, false);
+    auto installOptions = parseInstallOptions(optionsJson, false);
     auto cachedStatus = getCachedAiToolsStatusSnapshot();
     const bool musicGenerationFullyReady = cachedStatus.musicGenerationReady
         && cachedStatus.musicGenerationLayoutValid
@@ -2008,6 +2050,40 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
     auto result = std::make_unique<juce::DynamicObject>();
 
+    const bool compilerRequested = installOptions.prepareOptimization == "compile";
+    if (installOptions.prepareOptimization.isNotEmpty() && !compilerRequested)
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Unknown optional runtime setup.");
+        return juce::var(result.release());
+    }
+    if (compilerRequested)
+    {
+       #if JUCE_WINDOWS
+        const bool hardwareQualified = cachedStatus.hardware.getProperty("gpuBackend", "").toString() == "cuda"
+            && cachedStatus.hardware.getProperty("gpuName", "").toString() == "NVIDIA GeForce RTX 4080";
+       #else
+        const bool hardwareQualified = false;
+       #endif
+        if (!hardwareQualified || installOptions.modelId != kStableAudioModelId || installOptions.modelVariant != "original"
+            || !installOptions.userConfirmedDownload || !hasStableAudioRuntime()
+            || !getMissingStableAudioFiles(getStableAudioModelRoot(kStableAudioModelId), kStableAudioModelId).isEmpty())
+        {
+            result->setProperty("started", false);
+            result->setProperty("error", "Optional compilation needs the installed Stable Audio Original model and qualified Windows RTX 4080 configuration.");
+            return juce::var(result.release());
+        }
+        installOptions.stableAudioModelPath = getStableAudioModelRoot(kStableAudioModelId).getFullPathName();
+        const auto current = AIManagedRuntime::getActiveCompilerRuntimeRoot(getUserDataRoot(),
+            findInstallerScript().getSiblingFile("ai-compiler-runtime-requirements-windows.txt"));
+        if (current.isDirectory() && !installOptions.repairRuntime)
+        {
+            result->setProperty("started", false);
+            result->setProperty("message", "Optional compilation is already prepared.");
+            result->setProperty("status", aiToolsStatusToVar(cachedStatus));
+            return juce::var(result.release());
+        }
+    }
     const bool int8Requested = installOptions.modelVariant == "int8";
     if (installOptions.modelVariant != "original" && ! int8Requested)
     {
@@ -2065,7 +2141,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             return juce::var(result.release());
         }
 
-        if (! installOptions.stableAudioLicenseAccepted)
+        if (! compilerRequested && ! installOptions.stableAudioLicenseAccepted)
         {
             appendAiToolsLogLine(makeAiLogEvent("host",
                                                 "stable_audio_import",
@@ -2134,7 +2210,8 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             status.state = "installing";
             status.progress = 0.05f;
             status.installInProgress = true;
-            status.message = downloadRequested ? "Preparing Hugging Face model download..." : "Importing Diffusers audio model snapshot...";
+            status.message = compilerRequested ? "Preparing optional compilation runtime..."
+                : downloadRequested ? "Preparing Hugging Face model download..." : "Importing Diffusers audio model snapshot...";
             status.elapsedMs = 0;
             status.bytesDownloaded = 0;
             status.bytesTotal = 0;
@@ -2170,7 +2247,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
         installWorkerActive.store(true);
         backgroundTasks.addJob([this, sourcePath = sourceRoot.getFullPathName(), stableSessionId, importedModelId, needsConversion, downloadRequested, int8Requested,
-                                accessToken = installOptions.huggingFaceToken]()
+                                accessToken = installOptions.huggingFaceToken, compilerRequested]()
         {
             const InstallWorkerLifetime workerLifetime { installWorkerActive };
             const juce::File source = sourcePath.isEmpty() ? juce::File() : juce::File(sourcePath);
@@ -2605,6 +2682,14 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 }
             }
 
+            if (success && compilerRequested && !aiToolsCancelRequested.load())
+            {
+                const auto helper = findInstallerScript().getSiblingFile("setup_ai_compiler.py");
+                success = helper.existsAsFile() && runCommand({ findStableAudioPython().getFullPathName(), helper.getFullPathName(),
+                    "--root", getUserDataRoot().getChildFile("compiler-runtime").getFullPathName(),
+                    "--model-root", destination.getFullPathName() }, "Preparing optional compiler runtime dependencies and checking generation...", 90 * 60 * 1000);
+                if (!success && error.isEmpty()) error = "Optional compiler setup failed. Standard generation and previous compiler runtime were retained.";
+            }
             if (success && int8Requested && ! aiToolsCancelRequested.load())
             {
                 success = runCommand({ findStableAudioPython().getFullPathName(), "-m", "pip", "install",
@@ -2693,7 +2778,8 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 status.progress = success ? 1.0f : 0.0f;
                 status.installInProgress = false;
                 status.message = success
-                    ? "Diffusers audio model is ready."
+                    ? compilerRequested ? "Optional compilation is ready. Select compiled execution in AI Tools Setup."
+                                        : "Diffusers audio model is ready."
                     : error;
                 status.stepLabel = status.message;
                 status.lastPhase = "stable_audio_import";
@@ -2735,7 +2821,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             selectedFeaturesReady = selectedFeaturesReady && musicGenerationFullyReady;
     }
 
-    if (selectedFeaturesReady)
+    if (selectedFeaturesReady && ! installOptions.repairRuntime)
     {
         result->setProperty("started", false);
         result->setProperty("message", "Selected AI features are already installed.");
@@ -2760,6 +2846,11 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         return juce::var(result.release());
     }
 
+    // A new managed candidate starts from the base archive. Carry forward
+    // installed features so adding/repairing one does not discard another's
+    // runtime dependencies when the active slot changes.
+    const auto requestedFeatureSelection = installOptions.selectedFeatures;
+    installOptions.selectedFeatures = featuresForRuntimeCandidate(installOptions, cachedStatus);
     const auto hardware = probeHardwareStatus();
     juce::StringArray installFeatures;
     juce::StringArray blockedFeatures;
@@ -2803,6 +2894,12 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         return juce::var(result.release());
     }
 
+    if (installOptions.cpuOnly && installFeatures.contains(kFeatureAudioGeneration))
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "CPU-only setup supports Stem Separation. Audio Generation needs a supported GPU runtime.");
+        return juce::var(result.release());
+    }
     const auto devFallbackEnabled = isExternalPythonFallbackEnabled();
     aiToolsCancelRequested = false;
     installStartedTimeMs = juce::Time::getMillisecondCounterHiRes();
@@ -2833,15 +2930,17 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
     });
 
     installWorkerActive.store(true);
-    backgroundTasks.addJob ([this, devFallbackEnabled, installFeatures, requestedFeatures = installOptions.selectedFeatures, requestedFeature = installOptions.requestedFeature]
+    backgroundTasks.addJob ([this, devFallbackEnabled, installFeatures, cpuOnly = installOptions.cpuOnly, requestedFeatures = requestedFeatureSelection, requestedFeature = installOptions.requestedFeature]
     {
         const InstallWorkerLifetime workerLifetime { installWorkerActive };
+        juce::ignoreUnused(cpuOnly);
         const auto installerScript = findInstallerScript();
         const auto systemPython = findSystemPython();
         const auto logFile = getAiToolsInstallLogFile();
         // A new install is prepared in the base slot while the active runtime
         // can remain usable until the installer verifies a replacement.
-        const auto runtimeRoot = getUserDataRoot().getChildFile("stem-runtime");
+        const auto runtimeRoot = getUserDataRoot().getChildFile(devFallbackEnabled ? juce::String("stem-runtime")
+            : "stem-runtime-candidate-" + juce::Uuid().toString().removeCharacters("-"));
         const auto modelsDir = getUserModelsDir();
         const auto musicGenerationCheckpointRoot = getMusicGenerationCheckpointRoot();
         const auto downloadsDir = getAiRuntimeDownloadsDir();
@@ -3175,14 +3274,19 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
                             if (hasBaseRuntime && ! cudaInstallPlan.isVoid() && ! directmlInstallPlan.isVoid())
                             {
-                                if (likelyNvidia && ! cudaNode.isVoid() && ! cudaNode.isUndefined())
+                                if (likelyNvidia && ! cpuOnly && ! cudaNode.isVoid() && ! cudaNode.isUndefined())
                                     runtimeCandidates.add(buildCandidateFromNode("windows-base-x64:cuda",
                                                                                  "Windows base runtime + CUDA",
                                                                                  "Selected first because NVIDIA hardware was detected.",
                                                                                  baseNode,
                                                                                  "cuda",
                                                                                  cudaInstallPlan));
-                                if (! audioGenerationRequested && ! directmlNode.isVoid() && ! directmlNode.isUndefined())
+                                const auto cpuPlan = juce::JSON::parse(installerScript.getSiblingFile("ai-runtime-install-plan-windows-cpu.json"));
+                                if (! audioGenerationRequested && cpuPlan.isObject())
+                                    runtimeCandidates.add(buildCandidateFromNode("windows-base-x64:cpu", "Windows base runtime + CPU",
+                                        "CPU execution is supported without a DirectML device; RoFormer cannot run its complex STFT on DirectML.",
+                                        baseNode, "cpu", cpuPlan));
+                                if (! audioGenerationRequested && runtimeCandidates.isEmpty() && ! directmlNode.isVoid() && ! directmlNode.isUndefined())
                                     runtimeCandidates.add(buildCandidateFromNode("windows-base-x64:directml",
                                                                                  "Windows base runtime + DirectML",
                                                                                  likelyNvidia ? "Prepared as fallback if the CUDA backend install or probe fails." : "Selected because no NVIDIA hardware was detected.",
@@ -3231,14 +3335,14 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                 const auto cudaInstallPlan = getPropertyString(cudaNode, "backend").isNotEmpty() ? cudaNode.getDynamicObject()->getProperty("installPlan") : juce::var();
                                 const auto rocmInstallPlan = getPropertyString(rocmNode, "backend").isNotEmpty() ? rocmNode.getDynamicObject()->getProperty("installPlan") : juce::var();
 
-                                if (likelyNvidia && ! cudaInstallPlan.isVoid())
+                                if (likelyNvidia && ! cpuOnly && ! cudaInstallPlan.isVoid())
                                     runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey + ":cuda",
                                                                                  "Linux " + architectureKey + " runtime + CUDA",
                                                                                  "Selected first because NVIDIA hardware was detected.",
                                                                                  architectureNode,
                                                                                  "cuda",
                                                                                  cudaInstallPlan));
-                                if (likelyRocm && ! rocmInstallPlan.isVoid())
+                                if (likelyRocm && ! cpuOnly && ! rocmInstallPlan.isVoid())
                                     runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey + ":rocm",
                                                                                  "Linux " + architectureKey + " runtime + ROCm",
                                                                                  "Selected first because AMD ROCm hardware was detected.",
@@ -3248,10 +3352,13 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                             }
 
                             if (! audioGenerationRequested)
+                            {
+                                const auto cpuPlan = juce::JSON::parse(installerScript.getSiblingFile("ai-runtime-install-plan-linux-cpu.json"));
                                 runtimeCandidates.add(buildCandidateFromNode("linux-" + architectureKey,
                                                                              "Linux " + architectureKey,
                                                                              runtimeCandidates.isEmpty() ? "Selected by current Linux architecture." : "Prepared as fallback if GPU backend setup fails before installation.",
-                                                                             architectureNode));
+                                                                             architectureNode, cpuPlan.isObject() ? "cpu" : "", cpuPlan));
+                            }
                         }
                         else if (! audioGenerationRequested && getPropertyString(platformNode, "url").isNotEmpty())
                         {
@@ -4202,11 +4309,20 @@ bool StemSeparator::startSeparation(const juce::File& inputFile,
                                     const juce::File& outputDir,
                                     const juce::StringArray& stemNames,
                                     const juce::String& accelerationMode,
-                                    const juce::String& modelName)
+                                    const juce::String& modelName,
+                                    int chunkDuration, const juce::String& memoryMode, const juce::String& performanceMode)
 {
     if (isRunning())
     {
         juce::Logger::writeToLog("StemSeparator: Already running.");
+        return false;
+    }
+    if ((accelerationMode != "auto" && accelerationMode != "cpu-only")
+        || (chunkDuration != 0 && chunkDuration != 30)
+        || (memoryMode != "automatic" && memoryMode != "streaming-preview")
+        || (performanceMode != "standard" && performanceMode != "qualified-fast"))
+    {
+        lastProgress = { "error", 0.0f, {}, "Invalid stem processing options." };
         return false;
     }
 
@@ -4245,10 +4361,43 @@ bool StemSeparator::startSeparation(const juce::File& inputFile,
 
     outputDir.createDirectory();
 
-    const juce::StringArray arguments { python.getFullPathName(), script.getFullPathName(),
+    separationLog.reset();
+    separationLogFile = juce::File();
+    separationLogBytes = 0;
+    separationPhase = "launch";
+    separationLineOverflow = false;
+    separationExitHandled = false;
+    cleanupSeparationWorkspace();
+    separationRequest = { inputFile, outputDir, stemNames, accelerationMode, modelName, memoryMode, performanceMode, chunkDuration };
+    separationJobId = juce::Uuid().toString();
+    separationWorkerPid = 0;
+    separationOutputPublished = false;
+    separationRecoveryCount = 0;
+    separationRecoveryReason.clear();
+    juce::StringArray arguments { python.getFullPathName(), "-u", "-X", "faulthandler", script.getFullPathName(),
         "--input", inputFile.getFullPathName(), "--output-dir", outputDir.getFullPathName(),
         "--model", modelName, "--models-dir", modelsDir.getFullPathName(),
-        "--stems", stemNames.joinIntoString(","), "--acceleration-mode", accelerationMode };
+        "--stems", stemNames.joinIntoString(","), "--acceleration-mode", accelerationMode,
+        "--chunk-duration", juce::String(chunkDuration), "--memory-mode", memoryMode, "--job-id", separationJobId,
+        "--performance-mode", performanceMode };
+    if (qualificationDataRoot != juce::File() && qualificationGpuFraction > 0)
+        arguments.addArray({ "--qualification-gpu-fraction", juce::String(qualificationGpuFraction) });
+    if (qualificationDataRoot != juce::File())
+    {
+        const auto logs = qualificationDataRoot.getChildFile("logs").getChildFile("stem-separation");
+        logs.createDirectory();
+        separationLogFile = logs.getChildFile(separationJobId + ".log");
+        separationLog = separationLogFile.createOutputStream();
+        if (!separationLog || !separationLog->openedOk())
+        {
+            lastProgress = { "error", 0.0f, {}, "Cannot create qualification log: " + separationLogFile.getFullPathName() };
+            return false;
+        }
+        arguments.add("--qualification-telemetry");
+        const auto launch = "timestamp=" + makeIsoTimestamp() + "\ncommand=" + arguments.joinIntoString(" | ") + "\n";
+        separationLog->writeText(launch, false, false, "\n");
+        separationLog->flush();
+    }
 
     juce::Logger::writeToLog("StemSeparator: Starting worker for " + inputFile.getFullPathName());
 
@@ -4259,68 +4408,135 @@ bool StemSeparator::startSeparation(const juce::File& inputFile,
     if (! childProcess->start(arguments, 3, OpenStudioAI::runtimeEnvironment()))
     {
         lastProgress = { "error", 0.0f, {}, "Failed to start Python process." };
+        if (separationLog) { separationLog->writeText("launch_failed\n", false, false, "\n"); separationLog->flush(); }
         childProcess.reset();
         return false;
     }
 
+    separationWorkerPid = childProcess->getProcessId();
     return true;
+}
+
+void StemSeparator::cleanupSeparationWorkspace()
+{
+    if (separationWorkerPid == 0 || (childProcess && ! childProcess->retirementConfirmed())) return;
+    if (! AIStemWorkspace::cleanup(separationRequest.output, separationJobId, separationWorkerPid, ! separationOutputPublished)
+        && separationLog)
+        separationLog->writeText("Workspace cleanup was refused or incomplete for job " + separationJobId + "\n", false, false, "\n");
+}
+
+void StemSeparator::consumeSeparationLine()
+{
+    if (!separationLineOverflow)
+    {
+        const auto line = juce::String::fromUTF8(outputBuffer.data(), static_cast<int>(outputBuffer.size())).trim();
+        if (line.startsWith("{"))
+        {
+            const auto json = juce::JSON::parse(line);
+            if (json.isObject() && json.hasProperty("phase")) separationPhase = json["phase"].toString();
+            lastProgress = parseJsonLine(line);
+        }
+    }
+    outputBuffer.clear();
+    separationLineOverflow = false;
+}
+
+void StemSeparator::consumeSeparationOutput(const char* bytes, int count)
+{
+    constexpr juce::int64 logLimit = 8 * 1024 * 1024;
+    if (separationLog && separationLogBytes < logLimit)
+    {
+        const auto length = static_cast<size_t>(juce::jmin(static_cast<juce::int64>(count), logLimit - separationLogBytes));
+        separationLog->write(bytes, length);
+        separationLogBytes += static_cast<juce::int64>(length);
+        if (separationLogBytes == logLimit)
+            separationLog->writeText("\n[worker output log limit reached]\n", false, false, "\n");
+    }
+    for (int i = 0; i < count; ++i)
+    {
+        if (bytes[i] == '\n') consumeSeparationLine();
+        else if (!separationLineOverflow)
+        {
+            if (outputBuffer.size() < 128 * 1024) outputBuffer += bytes[i];
+            else { outputBuffer.clear(); separationLineOverflow = true; }
+        }
+    }
 }
 
 StemSeparator::SeparationProgress StemSeparator::pollProgress()
 {
-    if (! childProcess)
+    if (! childProcess || separationExitHandled)
         return lastProgress;
 
     char buffer[4096];
-    while (childProcess->isRunning())
+    const bool exitedBeforeRead = !childProcess->isRunning();
+    bool drained = false;
+    // Bound work on the message thread even if a dependency floods stderr.
+    for (int block = 0; block < 16; ++block)
     {
         auto bytesRead = childProcess->readProcessOutput(buffer, sizeof(buffer) - 1);
         if (bytesRead <= 0)
-            break;
-
-        buffer[bytesRead] = '\0';
-        outputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
-    }
-
-    if (! childProcess->isRunning())
-    {
-        for (;;)
         {
-            auto bytesRead = childProcess->readProcessOutput(buffer, sizeof(buffer) - 1);
-            if (bytesRead <= 0)
-                break;
-            buffer[bytesRead] = '\0';
-            outputBuffer += juce::String::fromUTF8(buffer, static_cast<int>(bytesRead));
+            drained = true;
+            break;
         }
+        consumeSeparationOutput(buffer, bytesRead);
     }
-
-    while (outputBuffer.contains("\n"))
+    if (exitedBeforeRead && drained)
     {
-        auto lineEnd = outputBuffer.indexOfChar('\n');
-        auto line = outputBuffer.substring(0, lineEnd).trim();
-        outputBuffer = outputBuffer.substring(lineEnd + 1);
-
-        if (line.startsWith("{"))
-            lastProgress = parseJsonLine(line);
-    }
-
-    if (! childProcess->isRunning() && lastProgress.state != "done" && lastProgress.state != "error")
-    {
+        consumeSeparationLine(); // A final JSON/error line need not end in a newline.
+        separationExitHandled = true;
         auto exitCode = childProcess->getExitCode();
-        if (exitCode != 0)
+        if (exitCode != 0 || (lastProgress.state != "done" && lastProgress.state != "error"))
         {
             lastProgress.state = "error";
-            lastProgress.error = "Python process exited with code " + juce::String(exitCode);
-
-            if (outputBuffer.trim().startsWith("{"))
+            if (lastProgress.error.isEmpty())
+                lastProgress.error = "Stem worker exited with code " + juce::String(exitCode)
+                    + " (0x" + juce::String::toHexString(exitCode).toUpperCase() + ") during " + separationPhase + ".";
+        }
+        if (separationLog)
+            separationLog->writeText("\nworker_exit=" + juce::String(exitCode) + " phase=" + separationPhase + "\n", false, false, "\n");
+        if (lastProgress.state != "done") cleanupSeparationWorkspace();
+        if (lastProgress.state == "error" && separationRecoveryCount == 0 && separationRequest.mode == "auto"
+            && (lastProgress.backend == "cuda" || lastProgress.backend == "rocm" || lastProgress.backend == "mps")
+            && lastProgress.diagnostics.getProperty("failureKind", "").toString() == "device_oom")
+        {
+            if (! childProcess->terminateAndWait())
             {
-                auto parsed = parseJsonLine(outputBuffer.trim());
-                if (parsed.state == "error")
-                    lastProgress = parsed;
+                lastProgress.error += " Failed worker retirement is still pending; no retry was started.";
+                if (separationLog) lastProgress.error += " Diagnostics: " + separationLogFile.getFullPathName();
+                return lastProgress;
             }
+            const auto request = separationRequest;
+            const auto priorLog = separationLogFile.getFullPathName();
+            const auto priorFailure = lastProgress.error;
+            if (separationLog) separationLog->flush();
+            // The failed worker has exited and its output is drained. Launch
+            // a new CPU process only after that retirement acknowledgement.
+            const bool restarted = startSeparation(request.input, request.output, request.stems, "cpu-only", request.model, 30, request.memoryMode, request.performanceMode);
+            separationRecoveryCount = 1;
+            separationRecoveryReason = "GPU memory was exhausted. Retrying once on CPU with bounded output memory.";
+            auto recovery = std::make_unique<juce::DynamicObject>();
+            recovery->setProperty("attemptIndex", 1);
+            recovery->setProperty("priorFailure", priorFailure);
+            if (priorLog.isNotEmpty()) recovery->setProperty("priorDiagnostics", priorLog);
+            if (! lastProgress.diagnostics.isObject()) lastProgress.diagnostics = juce::var(new juce::DynamicObject());
+            lastProgress.diagnostics.getDynamicObject()->setProperty("recovery", juce::var(recovery.release()));
+            lastProgress.fallbackReason = separationRecoveryReason;
+            return restarted ? pollProgress() : lastProgress;
         }
     }
-
+    if (separationLog && separationExitHandled && lastProgress.state == "error" && !lastProgress.error.contains("Diagnostics:"))
+        lastProgress.error += " Diagnostics: " + separationLogFile.getFullPathName();
+    if (separationLog) separationLog->flush();
+    if (separationRecoveryReason.isNotEmpty()) lastProgress.fallbackReason = separationRecoveryReason;
+    if (!separationExitHandled && (lastProgress.state == "done" || lastProgress.state == "error"))
+    {
+        auto pending = lastProgress;
+        pending.state = "writing"; // Drain stderr and validate the exit before publishing a terminal result.
+        return pending;
+    }
+    if (separationExitHandled && lastProgress.state == "done") separationOutputPublished = true;
     return lastProgress;
 }
 
@@ -4346,6 +4562,11 @@ StemSeparator::SeparationProgress StemSeparator::parseJsonLine(const juce::Strin
         result.accelerationMode = json["accelerationMode"].toString();
     if (json.hasProperty("threadCap"))
         result.threadCap = static_cast<int>(json["threadCap"]);
+    if (json.hasProperty("fallbackReason"))
+        result.fallbackReason = json["fallbackReason"].toString();
+    if (! result.diagnostics.isObject()) result.diagnostics = juce::var(new juce::DynamicObject());
+    for (const auto* key : { "phase", "executionDetails", "memoryPlan", "deviceReceipt", "telemetry", "failureKind", "performancePolicy" })
+        if (json.hasProperty(key)) result.diagnostics.getDynamicObject()->setProperty(key, json[key]);
 
     if (json.hasProperty("stems"))
     {
@@ -4360,16 +4581,26 @@ StemSeparator::SeparationProgress StemSeparator::parseJsonLine(const juce::Strin
     return result;
 }
 
-void StemSeparator::cancel()
+bool StemSeparator::cancel()
 {
-    if (childProcess && childProcess->isRunning())
+    separationRecoveryCount = 1; // A pending OOM result must not restart work after cancellation.
+    if (childProcess)
     {
-        childProcess->kill();
+        if (! childProcess->terminateAndWait())
+        {
+            lastProgress.state = "error";
+            lastProgress.error = "The AI worker has not stopped yet. Wait and cancel again before starting another AI job.";
+            return false;
+        }
         juce::Logger::writeToLog("StemSeparator: Cancelled.");
     }
+    cleanupSeparationWorkspace();
     childProcess.reset();
+    if (separationLog) { separationLog->writeText("\nworker_closed_or_cancelled\n", false, false, "\n"); separationLog->flush(); }
+    separationLog.reset();
     lastProgress = { "idle", 0.0f, {}, {} };
     outputBuffer.clear();
+    return true;
 }
 
 void StemSeparator::cancelAiToolsInstall()
@@ -4472,6 +4703,9 @@ juce::var StemSeparator::resetAiTools()
     deletePath(checkpointRoot);
     deletePath(hubCacheDir);
     deletePath(downloadsDir);
+    const auto compilerRoot = getUserDataRoot().getChildFile("compiler-runtime");
+    if (compilerRoot.isSymbolicLink()) failedPaths.add(compilerRoot.getFullPathName());
+    else if (compilerRoot.isAChildOf(getUserDataRoot())) deletePath(compilerRoot);
     deletePath(logFile);
 
     const auto logsDir = logFile.getParentDirectory();
@@ -4512,7 +4746,7 @@ juce::var StemSeparator::resetAiTools()
 
 bool StemSeparator::isRunning() const
 {
-    return childProcess && childProcess->isRunning();
+    return childProcess && ! childProcess->retirementConfirmed();
 }
 
 juce::var StemSeparator::resultToJSON(const juce::StringPairArray& stemFiles, bool success,

@@ -12,10 +12,42 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from ai_execution_policy import GIB, plan_residency, device_budget, minimax_kv_bytes, select_device, worker_threads, physical_cuda_free
 from ai_attention_policy import configure_attention
+from ai_execution_policy import stem_execution_backend, model_execution_capabilities
 from ai_execution_policy import release_idle_weights, qualified_minimax_options, model_storage_identity, checkpoint_storage_bytes, check_host_capacity, configure_allocator_environment, allocator_environment, MINIMAX_ALLOCATOR
 
 
 class PolicyTests(unittest.TestCase):
+    def test_memory_service_changes_invalidate_hardware_qualification_receipts(self):
+        from ai_execution_policy import WORKER_MODULES, worker_version
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "worker.py"
+            script.write_text("worker", encoding="utf-8")
+            manifest = Path(__file__).resolve().parents[1]/"tools/ai-worker-modules.json"
+            (root/manifest.name).write_bytes(manifest.read_bytes())
+            for name in WORKER_MODULES:
+                (root / name).write_text("fixture " + name, encoding="utf-8")
+            before = worker_version(script)
+            (root / "ai_memory_manager.py").write_text("changed memory admission", encoding="utf-8")
+            self.assertNotEqual(worker_version(script), before)
+            manifest_record = json.loads((root/manifest.name).read_text())
+            manifest_record["modules"].append("../unsafe.py")
+            (root/manifest.name).write_text(json.dumps(manifest_record))
+            with self.assertRaisesRegex(ValueError,"manifest"):
+                worker_version(script)
+
+    def test_roformer_excludes_native_fatal_directml_stft_before_loading_model(self):
+        for model in ("BS-Roformer-SW.ckpt", "mel_band_roformer.yaml"):
+            backend, reason = stem_execution_backend("directml", model)
+            self.assertEqual(backend, "cpu")
+            self.assertIn("STFT", reason)
+        for backend in ("cpu", "cuda", "rocm", "mps", "coreml"):
+            self.assertEqual(stem_execution_backend(backend, "BS-Roformer-SW.ckpt"), (backend, ""))
+        self.assertEqual(stem_execution_backend("directml", "MDX-Net.onnx"), ("directml", ""))
+        directml = model_execution_capabilities("bs-roformer", "directml")
+        self.assertEqual(directml["implementedPlacementModes"], [])
+        self.assertIn("directml-inference", directml["excluded"])
+
     def test_minimax_allocator_is_scoped_and_preserves_user_overrides(self):
         with patch.dict(os.environ, {}, clear=True), patch("ai_execution_policy.platform.system", return_value="Windows"):
             configure_allocator_environment("stable-audio-3-medium")

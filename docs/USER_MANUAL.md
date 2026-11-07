@@ -3189,11 +3189,64 @@ Use **AI Tools Setup** when a generation or stem workflow reports that its runti
 
 - The installer prepares optional local runtime assets instead of making the base DAW download huge.
 - Installation can be cancelled, reset, or retried from the setup modal.
-- On Windows, a CUDA-to-DirectML fallback prepares a separate runtime and selects it only after validation; an unsuccessful fallback leaves the runtime selection and downloaded models unchanged.
+- Development checkout: Windows and Linux prepare a separate runtime candidate and select it only after validation. A failed setup leaves the previous runtime selected. Windows stem setup prefers CUDA on NVIDIA hardware and uses the CPU recipe when CUDA is unavailable; the current RoFormer model cannot execute on DirectML.
 - The downloadable managed macOS AI runtime requires Apple Silicon and macOS 14 or later because of its bundled numerical-library wheels. The base app targets macOS 12 or later; the managed AI archive is not qualified for macOS 12/13.
 - Generated audio is imported back into the project as normal clips/tracks.
+- Development checkout: **Release idle AI memory** unloads a retained generation worker. Active generation, separation and setup must finish or be cancelled first. The next generation reloads its model.
+- Development checkout: use **Repair Stem Separation** for an older runtime that is ready but uses CPU on an NVIDIA GPU. Repair checks the hardware again, keeps downloaded models and installed features, and activates a new runtime only after validation. Select **Automatic** in Separate Stems to use the repaired GPU runtime.
 
 **Downloading models:** BS-Roformer and ACE-Step download automatically when you install their feature. For Stable Audio 3 Medium or MiniMax Music 3, select the model, review and accept its license, then choose **Download and Set Up**. OpenStudio downloads the required files from Hugging Face into managed storage. Stable Audio is converted automatically to Diffusers format; MiniMax downloads its Diffusers components without the duplicate legacy weights. Allow extra disk space and time for downloads and Stable Audio conversion.
+
+**Storage location:** AI Tools Setup currently has no destination-drive selector.
+Importing a local folder from another drive copies it into managed storage.
+Windows uses `%LOCALAPPDATA%/OpenStudio` for runtimes and most models; ACE-Step
+uses a separate cache under your home folder. An imported source folder is not
+the destination setting.
+
+**Generation execution (development checkout):** AI Tools Setup offers a local
+setting for the selected model, separate from **Model version**. **Automatic —
+standard precision** keeps the normal inference precision and plans placement
+from available memory. The qualified Windows RTX 4080 controls also offer
+**Lower memory — temporary disk** for ACE-Step and **Lower GPU memory — FP8
+storage** for Stable Audio. FP8 keeps selected transformer weights at reduced
+storage precision and uses normal BF16 computation; original model files remain
+available. Audition each output.
+For the reviewed Linux Radeon 8060S (`gfx1151`) setup, ACE-Step also offers
+**Faster startup — qualified AMD**. It changes convolution selection while
+retaining standard precision. Hardware check verifies the exact runtime and
+cached model snapshot before loading; the recipe currently requires resident
+placement. Generated audio can differ. The paired previews passed listening
+review, which does not establish quality for every output. Other hardware keeps
+Automatic until qualified.
+The choice applies to the next request, is not stored in projects, and does not
+change the separately saved INT8 execution policy. Hardware check uses the same
+local choice.
+
+For the qualified Windows RTX 4080 setup, Stable Audio Original also offers
+**Prepare optional compilation**. This installs a separate compiler runtime,
+checks its dependencies, and validates two real generations before enabling
+**Compile repeated blocks — optional setup**. Allow 20 GiB of free space and
+keep OpenStudio open. **Repair compiler setup** stages and validates a replacement;
+failed setup retains the previous selection and standard runtime. The first
+compiled generation takes longer; repeated requests can be faster. The exact
+paired preview passed listening review, which does not establish quality for
+every result. Compilation keeps standard computation precision. See
+[November qualification](ai-optimization-qualification-2026-11-06.md).
+
+**Automatic memory management (development):** ACE-Step, Stable Audio and
+MiniMax keep the selected model, precision and song settings while choosing
+where to keep model weights. Stable Audio switches between keeping the model
+on the GPU and moving components between RAM and GPU. ACE-Step also supports
+layer offloading and the qualified temporary-disk path. MiniMax checks song
+length and lyrics before loading; when RAM is limited it loads in stages and
+uses temporary disk storage, keeping as many language-model layers on the GPU
+as the available budget permits. The remaining layers still compute on the GPU.
+Original MiniMax can need about 22 GiB of temporary disk space. Offloading can
+be very slow. A larger song or lyrics budget triggers another memory check;
+insufficient stage memory produces an error instead of silently reducing
+precision or changing the song. Hardware-check estimates remain advisory and
+can include an already cached model's memory. See the qualification report for
+the configurations actually tested.
 
 **Model versions (development checkout):** Select a model, then choose **Original** or **INT8** in **Model version**. The suggestion above the selector explains when INT8 may help. AI Tools Setup lists both versions under each model, with separate installed status. Choose INT8 and **Download and Prepare INT8** to install it; select that same version in the generation dialog. The choice is saved with the AI track, supports undo/redo, and is retained when changing workflows within the same model.
 
@@ -3270,6 +3323,47 @@ Stem separation splits a source clip into component tracks for remixing, cleanup
 - Other
 
 The resulting stems are imported back into the session as editable clips.
+
+**Development changes (not yet released):** In **Separate Stems**, choose
+**Automatic (use GPU when available)** or **CPU only** under **Processing device**.
+CPU only also disables accelerated model execution when a GPU is installed.
+The pinned BS-RoFormer model runs on CPU when only DirectML acceleration is
+available: that DirectML runtime aborts on the model's complex STFT operations.
+The progress panel explains this automatic fallback. CUDA and ROCm retain their
+accelerated paths when available.
+Enable **Process in 30-second sections to reduce memory use** for long recordings
+that use too much host memory. This keeps the model on the selected device;
+it does not offload model layers, and results may differ at section boundaries.
+Automatic processing selects rolling output buffers when RAM is limited and
+the reviewed Windows/Linux runtime, model, source metadata and temporary disk
+budget are supported. Enable **Use rolling output buffers** to request that
+path explicitly. It preserves the model's window boundaries; its temporary
+disk use grows with recording length. Other automatic configurations retain
+30-second sections. If measured free GPU memory cannot hold the model
+and its activation reserve, processing selects CPU and explains the reason.
+Short final sections and silent sections retain their duration.
+Development section processing splits and joins supported source formats at exact
+sample positions, including tails shorter than one millisecond. **Processing
+details** shows the selected device and memory-policy reason. If a worker reports
+a GPU out-of-memory error in Automatic mode, OpenStudio retires that worker and
+retries once on CPU with bounded output memory. Other errors keep their diagnostics;
+they do not trigger repeated retries. Cancellation and unreadable or incomplete
+output do not add stem tracks. A complete import remains one undoable action.
+Imported stem clips keep the selected source clip's trim offset, timeline start
+and length. Undo removes only the group created by that separation, including
+when another group has the same display name.
+
+On Linux AMD systems, **AMD performance → Faster when qualified (FP16)** requests
+the opt-in gfx1151/ROCm 7.2 FP16/AOTriton recipe. Its exact runtime, architecture,
+checkpoint and configuration must match; other configurations keep standard
+precision and explain why. Standard precision remains the default. These are
+development controls, not released-platform or universal quality promises.
+See [November qualification](ai-optimization-qualification-2026-11-06.md).
+
+If separation fails, the dialog shows the worker's error or its exit code
+and last reported phase. Re-run with **CPU only** to help isolate a
+GPU-specific failure. Full worker logs and periodic memory measurements are
+available only in an explicitly launched qualification run.
 
 ### 18.5 Audio to MIDI
 

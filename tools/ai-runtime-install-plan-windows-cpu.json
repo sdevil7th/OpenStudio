@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "windows-cpu-v1",
+  "backend": "cpu",
+  "platform": "windows",
+  "pythonFamily": "3.11",
+  "steps": [
+    {
+      "type": "pip_uninstall",
+      "features": [
+        "stemSeparation"
+      ],
+      "description": "Removing incompatible GPU providers before CPU setup",
+      "packages": [
+        "torch-directml",
+        "onnxruntime-directml",
+        "onnxruntime",
+        "onnxruntime-gpu",
+        "torch",
+        "torchvision",
+        "torchaudio"
+      ]
+    },
+    {
+      "type": "pip_install",
+      "features": [
+        "stemSeparation"
+      ],
+      "description": "Installing matching CPU PyTorch packages",
+      "indexUrl": "https://download.pytorch.org/whl/cpu",
+      "packages": [
+        "torch==2.11.0",
+        "torchvision==0.26.0",
+        "torchaudio==2.11.0"
+      ]
+    },
+    {
+      "type": "pip_install",
+      "features": [
+        "stemSeparation"
+      ],
+      "description": "Installing CPU stem separation dependencies",
+      "packages": [
+        "audio-separator[cpu]==0.41.1",
+        "librosa==0.11.0",
+        "audioread==3.1.0"
+      ]
+    }
+  ]
+}

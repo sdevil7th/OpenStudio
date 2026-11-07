@@ -23,6 +23,12 @@
       "coverage": []
     },
     {
+      "id": "frontend/src/components/AIExecutionOptions.tsx",
+      "kind": "component",
+      "source": "frontend/src/components/AIExecutionOptions.tsx",
+      "coverage": []
+    },
+    {
       "id": "frontend/src/components/AIGenerationHardwareCheck.tsx",
       "kind": "component",
       "source": "frontend/src/components/AIGenerationHardwareCheck.tsx",
@@ -2472,10 +2478,10 @@
       "coverage": []
     },
     {
-      "id": "feature:18cb3af7bf84b75b",
+      "id": "feature:425fba37265cd708",
       "kind": "feature",
       "section": "AI / Assisted Audio",
-      "description": "Stem separation workflow with selectable stems and progress polling",
+      "description": "Stem separation with selectable stems, CPU-only processing, rolling buffers, optional 30-second sections and qualified Linux gfx1151 FP16 acceleration",
       "source": "docs/implemented_features.md",
       "coverage": []
     },
@@ -2540,6 +2546,14 @@
       "kind": "feature",
       "section": "AI / Assisted Audio",
       "description": "AI generation stage/step/frame progress and cancellation",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:b32fbc48246ce9bb",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "Automatic generation memory planning across ACE-Step, Stable Audio and MiniMax, with request-growth checks, bounded MiniMax loading and shared worker handoff (development checkout; hardware scope in November qualification report)",
       "source": "docs/implemented_features.md",
       "coverage": []
     },
@@ -2756,6 +2770,14 @@
       "kind": "feature",
       "section": "Implemented But Partial / Caveated",
       "description": "AI hardware check and adaptive memory placement",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
+      "id": "feature:ee1c7a0a0a55cbdc",
+      "kind": "feature",
+      "section": "Implemented But Partial / Caveated",
+      "description": "Local generation optimization choices (development)",
       "source": "docs/implemented_features.md",
       "coverage": []
     },

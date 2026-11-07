@@ -163,7 +163,7 @@ class Int8StagePlacement:
 
 
 class PartialStagePlacement:
-    def __init__(self, pipe, plan, device, *, disk_backed=False, cache_root=None):
+    def __init__(self, pipe, plan, device, *, disk_backed=False, cache_root=None, disk_store=None):
         import torch
         from accelerate.hooks import ModelHook, add_hook_to_module
         self.pipe, self.plan = pipe, plan
@@ -182,11 +182,11 @@ class PartialStagePlacement:
         self.reuse_events = {}
         self.models = {name: getattr(pipe, name) for name in
                        ("language_model", "rvq_depth_decoder", "condition_encoder", "transformer", "vocoder")}
-        self.disk_store = None
+        self.disk_store = disk_store
         for model in self.models.values():
             if hasattr(model, "_hf_hook") or getattr(model, "hf_device_map", None):
                 raise ValueError("Partial placement requires a fresh, unhooked model.")
-        if disk_backed:
+        if disk_backed and self.disk_store is None:
             from ai_disk_store import DiskWeightStore
             self.disk_store = DiskWeightStore(self.models.values(), root=cache_root)
         for index, block in enumerate(self.blocks):

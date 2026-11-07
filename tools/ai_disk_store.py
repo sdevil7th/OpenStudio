@@ -42,9 +42,16 @@ def cleanup_stale_stores(root: Path | None = None):
             continue
         try:
             owner = json.loads((directory / "owner.json").read_text(encoding="utf-8"))
-            if owner.get("kind") == "openstudio-weight-store" and not psutil.pid_exists(int(owner["pid"])):
+            pid = int(owner["pid"])
+            live = psutil.pid_exists(pid)
+            if live and "processBirth" in owner:
+                try:
+                    live = abs(psutil.Process(pid).create_time()-float(owner["processBirth"])) < .01
+                except psutil.NoSuchProcess:
+                    live = False
+            if owner.get("kind") == "openstudio-weight-store" and not live:
                 _remove_owned_directory(directory, root)
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, TypeError, KeyError, psutil.AccessDenied):
             # An incomplete/foreign directory is not authorization to delete it.
             continue
 
@@ -93,8 +100,9 @@ class DiskWeightStore:
         if size + occupied > quota_bytes or shutil.disk_usage(self.root).free < size + 3*GIB:
             raise RuntimeError("Not enough app-cache quota or free disk space for immutable weight offload.")
         self.directory = Path(tempfile.mkdtemp(prefix=f"worker-{os.getpid()}-", dir=self.root)).resolve()
+        import psutil
         (self.directory / "owner.json").write_text(json.dumps({"kind": "openstudio-weight-store",
-            "pid": os.getpid(), "bytes": size}), encoding="utf-8")
+            "pid": os.getpid(), "processBirth":psutil.Process().create_time(), "bytes": size}), encoding="utf-8")
         try:
             with (self.directory / "weights.bin").open("w+b", buffering=0) as output:
                 output.truncate(size)
@@ -109,6 +117,10 @@ class DiskWeightStore:
                     value.detach().cpu().view(-1).view(torch.uint8).numpy().tofile(output)
                     value.data = self.mapping.narrow(0, offset, count * value.element_size()).view(dtype).view(shape)
                     self._rebind_aliases(value)
+                # Complete this component's writes before loading the next.
+                # Dirty file-cache pages otherwise overlap the next conversion
+                # peak on low-RAM Windows hosts.
+                os.fsync(output.fileno())
             self.reader = (self.directory / "weights.bin").open("rb", buffering=0)
         except BaseException:
             self.close()
@@ -184,3 +196,53 @@ class DiskWeightStore:
         if self.directory is not None:
             _remove_owned_directory(self.directory, self.root)
             self.directory = None
+
+
+class DiskWeightBank:
+    """Archive components immediately after loading, retaining one placement owner.
+
+    Each file has its own immutable mapping. Parameter identity resolves reads
+    to the right file, so equally shaped components cannot exchange weights.
+    Closing retires every supplied model, like DiskWeightStore.close().
+    """
+    def __init__(self, *, root=None):
+        self.root = root
+        self.stores = []
+        self.offsets = {}
+        self.by_parameter = {}
+        self.bytes = 0
+
+    def add(self, model, *, allow_device=False):
+        parameters = list(model.parameters())
+        if any(id(value) in self.by_parameter for value in parameters):
+            raise ValueError("Cross-component tied parameters require a specific storage adapter")
+        store = DiskWeightStore([model], root=self.root, allow_device=allow_device)
+        self.stores.append(store)
+        self.offsets.update(store.offsets)
+        self.by_parameter.update({id(value):store for value in parameters})
+        self.bytes += store.bytes
+        if allow_device:
+            # Archiving parameters must also retire registered device buffers
+            # before another component or inference stage receives the budget.
+            model.to("cpu")
+
+    def read_into(self, parameter, destination):
+        self.by_parameter[id(parameter)].read_into(parameter, destination)
+
+    def move_module(self, module, device):
+        import torch
+        for value in module.parameters():
+            staging = torch.empty_like(value, device="cpu")
+            self.read_into(value, staging)
+            value.data = staging.to(device)
+        for child in module.modules():
+            for name, value in child._buffers.items():
+                if value is not None:
+                    child._buffers[name] = value.to(device)
+
+    def close(self):
+        for store in self.stores:
+            store.close()
+        self.stores.clear()
+        self.offsets.clear()
+        self.by_parameter.clear()

@@ -1,4 +1,5 @@
 import type { ClipSourceDescriptor } from "../utils/clipSourceDescriptor";
+import { withAIExecutionPreference } from "./aiExecutionPreferences";
 import { parseFXStageState, type FXStageSlotState } from "./fxStageState";
 import { getProjectEpoch } from "../utils/projectLifetime";
 import { decodeLegacyWaveformPeaks, decodePackedWaveformPeaks } from "../utils/packedWaveformPeaks";
@@ -1474,9 +1475,25 @@ export interface StemSepProgress {
   progress: number;
   stemFiles?: Array<{ name: string; filePath: string }>;
   error?: string;
-  backend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+  backend?: "cuda" | "rocm" | "xpu" | "directml" | "coreml" | "mps" | "cpu";
   accelerationMode?: "auto" | "cpu-only";
   threadCap?: number;
+  fallbackReason?: string;
+  resources?: AIResourceState;
+  diagnostics?: {
+    phase?: string;
+    memoryPlan?: { backend: string; chunk_duration: number; memory_mode?: "whole" | "sections" | "streaming"; reason: string; estimated_host_bytes?: number | null; estimated_gpu_bytes?: number | null };
+    performancePolicy?: { requested: string; profile: string; precision: string; reason: string };
+    executionDetails?: { deviceReceipt?: { cudaDeviceName?: string; parameterBytesByDevice?: Record<string, number> } };
+    telemetry?: { elapsedSeconds: number; peakRssBytes: number | null; stages: Record<string, { seconds: number; calls: number }> };
+  };
+}
+
+export interface AIResourceState {
+  owner: "idle" | "generation" | "separation" | "installation" | "releasing-idle-memory";
+  jobToken: number;
+  generationWorkerWarm: boolean;
+  lastMeasurements?: Record<string, unknown>;
 }
 
 export interface ActiveRecordingMIDIPreviewRequest {
@@ -1586,6 +1603,7 @@ export interface AiHardwareStatus {
   systemRamGb?: number;
   gpuBackend?: "cuda" | "rocm" | "directml" | "mps" | "none" | string;
   gpuName?: string;
+  gpuArchitecture?: string;
   gpuMemoryMb?: number;
   gpuMemoryGb?: number;
   gpuMemoryDetected?: boolean;
@@ -1598,6 +1616,7 @@ export interface AiHardwareStatus {
 }
 
 export interface AiMusicModelStatus {
+  optimizations?: { compile?: { ready: boolean; runtimePath?: string } };
   variants?: { int8?: { installed: boolean; ready: boolean; modelPath?: string } };
   id: AiMusicModelId;
   label?: string;
@@ -1617,6 +1636,7 @@ export interface AiMusicModelStatus {
 }
 
 export interface AiToolsStatus {
+  resources?: AIResourceState;
     state:
       | "idle"
       | "installing"
@@ -1667,12 +1687,12 @@ export interface AiToolsStatus {
      downloadHint?: string;
      supportedBackends?: string[];
      activityLines?: string[];
-     selectedBackend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+     selectedBackend?: "cuda" | "rocm" | "directml" | "coreml" | "mps" | "cpu";
     runtimeVersion?: string;
     modelVersion?: string;
     verificationMode?: "in-process" | "subprocess";
     runtimeCandidate?: string;
-    backendRequested?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+    backendRequested?: "cuda" | "rocm" | "directml" | "coreml" | "mps" | "cpu";
     installSessionId?: string;
     lastPhase?: string;
     terminalReason?: string;
@@ -1772,6 +1792,8 @@ export function withAIExecutionNote(progress: AIGenerationProgress): AIGeneratio
 }
 
 export interface InstallAiToolsOptions {
+  prepareOptimization?: "compile";
+  repairRuntime?: boolean;
   modelVariant?: "original" | "int8";
   userConfirmedDownload?: boolean;
   selectedFeatures?: AiFeatureId[];
@@ -3152,6 +3174,7 @@ declare global {
         refreshAiToolsStatus?: () => Promise<AiToolsStatus>;
         installAiTools?: (optionsJsonOrConfirmed?: string | boolean) => Promise<InstallAiToolsResponse>;
         resetAiTools?: () => Promise<ResetAiToolsResponse>;
+        releaseIdleAIMemory?: () => Promise<{ success: boolean; released?: boolean; error?: string; resources?: AIResourceState }>;
         separateStemsAsync?: (trackId: string, clipId: string, optionsJSON: string) => Promise<{ started: boolean; error?: string; cached?: boolean }>;
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
         cancelStemSeparation?: () => Promise<void>;
@@ -9865,9 +9888,16 @@ class NativeBridge {
     };
   }
 
+  async releaseIdleAIMemory(): Promise<{ success: boolean; released?: boolean; error?: string; resources?: AIResourceState }> {
+    if (this.isNative && window.__JUCE__?.backend.releaseIdleAIMemory) {
+      return await window.__JUCE__.backend.releaseIdleAIMemory();
+    }
+    return { success: false, error: "AI memory management is unavailable in the web preview." };
+  }
+
   // ==================== Phase 10: Stem Separation Workflow ====================
 
-  async separateStemsAsync(trackId: string, clipId: string, options: { stems: string[]; filePath?: string; accelerationMode?: "auto" | "cpu-only" }): Promise<{ started: boolean; error?: string; cached?: boolean }> {
+  async separateStemsAsync(trackId: string, clipId: string, options: { stems: string[]; filePath?: string; accelerationMode?: "auto" | "cpu-only"; chunkDuration?: 0 | 30; memoryMode?: "automatic" | "streaming-preview"; performanceMode?: "standard" | "qualified-fast" }): Promise<{ started: boolean; error?: string; cached?: boolean }> {
     if (this.isNative && window.__JUCE__?.backend.separateStemsAsync)
       return await window.__JUCE__.backend.separateStemsAsync(trackId, clipId, JSON.stringify(options));
     console.log("[NativeBridge] Mock separateStemsAsync:", trackId, clipId, options);
@@ -9892,7 +9922,7 @@ class NativeBridge {
 
   async getAIGenerationPreflight(modelId: string, workflowId: string, params: Record<string, unknown>): Promise<AIGenerationPreflight> {
     if (this.isNative && window.__JUCE__?.backend.getAIGenerationPreflight) {
-      const report = await window.__JUCE__.backend.getAIGenerationPreflight(modelId, workflowId, JSON.stringify(params));
+      const report = await window.__JUCE__.backend.getAIGenerationPreflight(modelId, workflowId, JSON.stringify(withAIExecutionPreference(modelId, params)));
       if (report?.status && Array.isArray(report.memory) && Array.isArray(report.notes)) return report;
     }
     return { status: "unavailable", memory: [], notes: ["Hardware checks are available in the desktop app with an installed model runtime."] };
@@ -9929,7 +9959,7 @@ class NativeBridge {
         trackId,
         modelId,
         workflowId,
-        JSON.stringify(normalizedParams),
+        JSON.stringify(withAIExecutionPreference(modelId, normalizedParams)),
       );
     }
     console.log("[NativeBridge] Mock startAIGeneration:", trackId, modelId, workflowId, normalizedParams);

@@ -536,6 +536,7 @@ target_sources(OpenStudio PRIVATE
     Source/CrashDiagnostics.cpp
     Source/CrashReportWriter.cpp
     Source/RuntimeSafetyRegression.cpp
+    Source/AIQualificationHarness.cpp
     Source/ProjectFileStore.cpp
     Source/RecoveryJournal.cpp
     Source/RecordingRecovery.cpp
@@ -1447,7 +1448,7 @@ if(EXISTS "${AI_MUSIC_GENERATION_SCRIPT}")
 endif()
 
 set(AI_STABLE_AUDIO_GENERATION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/tools/stable_audio3_generate.py")
-foreach(AI_POLICY_MODULE ai_model_variants ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store ai_generation_preflight)
+foreach(AI_POLICY_MODULE ai_model_variants ai_execution_policy ai_memory_manager ai_system_memory ai_telemetry ai_attention_policy ai_partial_offload ai_disk_store ai_group_offload ai_compilation ai_layerwise_storage ai_rocm_startup ai_compiler_profile setup_ai_compiler qualify_generation_worker ai_generation_preflight stem_streaming stem_chunking stem_acceleration)
     openstudio_copy_runtime_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_POLICY_MODULE}.py"
         "scripts/${AI_POLICY_MODULE}.py"
@@ -1457,8 +1458,25 @@ endforeach()
 # Worker edits must reach a Debug run even when no C++ object needs rebuilding.
 # POST_BUILD copies above/below also cover explicit OpenStudio target builds.
 set(OPENSTUDIO_AI_WORKER_FILES)
-foreach(AI_WORKER_MODULE ai_model_variants ai_execution_policy ai_attention_policy ai_partial_offload ai_disk_store
-        diffusers_audio_pipeline generate_music stable_audio3_generate stem_separator
+list(APPEND OPENSTUDIO_AI_WORKER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tools/ai-worker-modules.json")
+openstudio_copy_runtime_file("${CMAKE_CURRENT_SOURCE_DIR}/tools/ai-worker-modules.json"
+    "scripts/ai-worker-modules.json" "Copying shared AI worker dependency manifest")
+list(APPEND OPENSTUDIO_AI_WORKER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tools/ai-compiler-runtime-requirements-windows.txt")
+openstudio_copy_runtime_file("${CMAKE_CURRENT_SOURCE_DIR}/tools/ai-compiler-runtime-requirements-windows.txt"
+    "scripts/ai-compiler-runtime-requirements-windows.txt" "Copying reviewed optional compiler requirements")
+if(WIN32)
+    set(OPENSTUDIO_AI_PLAN_FILES ai-runtime-install-plan-windows-cuda.json ai-runtime-install-plan-windows-directml.json ai-runtime-install-plan-windows-cpu.json)
+elseif(UNIX AND NOT APPLE)
+    set(OPENSTUDIO_AI_PLAN_FILES ai-runtime-install-plan-linux-cuda.json ai-runtime-install-plan-linux-cpu.json ai-runtime-install-plan-linux-rocm.json ai-runtime-install-plan-linux-rocm-gfx1151.json)
+endif()
+foreach(AI_PLAN_FILE IN LISTS OPENSTUDIO_AI_PLAN_FILES)
+    list(APPEND OPENSTUDIO_AI_WORKER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_PLAN_FILE}")
+    openstudio_copy_runtime_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_PLAN_FILE}" "scripts/${AI_PLAN_FILE}"
+        "Copying reviewed AI backend plan ${AI_PLAN_FILE}")
+endforeach()
+foreach(AI_WORKER_MODULE ai_model_variants ai_execution_policy ai_memory_manager ai_system_memory ai_telemetry ai_attention_policy ai_partial_offload ai_disk_store ai_group_offload ai_compilation ai_layerwise_storage ai_rocm_startup ai_compiler_profile setup_ai_compiler qualify_generation_worker
+        diffusers_audio_pipeline generate_music stable_audio3_generate stem_separator stem_streaming stem_chunking stem_acceleration
         ai_runtime_probe prepare_diffusers_audio ai_generation_preflight)
     list(APPEND OPENSTUDIO_AI_WORKER_FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/${AI_WORKER_MODULE}.py")
@@ -1496,20 +1514,6 @@ if(EXISTS "${WINDOWS_AI_ACCELERATION_MANIFEST}")
         "scripts/windows-ai-acceleration-manifest.json"
         "Copying Windows AI acceleration manifest to output directory"
     )
-endif()
-
-# Copy Linux AI backend install plans to output directory
-if(UNIX AND NOT APPLE)
-    foreach(LINUX_PLAN_FILE "ai-runtime-install-plan-linux-cuda.json" "ai-runtime-install-plan-linux-rocm.json" "ai-runtime-install-plan-linux-rocm-gfx1151.json")
-        set(LINUX_PLAN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tools/${LINUX_PLAN_FILE}")
-        if(EXISTS "${LINUX_PLAN_SRC}")
-            openstudio_copy_runtime_file(
-                "${LINUX_PLAN_SRC}"
-                "scripts/${LINUX_PLAN_FILE}"
-                "Copying Linux AI backend plan ${LINUX_PLAN_FILE} to output directory"
-            )
-        endif()
-    endforeach()
 endif()
 
 # Remove legacy bundled AI runtime artifacts from reused build directories.

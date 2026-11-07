@@ -189,6 +189,20 @@ class RepairWindowsReusedRuntimeTests(unittest.TestCase):
 
 
 class WindowsBackendFallbackTests(unittest.TestCase):
+    def test_managed_candidates_activate_on_all_platforms_without_replacing_active_files(self):
+        for system in ("Windows", "Linux", "Darwin"):
+            with self.subTest(system=system), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "stem-runtime"
+                root.mkdir()
+                original = root / "original.txt"
+                original.write_text("working")
+                candidate = root.with_name("stem-runtime-candidate-" + "a" * 32)
+                candidate.mkdir()
+                with patch.object(installer.platform, "system", return_value=system), patch.object(installer, "log_event"):
+                    installer.activate_windows_runtime(candidate, candidate)
+                self.assertEqual((root.parent / "stem-runtime-active.txt").read_text().strip(), candidate.name)
+                self.assertEqual(original.read_text(), "working")
+
     def tearDown(self):
         installer.cleanup_pending_runtime_candidate()
 

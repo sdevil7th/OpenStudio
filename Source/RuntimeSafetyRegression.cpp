@@ -13,6 +13,9 @@
 #include "MessageThreadLifetime.h"
 #include "ControlSurfaceMidiInbox.h"
 #include "AITrackEngine.h"
+#include "AIManagedRuntime.h"
+#include "AIStemWorkspace.h"
+#include "AIResourceCoordinator.h"
 #include "RecordingWriterSafety.h"
 #include "OwnedBackgroundTasks.h"
 #include "AudioFileConversionRegression.h"
@@ -149,6 +152,118 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         passed = passed && success;
     };
     juce::MidiBuffer midi;
+    {
+        const auto output = directory.getChildFile("stem-workspaces");
+        output.createDirectory();
+        const auto job = juce::String::repeatedString("b", 32);
+        const auto scratch = output.getChildFile(".openstudio-stem-" + job + "-owned");
+        const auto result = output.getChildFile("stems-" + job);
+        const auto foreign = output.getChildFile(".openstudio-stem-" + job + "-foreign");
+        auto mark = [&] (const juce::File& folder, int ownerPid)
+        {
+            folder.createDirectory();
+            folder.getChildFile(".openstudio-owner.json").replaceWithText("{\"kind\":\"openstudio-stem-workspace-v1\",\"job\":\"" + job + "\",\"pid\":" + juce::String(ownerPid) + "}");
+            folder.getChildFile("audio.wav").replaceWithText("owned test fixture");
+        };
+        mark(scratch, 123); mark(result, 123); mark(foreign, 456);
+        check("stem_workspace_cleanup_keeps_published_results_and_other_owners",
+            ! AIStemWorkspace::cleanup(output, job, 123, false) && ! scratch.exists() && result.exists() && foreign.exists());
+        check("stem_workspace_cleanup_rejects_wrong_nonce", ! AIStemWorkspace::cleanup(output, "../", 123, true) && result.exists());
+        (void) AIStemWorkspace::cleanup(output, job, 123, true);
+        check("stem_workspace_cleanup_removes_only_unpublished_owned_result", ! result.exists() && foreign.exists());
+       #if JUCE_WINDOWS
+        const auto locked = output.getChildFile(".openstudio-stem-" + job + "-locked");
+        mark(locked, 123);
+        const auto handle = CreateFileW(locked.getChildFile("audio.wav").getFullPathName().toWideCharPointer(),
+            GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const bool opened = handle != INVALID_HANDLE_VALUE;
+        (void) AIStemWorkspace::cleanup(output, job, 123, false);
+        check("stem_cleanup_retains_ownership_when_a_file_is_locked", opened && locked.getChildFile(".openstudio-owner.json").existsAsFile());
+        if (opened) CloseHandle(handle);
+        (void) AIStemWorkspace::cleanup(output, job, 123, false);
+        check("stem_cleanup_can_retry_after_the_lock_is_released", ! locked.exists() && foreign.exists());
+       #endif
+    }
+    {
+        StemSeparator::InstallOptions requested;
+        requested.selectedFeatures = { "audioGeneration" };
+        StemSeparator::AiToolsStatus existing;
+        existing.installedFeatures = { "stemSeparation" };
+        const auto retained = StemSeparator::featuresForRuntimeCandidate(requested, existing);
+        check("new_generation_candidate_keeps_existing_stem_dependencies", retained.contains("audioGeneration") && retained.contains("stemSeparation"));
+        check("candidate_preservation_does_not_change_the_requested_feature", requested.selectedFeatures.size() == 1 && requested.selectedFeatures[0] == "audioGeneration");
+        requested.selectedFeatures = { "stemSeparation" };
+        existing.installedFeatures.clear();
+        existing.musicGenerationReady = true;
+        existing.musicGenerationLayoutValid = true;
+        const auto repair = StemSeparator::featuresForRuntimeCandidate(requested, existing);
+        check("stem_repair_keeps_generation_without_requiring_an_old_performance_profile", repair.contains("audioGeneration") && repair.contains("stemSeparation"));
+    }
+    {
+        AIResourceCoordinator resources;
+        using Owner = AIResourceCoordinator::Owner;
+        const auto first = resources.begin(Owner::generation);
+        check("ai_resource_owner_excludes_overlapping_work", first != 0 && resources.begin(Owner::separation) == 0
+              && resources.begin(Owner::installation) == 0);
+        check("ai_owner_waits_for_its_completion_token", ! resources.finish(first + 1)
+              && resources.snapshot().getProperty("owner", "").toString() == "generation");
+        check("completed_generation_can_remain_warm", resources.finish(first, true)
+              && static_cast<bool>(resources.snapshot().getProperty("generationWorkerWarm", false)));
+        const auto second = resources.begin(Owner::separation);
+        check("stale_completion_does_not_free_new_ai_work", second != 0 && ! resources.finish(first)
+              && resources.begin(Owner::generation) == 0);
+        check("warm_release_requires_acknowledgement", static_cast<bool>(resources.snapshot().getProperty("generationWorkerWarm", false)));
+        resources.confirmIdleGenerationReleased();
+        check("acknowledged_idle_release_updates_owner", ! static_cast<bool>(resources.snapshot().getProperty("generationWorkerWarm", true)));
+        resources.finish(second);
+        std::atomic<int> winners { 0 };
+        std::vector<std::thread> contenders;
+        for (int i = 0; i < 8; ++i) contenders.emplace_back([&] { if (resources.begin(Owner::generation) != 0) ++winners; });
+        for (auto& thread : contenders) thread.join();
+        check("concurrent_ai_starts_have_one_owner", winners.load() == 1);
+    }
+    {
+        const auto data = directory.getChildFile("managed-ai-slots");
+        data.createDirectory();
+        const auto candidateName = "stem-runtime-candidate-" + juce::String::repeatedString("a", 32);
+        const auto candidate = data.getChildFile(candidateName);
+        candidate.createDirectory();
+        data.getChildFile("stem-runtime-active.txt").replaceWithText(candidateName);
+        check("verified_runtime_candidate_marker_is_resolved", AIManagedRuntime::getActiveStemRuntimeRoot(data) == candidate);
+        data.getChildFile("stem-runtime-active.txt").replaceWithText("../" + candidateName);
+        check("runtime_candidate_marker_cannot_escape_parent", AIManagedRuntime::getActiveStemRuntimeRoot(data) == data.getChildFile("stem-runtime"));
+        const auto compiler = data.getChildFile("compiler-runtime");
+        const auto slotName = "compiler-runtime-" + juce::String::repeatedString("b", 32);
+        const auto slot = compiler.getChildFile(slotName);
+        slot.getChildFile("runtime").createDirectory();
+        const auto requirements = data.getChildFile("compiler-requirements.txt");
+        requirements.replaceWithText("package==1\n");
+        compiler.getChildFile("active.json").replaceWithText("{\"schemaVersion\":1,\"profile\":\"stable-audio-cuda-compile-v1\",\"slot\":\"" + slotName + "\"}");
+        check("compiler_requires_validation_receipt", AIManagedRuntime::getActiveCompilerRuntimeRoot(data, requirements) == juce::File());
+        const juce::String expectedRecipe("package==1\n");
+        const auto hash = juce::SHA256(expectedRecipe.toRawUTF8(), expectedRecipe.getNumBytesAsUTF8()).toHexString();
+        slot.getChildFile("ready.json").replaceWithText("{\"profile\":\"stable-audio-cuda-compile-v1\",\"validation\":\"pass\",\"requirementsSha256\":\"" + hash + "\"}");
+        check("compiler_resolves_only_verified_slot", AIManagedRuntime::getActiveCompilerRuntimeRoot(data, requirements) == slot.getChildFile("runtime"));
+        requirements.replaceWithText("package==2\n");
+        check("compiler_rejects_changed_recipe", AIManagedRuntime::getActiveCompilerRuntimeRoot(data, requirements) == juce::File());
+        requirements.replaceWithText("package==1\n");
+        compiler.getChildFile("active.json").replaceWithText("{\"schemaVersion\":1,\"profile\":\"stable-audio-cuda-compile-v1\",\"slot\":\"../" + slotName + "\"}");
+        check("compiler_marker_cannot_escape_parent", AIManagedRuntime::getActiveCompilerRuntimeRoot(data, requirements) == juce::File());
+        StemSeparator separator;
+        const auto zipFile = directory.getChildFile("runtime-long-path.zip");
+        juce::ZipFile::Builder builder;
+        const juce::String pythonBytes("fixture");
+        const juce::String metadataBytes("{}");
+        builder.addEntry(std::make_unique<juce::MemoryInputStream>(pythonBytes.toRawUTF8(), static_cast<size_t>(pythonBytes.getNumBytesAsUTF8()), true), 6, "base/python/python.exe", juce::Time::getCurrentTime());
+        builder.addEntry(std::make_unique<juce::MemoryInputStream>(pythonBytes.toRawUTF8(), static_cast<size_t>(pythonBytes.getNumBytesAsUTF8()), true), 6, "base/python/bin/python3", juce::Time::getCurrentTime());
+        builder.addEntry(std::make_unique<juce::MemoryInputStream>(metadataBytes.toRawUTF8(), static_cast<size_t>(metadataBytes.getNumBytesAsUTF8()), true), 6, "base/.openstudio-ai-runtime.json", juce::Time::getCurrentTime());
+        { auto stream = zipFile.createOutputStream(); builder.writeToStream(*stream, nullptr); }
+        juce::String error, errorCode;
+        const auto destination = directory.getChildFile(juce::String::repeatedString("long-directory-", 10))
+            .getChildFile(juce::String::repeatedString("nested-", 10));
+        check("native_runtime_extraction_supports_deep_paths", separator.extractRuntimeArchive(zipFile, destination, error, errorCode)
+              && AIManagedRuntime::fileForIO(destination).getChildFile(".openstudio-ai-runtime.json").existsAsFile());
+    }
     AudioDeviceConfigurationRegression::run(check);
 #if OpenStudio_HAS_ARA
     {
@@ -299,6 +414,14 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         const juce::String gpu = "Agent 2\nDevice Type: GPU\nSegment: GLOBAL; FLAGS: COARSE GRAINED\nSize: 102400000(0x0) KB\nAllocatable: TRUE\nSegment: GLOBAL; FLAGS: EXTENDED FINE GRAINED\nSize: 102400000(0x0) KB\nAllocatable: TRUE\n";
         check("rocm_shared_memory_excludes_cpu_and_aliases", OpenStudioAI::rocmGpuPoolMemoryMb(cpu + gpu) == 100000);
         check("rocm_cpu_pools_are_not_gpu_memory", OpenStudioAI::rocmGpuPoolMemoryMb(cpu) == 0);
+        const juce::String gpuArch = "Agent 2\nName: gfx1151\nDevice Type: GPU\n";
+        check("rocm_architecture_excludes_cpu_agents", OpenStudioAI::rocmGpuArchitecture("Agent 1\nName: gfx000\nDevice Type: CPU\n" + gpuArch) == "gfx1151");
+        check("rocm_architecture_rejects_ambiguous_gpu_selection", OpenStudioAI::rocmGpuArchitecture(gpuArch + "Agent 3\nName: gfx1100\nDevice Type: GPU\n").isEmpty());
+        StemSeparator::HardwareStatus hardware;
+        hardware.gpuArchitecture = "gfx1151";
+        const auto details = StemSeparator::hardwareStatusToVar(hardware);
+        check("native_hardware_reports_platform_and_gpu_architecture", details["platform"].toString().isNotEmpty()
+              && details["gpuArchitecture"].toString() == "gfx1151");
     }
     runBasicPitchRegression(directory, check);
     runFieldTestRegression(directory, check);
@@ -1188,6 +1311,59 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         writer.reset();
         check("failed_writer_finalization_status_survives_writer", status->finished.load());
     }
+    for (const auto& mode : juce::StringArray { "crash", "structured", "incomplete", "done", "ordinary" })
+    {
+        StemSeparator separator;
+        const auto logDirectory = directory.getChildFile("stem-diagnostics");
+        logDirectory.createDirectory();
+        if (mode != "ordinary")
+        {
+            separator.separationLogFile = logDirectory.getChildFile(mode + ".log");
+            separator.separationLog = separator.separationLogFile.createOutputStream();
+        }
+        separator.lastProgress.state = "loading";
+        separator.childProcess = std::make_unique<OwnedChildProcess>();
+        const bool started = separator.childProcess->start({ OpenStudioRuntime::executableFile().getFullPathName(),
+            "--owned-worker-fixture", logDirectory.getFullPathName(), "--owned-stem-diagnostic", mode == "ordinary" ? "structured" : mode });
+        const auto deadline = juce::Time::getMillisecondCounterHiRes() + 10000;
+        while (!separator.separationExitHandled && juce::Time::getMillisecondCounterHiRes() < deadline)
+        { separator.pollProgress(); juce::Thread::sleep(5); }
+        const auto progress = separator.pollProgress();
+        if (mode == "ordinary")
+        {
+            check("ordinary_stem_failure_reports_reason_without_a_worker_log", started && separator.separationExitHandled
+                && progress.state == "error" && progress.error.contains("model failed") && !progress.error.contains("Diagnostics:")
+                && !separator.separationLog && !logDirectory.getChildFile("ordinary.log").exists());
+            continue;
+        }
+        const auto log = separator.separationLogFile.loadFileAsString();
+        const auto checkName = "stem_worker_" + mode + "_retains_diagnostics_and_terminal_state";
+        check(checkName.toRawUTF8(), started
+            && separator.separationExitHandled && log.contains("native dependency diagnostic")
+            && log.contains("phase=load_model") && progress.state == (mode == "done" ? "done" : "error"));
+        if (mode == "structured") check("stem_unterminated_json_error_is_preserved", progress.error.contains("model failed"));
+       #if JUCE_WINDOWS
+        if (mode == "crash") check("stem_native_crash_includes_hex_code_and_log_path",
+            progress.error.contains("C0000409") && progress.error.contains(separator.separationLogFile.getFullPathName()));
+       #endif
+    }
+    {
+        StemSeparator separator;
+        const auto json = juce::String::fromUTF8("{\"state\":\"error\",\"error\":\"音\"}\n");
+        const std::string bytes(json.toRawUTF8());
+        for (const auto byte : bytes) separator.consumeSeparationOutput(&byte, 1);
+        check("stem_pipe_reassembles_split_utf8", separator.lastProgress.error == juce::String::fromUTF8("音"));
+        const std::string flood(140 * 1024, 'x');
+        separator.consumeSeparationOutput(flood.data(), static_cast<int>(flood.size()));
+        check("stem_unterminated_line_memory_is_bounded", separator.outputBuffer.size() <= 128 * 1024);
+        const std::string recovered("\n{\"state\":\"done\"}\n");
+        separator.consumeSeparationOutput(recovered.data(), static_cast<int>(recovered.size()));
+        check("stem_progress_recovers_after_oversized_diagnostic", separator.lastProgress.state == "done");
+        const std::string fallback("{\"state\":\"loading\",\"backend\":\"cpu\",\"fallbackReason\":\"DirectML complex STFT is unsupported\"}\n");
+        separator.consumeSeparationOutput(fallback.data(), static_cast<int>(fallback.size()));
+        check("stem_model_backend_fallback_reason_survives_progress_parsing", separator.lastProgress.backend == "cpu"
+            && separator.lastProgress.fallbackReason == "DirectML complex STFT is unsupported");
+    }
     {
         const auto environmentDirectory = directory.getChildFile("owned-environment");
         environmentDirectory.createDirectory();
@@ -1273,6 +1449,18 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         auto descendant = OpenProcess(SYNCHRONIZE, FALSE, descendantPid);
         check("job_close_terminates_descendants", descendantPid > 0 && (descendant == nullptr || WaitForSingleObject(descendant, 3000) == WAIT_OBJECT_0));
         if (descendant != nullptr) CloseHandle(descendant);
+        {
+            const auto acknowledgementRoot = directory.getChildFile("retirement-ack");
+            acknowledgementRoot.createDirectory();
+            OwnedChildProcess retiring;
+            const bool launched = retiring.start({ executable.getFullPathName(), "--owned-worker-fixture", acknowledgementRoot.getFullPathName() });
+            const auto deadline = juce::Time::getMillisecondCounterHiRes() + 5000.0;
+            while (! acknowledgementRoot.getChildFile("descendant.pid").existsAsFile() && juce::Time::getMillisecondCounterHiRes() < deadline)
+                juce::Thread::sleep(10);
+            check("live_owned_job_has_no_retirement_acknowledgement", launched
+                && acknowledgementRoot.getChildFile("descendant.pid").existsAsFile() && ! retiring.retirementConfirmed());
+            check("owned_retirement_acknowledges_the_complete_job", retiring.terminateAndWait() && retiring.retirementConfirmed());
+        }
         check("stopping_one_job_leaves_other_session_alive", independent.isRunning());
         std::atomic<bool> keepRunning { true };
         std::thread cancellation([&] { juce::Thread::sleep(50); keepRunning = false; });

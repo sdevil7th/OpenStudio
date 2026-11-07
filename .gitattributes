@@ -8,3 +8,5 @@ thirdparty/ffmpeg/source-lock.json text eol=lf
 thirdparty/ffmpeg/runtime-lock.json text eol=lf
 thirdparty/signalsmith/LICENSE.txt text eol=lf
 thirdparty/signalsmith/signalsmith-linear/LICENSE.txt text eol=lf
+tests/fixtures/ace-rocm-startup/**/*.json text eol=lf
+tools/ai-compiler-runtime-requirements-windows.txt text eol=lf

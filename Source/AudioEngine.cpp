@@ -83521,9 +83521,35 @@ bool AudioEngine::isStemSeparationAvailable() const
     return stemSeparator.isAvailable();
 }
 
+void AudioEngine::reconcileAIResources()
+{
+    auto generation = generationResourceToken.load();
+    if (generation != 0 && ! aiTrackEngine.isRunning() && ! aiTrackEngine.hasUnretiredWorker())
+    {
+        if (aiResources.finish(generation, aiTrackEngine.hasIdleWorker()))
+            generationResourceToken.compare_exchange_strong(generation, 0);
+    }
+    auto separation = separationResourceToken.load();
+    if (separation != 0 && ! stemSeparator.isRunning())
+    {
+        const auto progress = stemSeparator.pollProgress();
+        if ((progress.state == "done" || progress.state == "error") && aiResources.finish(separation))
+            separationResourceToken.compare_exchange_strong(separation, 0);
+    }
+    auto installation = installResourceToken.load();
+    if (installation != 0 && ! static_cast<bool>(stemSeparator.getAiToolsStatus().getProperty("installInProgress", false)))
+    {
+        if (aiResources.finish(installation))
+            installResourceToken.compare_exchange_strong(installation, 0);
+    }
+}
+
 juce::var AudioEngine::getAiToolsStatus()
 {
-    return stemSeparator.getAiToolsStatus();
+    reconcileAIResources();
+    auto status = stemSeparator.getAiToolsStatus();
+    if (auto* object = status.getDynamicObject()) object->setProperty("resources", aiResources.snapshot());
+    return status;
 }
 
 juce::var AudioEngine::refreshAiToolsStatus()
@@ -83533,17 +83559,79 @@ juce::var AudioEngine::refreshAiToolsStatus()
 
 juce::var AudioEngine::installAiTools(bool userConfirmedDownload)
 {
-    return stemSeparator.installAiTools(userConfirmedDownload);
+    auto options = std::make_unique<juce::DynamicObject>();
+    options->setProperty("userConfirmedDownload", userConfirmedDownload);
+    return installAiTools(juce::JSON::toString(juce::var(options.release())));
 }
 
 juce::var AudioEngine::installAiTools(const juce::String& optionsJSON)
 {
-    return stemSeparator.installAiTools(optionsJSON);
+    if (! static_cast<bool>(juce::JSON::parse(optionsJSON).getProperty("userConfirmedDownload", false)))
+        return stemSeparator.installAiTools(optionsJSON);
+    reconcileAIResources();
+    const auto token = aiResources.begin(AIResourceCoordinator::Owner::installation);
+    if (token == 0)
+    {
+        auto error = std::make_unique<juce::DynamicObject>();
+        error->setProperty("started", false);
+        error->setProperty("error", "Another AI job is using resources. Finish or cancel it before setup.");
+        return juce::var(error.release());
+    }
+    if (! aiTrackEngine.releaseIdleWorker())
+    {
+        aiResources.finish(token);
+        auto error = std::make_unique<juce::DynamicObject>();
+        error->setProperty("started", false);
+        error->setProperty("error", "Audio generation has not released its resources.");
+        return juce::var(error.release());
+    }
+    aiResources.confirmIdleGenerationReleased();
+    auto result = stemSeparator.installAiTools(optionsJSON);
+    if (static_cast<bool>(result.getProperty("started", false))) installResourceToken.store(token);
+    else aiResources.finish(token);
+    return result;
 }
 
 juce::var AudioEngine::resetAiTools()
 {
-    return stemSeparator.resetAiTools();
+    reconcileAIResources();
+    const auto token = aiResources.begin(AIResourceCoordinator::Owner::maintenance);
+    if (token == 0 || ! aiTrackEngine.releaseIdleWorker())
+    {
+        aiResources.finish(token);
+        auto result = std::make_unique<juce::DynamicObject>();
+        result->setProperty("success", false);
+        result->setProperty("error", "Finish or cancel AI work before resetting AI Tools.");
+        return juce::var(result.release());
+    }
+    aiResources.confirmIdleGenerationReleased();
+    auto result = stemSeparator.resetAiTools();
+    aiResources.finish(token);
+    return result;
+}
+
+juce::var AudioEngine::releaseIdleAIMemory()
+{
+    reconcileAIResources();
+    auto result = std::make_unique<juce::DynamicObject>();
+    const auto token = aiResources.begin(AIResourceCoordinator::Owner::maintenance);
+    if (token == 0)
+    {
+        result->setProperty("success", false);
+        result->setProperty("error", "AI work is running. Memory can be released after it finishes or is cancelled.");
+    }
+    else
+    {
+        const bool wasWarm = aiTrackEngine.hasIdleWorker();
+        const bool released = aiTrackEngine.releaseIdleWorker();
+        if (released) aiResources.confirmIdleGenerationReleased();
+        aiResources.finish(token);
+        result->setProperty("success", released);
+        result->setProperty("released", released && wasWarm);
+        if (! released) result->setProperty("error", "The worker is still active; its memory has not been released.");
+    }
+    result->setProperty("resources", aiResources.snapshot());
+    return juce::var(result.release());
 }
 
 juce::var AudioEngine::separateStems(const juce::String& trackId, const juce::String& clipId)
@@ -83560,7 +83648,6 @@ juce::var AudioEngine::separateStems(const juce::String& trackId, const juce::St
 juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juce::String& clipId,
                                            const juce::String& optionsJSON)
 {
-    juce::ignoreUnused (clipId);
     auto result = std::make_unique<juce::DynamicObject>();
 
     auto aiToolsStatus = stemSeparator.getAiToolsStatus();
@@ -83620,7 +83707,7 @@ juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juc
         auto clips = playbackEngine.getClipSnapshot();
         for (const auto& clip : clips)
         {
-            if (clip.trackId == trackId)
+            if (clip.trackId == trackId && clip.clipId == clipId)
             {
                 audioFile = clip.audioFile;
                 break;
@@ -83660,20 +83747,36 @@ juce::var AudioEngine::separateStemsAsync(const juce::String& trackId, const juc
     auto outputDir = audioFile.getParentDirectory()
         .getChildFile(audioFile.getFileNameWithoutExtension() + "_stems");
 
-    // Start Python subprocess
+    // Reserve ownership before retiring an idle generation process.
+    reconcileAIResources();
+    const auto token = aiResources.begin(AIResourceCoordinator::Owner::separation);
+    if (token == 0)
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Another AI job is using resources.");
+        return juce::var(result.release());
+    }
     if (! aiTrackEngine.releaseIdleWorker())
     {
         result->setProperty("started", false);
+        aiResources.finish(token);
         result->setProperty("error", "Audio generation started before separation could acquire AI resources.");
         return juce::var(result.release());
     }
-    if (! stemSeparator.startSeparation(audioFile, outputDir, requestedStems, accelerationMode))
+    aiResources.confirmIdleGenerationReleased();
+    const int chunkDuration = static_cast<int>(options.getProperty("chunkDuration", 0));
+    const auto memoryMode = options.getProperty("memoryMode", "automatic").toString();
+    const auto performanceMode = options.getProperty("performanceMode", "standard").toString();
+    if (! stemSeparator.startSeparation(audioFile, outputDir, requestedStems, accelerationMode,
+                                       "BS-Roformer-SW.ckpt", chunkDuration, memoryMode, performanceMode))
     {
         juce::Logger::writeToLog("StemSeparator: Failed to start separation.");
         result->setProperty("started", false);
-        result->setProperty("error", "Failed to start Python process. Check that Python and audio-separator are installed.");
+        result->setProperty("error", stemSeparator.pollProgress().error);
+        aiResources.finish(token);
         return juce::var(result.release());
     }
+    separationResourceToken.store(token);
 
     result->setProperty("started", true);
     return juce::var(result.release());
@@ -83690,6 +83793,11 @@ juce::var AudioEngine::getStemSeparationProgress()
     obj->setProperty("backend", progress.backend);
     obj->setProperty("accelerationMode", progress.accelerationMode);
     obj->setProperty("threadCap", progress.threadCap);
+    obj->setProperty("fallbackReason", progress.fallbackReason);
+    obj->setProperty("diagnostics", progress.diagnostics);
+    aiResources.observe(separationResourceToken.load(), progress.diagnostics);
+    reconcileAIResources();
+    obj->setProperty("resources", aiResources.snapshot());
 
     if (progress.state == "done" && progress.stemFiles.size() > 0)
     {
@@ -83724,7 +83832,8 @@ juce::var AudioEngine::getStemSeparationProgress()
 
 void AudioEngine::cancelStemSeparation()
 {
-    stemSeparator.cancel();
+    if (stemSeparator.cancel())
+        aiResources.finish(separationResourceToken.exchange(0));
 }
 
 void AudioEngine::cancelAiToolsInstall()
@@ -83842,9 +83951,19 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
     auto outputDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
         .getChildFile("OpenStudio")
         .getChildFile("GeneratedAudio");
+    if (qualificationGeneratedAudioRoot != juce::File()) outputDir = qualificationGeneratedAudioRoot;
 
+    reconcileAIResources();
+    const auto token = aiResources.begin(AIResourceCoordinator::Owner::generation);
+    if (token == 0)
+    {
+        result->setProperty("started", false);
+        result->setProperty("error", "Another AI job is using resources.");
+        return juce::var(result.release());
+    }
     if (! aiTrackEngine.startGeneration(modelId, workflowId, paramsJSON, outputDir))
     {
+        aiResources.finish(token, aiTrackEngine.hasIdleWorker());
         auto progress = aiTrackEngine.pollProgress();
         result->setProperty("started", false);
         result->setProperty("error", progress.error.isNotEmpty()
@@ -83854,6 +83973,7 @@ juce::var AudioEngine::startAIGeneration(const juce::String& trackId,
     }
 
     result->setProperty("started", true);
+    generationResourceToken.store(token);
     result->setProperty("requestId", aiTrackEngine.pollProgress().requestId);
     return juce::var(result.release());
 }
@@ -83862,6 +83982,9 @@ juce::var AudioEngine::getAIGenerationProgress()
 {
     auto obj = std::make_unique<juce::DynamicObject>();
     auto progress = aiTrackEngine.pollProgress();
+    aiResources.observe(generationResourceToken.load(), progress.generationDetails);
+    reconcileAIResources();
+    obj->setProperty("resources", aiResources.snapshot());
 
     obj->setProperty("state", progress.state);
     obj->setProperty("progress", static_cast<double>(progress.progress));
@@ -83944,6 +84067,11 @@ juce::var AudioEngine::getAIGenerationProgress()
 void AudioEngine::cancelAIGeneration()
 {
     aiTrackEngine.cancel();
+    if (! aiTrackEngine.hasUnretiredWorker())
+    {
+        aiResources.finish(generationResourceToken.exchange(0));
+        aiResources.confirmIdleGenerationReleased();
+    }
 }
 
 // =============================================================================

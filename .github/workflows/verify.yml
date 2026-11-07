@@ -91,6 +91,10 @@ jobs:
           tests.test_store_release_workflow
           tests.test_snap_release
           tests.test_ai_runtime_dependency_pins
+          tests.test_ai_memory_manager
+          tests.test_ai_telemetry
+          tests.test_stem_worker
+          tests.test_stem_installation_qualification
           tests.test_release_ai_runtime
           tests.test_ai_runtime_release
           tests.test_prepare_ai_runtime_pip
@@ -102,6 +106,42 @@ jobs:
           tests.test_nam_fuzz_refinement
           tests.test_desktop_qualification
           tests.test_free_suite_ui_regression
+
+  verify-stem-installation:
+    if: inputs.snap_source_run == ''
+    name: Fresh installer to real CPU stem separation
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/stem-qualification
+            .cache/stem-models
+            ~\AppData\Local\pip\Cache
+          key: windows-stem-flow-${{ hashFiles('tools/ai-runtime-install-plan*.json', 'tools/qualify_stem_installation.py') }}
+      - name: Install from the public base and separate non-silent audio
+        run: >-
+          python tools/qualify_stem_installation.py
+          --output-dir output/stem-installation-ci
+          --catalog https://openstudio.org.in/releases/ai-runtime/stable/latest.json
+          --backend cpu --expected-auto-backend cpu
+          --models-dir .cache/stem-models
+          --timeout 1800
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: stem-installation-cpu
+          path: |
+            output/stem-installation-ci/report.json
+            output/stem-installation-ci/*.log
+            output/stem-installation-ci/separation/report.json
+            output/stem-installation-ci/separation/*.log
+          if-no-files-found: error
 
   verify-ai-policy:
     if: inputs.snap_source_run == ''
@@ -117,9 +157,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install lightweight audio test dependencies
-        run: python -m pip install numpy==2.4.2 soundfile==0.13.1
+        run: python -m pip install numpy==2.4.2 soundfile==0.13.1 psutil==7.2.2 filelock==4.2.4
       - name: Verify device budgets and model routing without GPU dependencies
-        run: python -m unittest tests.test_ai_execution_policy tests.test_ai_benchmark tests.test_diffusers_memory_policy tests.test_ace_diffusers_generation tests.test_ai_generation_preflight
+        run: python -m unittest tests.test_ai_execution_policy tests.test_ai_benchmark tests.test_diffusers_memory_policy tests.test_ace_diffusers_generation tests.test_ai_generation_preflight tests.test_ai_memory_manager tests.test_generation_automatic_memory tests.test_ai_compilation tests.test_ai_compiler_setup tests.test_ai_layerwise_storage tests.test_ai_rocm_startup tests.test_stem_acceleration tests.test_stem_worker tests.test_stem_installation_qualification tests.test_ai_runtime_dependency_pins
 
       - name: Cache macOS standalone Python and AI wheels
         if: runner.os == 'macOS'
@@ -639,6 +679,42 @@ jobs:
             -Label "ci-release" `
             -TimeoutSeconds 360 `
             -SkipBuild
+
+      - name: Qualify native AI setup through real CPU stem separation
+        shell: pwsh
+        timeout-minutes: 40
+        run: |
+          # This executes the built native host, rather than invoking the
+          # Python installer directly. No UI or user runtime is involved.
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
+          $inputPath = Join-Path $env:RUNNER_TEMP 'native-stem-input.wav'
+          python -c "import math,struct,wave; f=wave.open(r'$inputPath','wb'); f.setparams((2,2,44100,0,'NONE','not compressed')); f.writeframes(b''.join(struct.pack('<hh',int(8000*math.sin(i*2*math.pi*220/44100)),int(6000*math.sin(i*2*math.pi*330/44100))) for i in range(44100))); f.close()"
+          python tools/qualify_ai_native.py --app $exePath --output-dir "$env:RUNNER_TEMP/native-stem-qualification" --catalog https://openstudio.org.in/releases/ai-runtime/stable/latest.json --input $inputPath --expected-backend cpu --acceleration-mode cpu-only --timeout 1800
+          if ($LASTEXITCODE -ne 0) { throw 'Native installer-to-separation qualification failed.' }
+          $report = Get-Content -Raw "$env:RUNNER_TEMP/native-stem-qualification/native-result.json" | ConvertFrom-Json
+          $runtimePython = Join-Path $report.activeRuntime 'python/python.exe'
+          & $runtimePython -m unittest tests.test_stem_chunking tests.test_stem_streaming tests.test_ai_telemetry tests.test_ai_memory_manager
+          if ($LASTEXITCODE -ne 0) { throw 'Adapters failed inside the freshly installed CPU runtime.' }
+          $config = Get-Content -Raw "$env:RUNNER_TEMP/native-stem-qualification/configuration.json" | ConvertFrom-Json
+          $config | Add-Member -NotePropertyName repairRuntime -NotePropertyValue $true
+          $repairConfig = "$env:RUNNER_TEMP/native-stem-qualification/verify-repair.json"
+          $config | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 $repairConfig
+          $repair = Start-Process -FilePath $exePath -ArgumentList @('--ai-native-qualification', ('"{0}"' -f $repairConfig)) -WindowStyle Hidden -Wait -PassThru
+          $repaired = Get-Content -Raw "$env:RUNNER_TEMP/native-stem-qualification/native-result-verify-repair.json" | ConvertFrom-Json
+          if ($repair.ExitCode -ne 0 -or $repaired.status -ne 'pass' -or -not $repaired.previousRuntimeStatus.available -or $report.activeRuntime -eq $repaired.activeRuntime) {
+            throw 'Repair of an already-ready native CPU runtime did not activate and separate successfully.'
+          }
+
+      - name: Retain native stem qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-stem-windows-cpu
+          path: |
+            ${{ runner.temp }}/native-stem-qualification/native-result*.json
+            ${{ runner.temp }}/native-stem-qualification/native-host.log
+            ${{ runner.temp }}/native-stem-qualification/user-data/logs/**
+          if-no-files-found: warn
 
       - name: Package complete Windows candidate without publishing
         shell: pwsh

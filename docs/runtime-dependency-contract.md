@@ -421,6 +421,9 @@ PyTorch wheel selection follows the pinned [PyTorch 2.10.0 installation matrix](
 ### Remaining implementation plan: September 12, 2026
 
 Status: **implementation in progress; the complete plan is not qualified**.
+The [November 6 execution plan](#ai-optimization-implementation-plan-november-6-2026)
+now determines the order of new work. The September details below retain the
+model contracts, earlier failures and unresolved qualification requirements.
 The source baseline is `808ccbe`. The working tree now includes shared device
 enumeration, indexed CUDA/XPU operations, WDDM physical-memory budgeting,
 bounded worker thread pools, model-specific placement capability records,
@@ -473,6 +476,95 @@ speed comparison, and complete model-switch/cancellation qualification gates.
   Explicit non-SDPA model configurations stay unchanged. The pinned Roformer
   loop ignores `batch_size`; changing that setting is not an optimization.
   Chunk size and overlap reconstruction remain owned by audio-separator.
+- Stem separation's development worker enforces CPU placement through the
+  separator's device-setup seam, before model loading. CPU-only also hides CUDA
+  and HIP devices in the child environment. GPU execution uses the backend chosen
+  by the capability probe. Optional 30-second sections bound the engine's host
+  reconstruction buffers; they are not model-layer or disk offloading. Partial
+  windows are zero-padded to the engine's current inference window and trimmed
+  back after demixing. Near-silent outputs remain files so section merging does
+  not lose timing. Nonfinite or missing outputs are errors.
+  Exact digital-silence inputs produce silent stems at the requested sample rate
+  without inference; the worker explicitly records `skipped_digital_silence`.
+- `audio-separator==0.41.1` requires `librosa==0.11.0` and `audioread==3.1.0` in
+  the install plans and fallback requirements. Librosa 1.0 removes the engine's
+  `get_duration(filename=...)` API. CUDA setup pins a matching Torch, Torchvision
+  and Torchaudio family even for a stem-only install; otherwise resolution of
+  Torchvision can replace an accelerated Torch build with an unrelated CPU wheel.
+  The installer applies the app's reviewed local CUDA plan even when a downloaded
+  catalog supplies the old feature-gated recipe. Windows CUDA repair removes
+  conflicting DirectML/CPU providers, including overlapping ORT files, before
+  restoring the GPU provider. Torch is installed before separator dependencies
+  to avoid downloading an unnecessary CPU build first. Installed environments
+  still require repair with the updated installer; source edits do not mutate
+  an existing runtime automatically.
+- Explicit native qualification runs retain bounded stdout/stderr logs, including
+  non-JSON lines, interpreter/dependency versions, phase and final exit code.
+  Ordinary stem jobs report failures in the dialog and do not start the
+  qualification memory sampler or create a per-run log. Python starts with
+  unbuffered output and faulthandler enabled. A zero exit without a terminal result
+  fails explicitly. `tools/qualify_stem_worker.py` runs real-model CPU/auto and
+  normal/sectioned file checks without opening the app; a source longer than
+  30 seconds is required to exercise section splitting. It does not establish
+  subjective audio quality or qualification on hardware absent from that run.
+- **November 6, 2026 native crash reproduction:** the published Windows 0.0.16
+  archive (Python 3.11.15), public DirectML install plan and unmodified v0.1.08
+  worker reproduce issue #38's `3221226505` / `0xC0000409` exit. The fatal message
+  is `dml_util.cc:118: Invalid or unsupported data type ComplexFloat` during
+  RoFormer's `torch.stft`. A minimal model-free DirectML STFT reproduces a
+  second-chance exception in `ucrtbase.dll` with fast-fail parameter 7
+  (`FAST_FAIL_FATAL_APP_EXIT`). With Python faulthandler enabled, this abort
+  instead reports the Python stack and exits 3. The worker now applies
+  `stem_execution_backend` before constructing/loading the separator and uses
+  the enforced CPU adapter for RoFormer in a DirectML-only runtime. Generic
+  runtime import availability remains distinct from model execution support;
+  the progress payload includes the model fallback reason. Other architectures'
+  DirectML availability and the CUDA/ROCm model paths are retained.
+  Local evidence is in `output/issue-38-crash-repro/`. The reporter's actual
+  installed backend/driver and source file remain unavailable, so the matching
+  reproduction is not proof that their machine used this path.
+- **November 6 automatic memory service (development):**
+  `tools/ai_memory_manager.py` owns the existing audio-generation resident,
+  component-offload and group-offload plans and the new stem memory plan.
+  Model adapters retain ownership of hook installation and teardown. Stem
+  planning observes host RAM, free physical GPU memory, source duration and
+  checkpoint size. Under host pressure it selects 30-second CPU output sections;
+  under a measured GPU budget below checkpoint size plus an activation reserve
+  (2 GiB for NVIDIA autocast, 7 GiB for the current ROCm FP32 path) it selects CPU
+  with a reason. Estimates are heuristics, not a guarantee
+  against OOM. Sections still decode the input and do not bound all host memory.
+  No precision, model, requested duration or generation settings are changed.
+  Stem diagnostics record parameter bytes by actual tensor device and measured
+  accelerator allocations. Hardware qualification requires GPU parameter
+  placement and an inference allocation peak above resident-model baseline.
+- `tools/qualify_stem_installation.py` exercises a copied runtime or a
+  SHA-256-verified public archive through the actual installer CLI, dependency
+  consistency check and four real-model cases (automatic/CPU-only, automatic
+  sections/explicit 30-second sections). It validates all six stems' duration,
+  channels and finite samples. Both-feature dependency testing can explicitly
+  omit generation checkpoint downloads; generation inference is then
+  `not_asserted`. `.github/workflows/stem-runtime-qualification.yml` runs this
+  matrix on explicitly selected hardware for fresh and existing runtimes.
+  It is a manually dispatched hardware gate, not evidence of universal coverage
+  or an automatically enforced GPU PR check. Ordinary CI runs both lightweight
+  policy/installer regressions and a real fresh Windows CPU install-to-separation
+  job. Subjective stem quality remains `not_asserted`.
+- **Local qualification on November 6:** 28 installer-to-separation cases passed:
+  Windows fresh/DirectML-repair CUDA runtimes with stems-only and both-feature
+  dependency selection; two fresh Windows CPU runtimes, including an empty model
+  cache with real checkpoint/config download; and the published Linux CPU base
+  overlaid with ROCm and both-feature dependencies. Every scenario exercised four
+  processing cases and validated all six outputs. NVIDIA testing used RTX 4080
+  16 GB / Ryzen 7900X / 32 GB RAM; Linux used Ubuntu 26.04 / Radeon 8060S / ROCm
+  7.2. NVIDIA parameters occupied 698,626,256 bytes on `cuda:0`; the measured
+  inference allocation peak was 1,899,336,704 bytes. The Linux FP32 route measured
+  a larger 7,237,764,096-byte GPU allocation peak; capacity estimates remain
+  heuristics and must not be treated as universal peak guarantees. The reporter's
+  RTX 3060 and other hardware/platforms were not physically qualified. Both-feature
+  tests excluded generation checkpoint downloads/inference. The native app's
+  catalog/GUI transport was not exercised by the CLI harness; separate native
+  diagnostics and mocked-browser controls were checked. Local reports and package
+  inventories are retained in `output/issue-38-install-regression/summary.json`.
 - Optional FlashAttention, xFormers, AITER and Sage adapters report availability
   separately from qualification. Native SDPA is the automatic default. The ACE
   runtime's installed FlashAttention distribution is not treated as validated
@@ -1154,3 +1246,439 @@ covers normal unload and stale workers. Request cache plus a separate 1.5-GiB
 GPU reserve is checked before generation. Initial load can be slower and needs
 about 15 GiB of temporary disk space. Quantization is not a guarantee of speed,
 fit, or equivalent audio quality. See [the dated local evidence](ai-quantization-2026-09-16.md).
+
+### November 6, 2026 MoDiff and upstream optimization audit
+
+This is a source audit, not new generation/hardware qualification. MoDiff was
+reviewed read-only at `57811fc2ee6aff5b9de7a6b67ca10914d1136fcc`, using
+`modiff/auto_resource.py`, `modiff/diffusers_offload.py`,
+`utils/memory_menager.py`, `docs/workflow-auto-memory.md` and
+`docs/optional-runtime-optimizations.md` in the sibling repository. MoDiff pins
+Diffusers 0.41.0. OpenStudio's installer baseline is 0.39.0, with separate exact
+official source/conversion pins for its model adapters. Upstream memory docs
+identify 0.42.1 as stable on this review date. This audit does not upgrade any
+dependency or imply that newer generic APIs work with our pinned audio models.
+
+| Capability | OpenStudio source | MoDiff source / remaining gap |
+| --- | --- | --- |
+| Automatic resident/component/group placement | Shared `ai_memory_manager` policy; ACE-Step and MiniMax have group adapters; Stable Audio has resident/component adapters | Graph-aware admission counts distinct owners, shared loaders, artifacts and workload phases before execution |
+| RAM/VRAM budgets | Physical CUDA budget, host headroom, duration/KV reserve, request replanning; stem output sections and CPU fallback | Broader owner-aware loading/conversion/staging budgets and saved, workload-specific qualification receipts |
+| Model lifetime and eviction | Separate worker lifetimes, warm-generation ownership and explicit idle cleanup | Shared byte-counted LRU/no-cache/high-RAM manager; proactive VRAM and host-pressure eviction protects active leased owners |
+| Group streaming | Audio-specific stream and low-CPU-memory plans; avoids full pre-pinning under tight host RAM | Generic conservative staging guard reserves two component copies plus a host RAM floor; synchronous fallback when unknown |
+| Disk weights | MiniMax INT8 stage cache is implemented; partial-resident disk adapter remains excluded from automatic selection | General Diffusers group-disk adapter with unique per-component/per-load storage leases and safe hook/storage teardown |
+| Direct calls outside `forward` | Audio adapters retain model-specific exclusions | Additional VAE encode/decode and direct BatchNorm-statistics exceptions; no blanket hook attachment |
+| Native attention | Automatic Torch SDPA; optional FlashAttention/xFormers/AITER/Sage are separate candidates | Broader opt-in dispatcher/backend/provider qualification; availability alone never grants Auto eligibility |
+| Compilation | Regional compilation and actual compiled-forward probes exist as optional candidates; no blanket automatic compilation | Opt-in regional compilation with runtime provenance and workload qualification |
+| Quantization | Saved INT8 variants for three generation families, plus experimental backend adapters; limited automatic exposure | Broader explicit model/component formats and provider contracts; generic quantization plus offload is also restricted there |
+| FP8 layerwise storage casting | No production adapter | Explicit implementation with hook-stacking checks; not a universal automatic default |
+| Denoiser caching | No production adapter | Explicit Diffusers cache configuration with model/workload output review |
+| VAE memory/layout | ACE path attempts supported tiling; no general slicing/tiling/channels-last policy | Supported-method checks, unsupported reporting, and explicit convolution layout selection |
+| Multiple GPUs | Device selection exists; no generic sharding/context-parallel adapter | Generic multi-GPU context parallelism is also deliberately not enableable; do not describe MoDiff as universally supporting it |
+
+Current Diffusers provides model/sequential/group CPU offload, streamed transfers,
+disk group offload, device maps across GPUs, VAE slicing/tiling, FP8 layerwise
+storage casting and channels-last layout. These are model-dependent features;
+OpenStudio lacks general adapters for several of them. See the official
+[memory guide](https://huggingface.co/docs/diffusers/v0.42.1/optimization/memory).
+
+Diffusers also exposes approximate denoiser caches, which trade additional memory
+and potentially output quality for speed. OpenStudio has no such production
+adapter; audio audition and model-specific validation are required before one
+can be admitted. See [caching](https://huggingface.co/docs/diffusers/main/optimization/cache).
+Other gaps include general Quanto/GGUF/TorchAO format integration and supported
+combinations of quantization, compilation and offload; our bitsandbytes INT8
+  paths do not establish support for those combinations. See the official
+  [quantization overview](https://huggingface.co/docs/diffusers/main/quantization/overview).
+
+Triton is not the normal stem execution backend. The worker uses PyTorch CUDA
+kernels and automatic SDPA. OpenStudio's Windows manifest intentionally has no
+mandatory Triton/FlashAttention package; compilation can use an installed
+compatible Triton provider only through an explicitly qualified candidate.
+Native SDPA is already memory-efficient and does not require installing
+xFormers; see the official [PyTorch optimization guide](https://huggingface.co/docs/diffusers/main/optimization/torch2.0).
+An installed Triton package, a successful import or a selected backend label
+does not prove a compiled forward executed.
+
+RoFormer separation is not a Diffusers pipeline. In particular, CPU-only plus
+CPU offload has no distinct GPU-memory-saving meaning. Its implemented paths
+are CPU or GPU resident weights, optionally with CPU output sections. Generic
+Diffusers layer/group/disk offload is not advertised for this engine. Copying
+MoDiff's hooks without adapting direct weight/buffer access would introduce a
+new correctness risk rather than repair the DirectML complex-STFT abort.
+
+### AI optimization implementation plan: November 6, 2026
+
+**Status: implementation in progress; qualification-only candidates are not
+automatic product defaults.** This reconciles the November MoDiff audit with the outstanding
+September work. The issue #38 CUDA/runtime/logging fixes and shared memory
+planner are the starting point, not new work to repeat. The existing saved INT8
+variants, SDPA adapters, warm-worker handoff and experimental partial-residency
+code also remain in place. Extend their owners rather than creating parallel
+implementations. Keep the current exclusion of rejected NF4, unqualified
+partial residency and incompatible sequential/group hooks.
+
+The priorities are reliable memory admission, lower long-file RAM use, then
+measured inference speed and additional capacity. Hardware qualification starts
+with the first phase and continues throughout. The order below is an execution
+sequence, not a promised release calendar.
+
+#### 1. Establish comparable measurements and close the native integration gap
+
+Extend `qualify_stem_installation.py`, `qualify_stem_worker.py`, the existing AI
+benchmark tools and native runtime regressions. Keep installer-to-real-inference
+coverage for fresh and repaired runtimes and both feature selections. Add an
+isolated native-host integration case that drives the app's actual runtime
+selection/download/activation and `StemSeparator` launch; the current CLI matrix
+does not prove that native transport. Use a task-owned data root and no visible
+app window. Verify packaged workers/plans, effective backend, six output files,
+terminal state, cancellation and failed-runtime rollback. Cover frontend clip
+publication/undo through a separate native bridge integration test.
+
+Record load, decode, transfer, model-forward, reconstruction and write times;
+cold/warm latency; physical VRAM; host RSS/commit; pinned/staging buffers; and
+actual generated length. Profile bounded representative forwards, not every
+production operation. Separate GPU compute time from PCIe transfers and startup
+compilation. Measure link speed under load before treating an idle Gen 1 reading
+as a hardware bottleneck. Freeze or hash every policy/worker dependency and
+record contention. Keep correctness reports separate from performance claims.
+
+**Exit gate:** reproducible, uncontended baselines for each installed model on
+the available Windows NVIDIA and Linux ROCm systems; hosted CPU flow and native
+transport regression; explicit skips for unavailable hardware. No speed claim
+from a short or early-EOS output. This is the measurement dependency for later
+promotion, not a requirement to rerun an expensive full campaign for every edit.
+
+#### 2. Extend the planner into shared resource ownership and recovery
+
+Build on `ai_memory_manager.py`, `ai_execution_policy.py`,
+`AITrackEngine::releaseIdleWorker()` and the existing generation/separation
+handoff. Add a control-thread coordinator for active and warm worker ownership,
+reservations and release acknowledgements. Track actual tensor storage, shared
+or tied weights, quantization metadata, loading/conversion overlap, KV cache,
+activations, prefetch buffers and DAW headroom. Count unified RAM once. Include
+other applications' observed consumption without stopping their processes.
+
+Evict only idle owned workers, with bounded warm retention and LRU policy where
+multiple owners exist. An expired heartbeat does not prove that allocations
+were released: confirm process retirement or a release acknowledgement before
+granting another owner the same budget. Replan before loading and between jobs,
+not by moving tensors during a forward. Resource coordination must never block
+the audio callback. Benchmark CPU thread limits/background priority while
+playback and recording are active.
+
+Add one bounded OOM recovery path using only supported placements/sectioning.
+Preserve seed, model version, duration, steps, source selection and requested
+precision. Retire failed native state before retry; retain diagnostics and
+publish clips once, only after complete output validation. Never silently
+downgrade precision or retry repeatedly. Expose the chosen policy and reason.
+
+**Exit gate:** generation-to-separation handoff, idle eviction, stale-worker
+recovery, cancellation, model switching and deterministic injected-OOM tests;
+separate real memory-pressure tests; no new audio-device underruns in the
+defined live-session fixture. Split ownership and retry/UI work into separate PRs.
+
+#### 3. Reduce stem-separation RAM and qualify faster backend paths
+
+Implement incremental decode and reconstruction in the RoFormer adapter. The
+current 30-second option still decodes the complete source. Preserve the pinned
+inference window, overlap weights, source normalization and output timing using
+bounded input/output buffers; use a scan pass for whole-source statistics if
+needed. Stream each stem to a temporary output and publish all six atomically.
+Audit compressed/VBR input and resampling as well as WAV/FLAC, final partial
+windows, near silence and cancellation. Compare with the unsectioned reference
+before presenting streaming as equivalent to ordinary processing.
+
+In a separate PR, evaluate supported ROCm BF16/FP16 autocast and attention paths.
+The current FP32 GPU peak is much larger than NVIDIA autocast. Keep STFT/ISTFT,
+normalization and other numerically sensitive operations in their required
+precision. Test real operator support, finite output and complete songs before
+reducing the memory reserve. Preserve FP32 fallback. Benchmark CPU thread counts
+and supported vectorized kernels per CPU family; do not enable unsupported
+half-precision CPU operations. Do not claim batching helps while the pinned
+RoFormer loop ignores `batch_size`.
+
+**Exit gate:** host memory growth follows the declared bounded working set plus
+documented decoder overhead as file duration increases; correct sample counts
+and six outputs; seams/normalization compared against the baseline; measured
+ROCm memory/latency improvement and exact-artifact audition before precision
+promotion. Diffusers hooks remain outside RoFormer unless a separate reviewed
+adapter proves both correctness and a useful capacity benefit.
+
+#### 4. Improve generation placement and transfer efficiency
+
+Replace coarse fixed thresholds with per-stage estimates and measured workload
+classes. Prefer resident execution when it fits; evaluate component offload,
+partial residency and block/leaf groups per adapter. Keep frequently reused
+MiniMax language layers/RVQ resident where the host and device budgets permit;
+respect direct embedding/head calls and release stage-specific caches when their
+lifetimes end. Qualify Stable Audio group/sequential placement independently;
+its previous failures remain blocking for those modes.
+
+Benchmark synchronous transfers versus streaming, on-demand pinning, group size
+and `record_stream` under real host RAM limits. Add the MoDiff-style staging
+budget before prefetch, including source and transfer copies. Offloading is a
+capacity technique and can increase latency; select it by measured fit and
+runtime, not by GPU utilization alone.
+
+Then add general Diffusers disk-group capacity as a separate PR. Preserve the
+existing MiniMax INT8 disk cache. Allocate storage per component and new hook
+owner/load, with revision identity, free-space checks, quotas and cancellation/
+crash cleanup. Test equal-shaped wrong-weight reuse, direct parameter/buffer
+access and encode/decode entry points. Keep one placement owner per tensor and
+remove old hooks/maps before changing policy.
+
+**Exit gate:** short and full-length cold/warm runs for each admitted workflow;
+bounded RAM/VRAM/disk peaks; a measured capacity or latency benefit; safe model
+replacement/cancel/retry; no regression of the resident path. Do not promote the
+existing partial/disk candidate until its outstanding host-memory failure is
+closed on the intended 32-GB machine.
+
+#### 5. Qualify optional attention and compilation recipes
+
+Keep native SDPA as the baseline. Benchmark FlashAttention/xFormers on NVIDIA
+and supported AITER/native paths on ROCm with real model head dimensions,
+dtypes, masks, prefill and one-token decode. An installed package or a top-level
+dispatcher flag does not establish use in every component. Add only exact
+wheel/driver/Torch combinations to staged optional runtime packages; verify
+real forwards before activation and retain the previous working environment.
+
+Evaluate regional compilation before full-pipeline compilation. Require actual
+compiled-region/kernel evidence, cold compile cost, warm latency, shape-change
+behavior and break-even request count. Bound compiler caches and invalidate by
+model/runtime/hardware/driver/policy identity. Triton is a provider for supported
+recipes, not a universal performance switch or mandatory stem dependency.
+Validate compile/attention/offload combinations as combinations.
+
+Review any required Diffusers upgrade in a separate dependency PR with exact
+pins and all current model/workflow contracts. Phases 1–3 can proceed using the
+current runtime. New upstream APIs do not justify a blanket upgrade or copying
+MoDiff's newer pin without compatibility tests.
+
+**Exit gate:** repeatable latency improvement exceeding baseline variation,
+bounded startup/cache cost, no model-switch or supported-shape regressions,
+and audio acceptance. If a recipe does not outperform native SDPA on a hardware
+class, leave it unavailable for automatic selection on that class.
+
+#### 6. Add explicit advanced memory/quality options and broader hardware
+
+After placement is reliable, evaluate FP8 layerwise storage with validated
+compute dtype/exclusions; additional TorchAO/Quanto/GGUF formats only for models
+with matching loader/operator support; and model-specific VAE slicing/tiling or
+convolution layout. Treat inherited no-op/unimplemented methods as unsupported.
+Keep current saved INT8 assets and original weights separate. Quantizer, packing,
+source revision and excluded layers belong in derived-artifact identity.
+
+Approximate denoiser caches and quantized attention are later opt-in experiments:
+they can change audio and use extra memory. Preserve MiniMax's existing KV cache;
+any alternative cache requires its actual custom-loop integration. The previously
+rejected NF4 artifact remains excluded. Never automatically reduce musical
+duration, diffusion steps, guidance or model quality to achieve a benchmark.
+
+Qualify best-fitting single-GPU selection before general multi-GPU device maps.
+Evaluate sharding as capacity first and measure interconnect cost; device maps
+do not imply parallel autoregressive decoding. Add MPS/unified-memory and XPU
+recipes only after operator, package and real-forward tests. For Windows AMD,
+first check native ROCm eligibility; DirectML complex-STFT execution stays
+excluded. A CPU-FFT/GPU-transformer split is a separate feasibility experiment,
+not an assumed fix or advertised option.
+
+**Exit gate:** separate real-output, resource and listening evidence per model,
+format, placement and hardware class. Approximate/precision-changing techniques
+remain opt-in until their exact recipe is accepted; unsupported combinations
+are disabled with a reason.
+
+#### Product options and acceptance across all phases
+
+Keep ordinary use automatic. Extend the existing device/section controls and
+generation details rather than adding every library flag to the main dialog.
+
+| Proposed option | Contract |
+| --- | --- |
+| Automatic / Lower memory | Choose among qualified placements within the selected model/precision; lower-memory mode may be slower |
+| Leave resources for playback/recording | Explicit host/device headroom and worker CPU budget; control-thread policy only |
+| Keep models ready / Release idle AI memory | Bounded warm cache and a safe idle-release action; never evict an active forward |
+| Choose processing device | Automatic best-fitting device, CPU, or a qualified GPU; explain exclusions and actual fallback |
+| Advanced acceleration | Show only qualified optional kernels/compilation for this model/runtime/device |
+| Advanced model format/cache | Explicit separately qualified quality/capacity choices; preserve original weights and accepted defaults |
+| Processing details | Actual device, precision, placement, estimated/measured RAM/VRAM, phase time, fallback and diagnostics |
+
+Hardware policy belongs in local preferences, outside portable musical state.
+If project/preset state must change, require old-state migrations and round-trip
+coverage before schema changes. All clip/track changes, including AI output
+publication, retain undo/redo. CPU offload is not a separate useful GPU-memory
+mode when processing is already CPU-only.
+
+Start physical coverage with RTX 3060 12 GB (reporter class), RTX 4080 16 GB,
+CPU-only Windows/Linux, and the existing Linux Radeon 8060S. Add a genuinely
+small-VRAM NVIDIA device, a larger generation-capacity device, discrete AMD,
+Apple Silicon unified-memory systems and Intel XPU as hardware becomes
+available. Budget simulation qualifies selection logic only. Do not advertise
+untested hardware as supported by extrapolating from a different GPU.
+
+Each PR needs meaningful unit/adapter regressions and relevant real inference.
+Use short/31-second/full-song stem fixtures and short/30/60-second plus declared
+maximum generation workloads as appropriate; retain cold/warm, repaired/fresh,
+memory-pressure, silent/partial input, cancel and model-switch coverage. Compare
+matched inputs/settings with repeated timings and medians/ranges. Report
+`pass`, `fail`, `diagnostic_only` and `not_asserted` separately. User audition
+remains the final quality gate. Packaged native/UI qualification, current Debug
+assets, manual/website documentation and release-note gates still apply before
+handoff or publication.
+
+#### Current implementation and qualification boundary
+
+The development tree now includes a native headless installer/worker harness,
+transactional candidate activation on Windows/Linux, extended-path Windows ZIP
+extraction, shared process ownership with completion tokens, explicit idle release,
+storage-aware tensor accounting, sampled host-memory/stage diagnostics, and one
+bounded CPU retry after a structured GPU OOM. The pinned separator's loader can
+log a real OOM and then call `sys.exit(1)` with generic checkpoint advice; the
+worker retains the first error and emits its classification before exiting.
+Cancellation invalidates pending frontend polls. Every requested output must be
+present and readable before a single undoable track publication.
+Imported clips retain the source trim offset and selected length. Group identity
+is stable across undo/redo; undo does not remove an existing same-named group.
+Windows worker retirement waits for the complete owned Job to become empty;
+a failed stop acknowledgement keeps the resource reservation in place.
+An explicit **Repair Stem Separation** action bypasses the already-ready shortcut
+in both the store and native installer. It retains installed feature dependencies
+when staging a replacement runtime, including generation whose old performance
+profile needs requalification. Setup waits for the initial runtime check before
+choosing that feature union. Cached models remain in their existing directory.
+
+`qualify_ai_native.py` drives the actual built app with an isolated marked data
+root. Native fresh CUDA and CPU installation-to-six-stem cases passed on Windows;
+the GPU case records real parameter placement and activation allocations. An
+allocator-limit injection passed GPU-failure retirement followed by one CPU
+retry; this is not a real hardware-memory-pressure qualification. Native worker
+cancellation and invalid-runtime-layout rollback passed. An earlier corrupt-hash
+qualification timed out and remains a failed report, not a rollback pass. The workflow now includes a built-host CPU gate as well as
+the earlier CLI installer matrix. CI changes have not been run remotely yet.
+The explicit repair path also passed native CPU-to-CUDA upgrade on the Windows
+NVIDIA machine: the pre-repair runtime was actually probed ready on CPU, repair
+activated a different slot, the previous Torch files retained their hash, and
+six valid stems came from model tensors on `cuda:0`. The native regressions cover
+retaining existing stem dependencies when adding generation and retaining
+generation dependencies when repairing stems.
+
+`stem_streaming.py` is an explicit `--memory-mode streaming-preview` candidate.
+It uses bounded decode/resampling, exact existing windows and normalization,
+rolling reconstruction and temporary float stems, then publishes a completed
+directory. Short, silent/mono, resampling, repeated-tail and failed-forward tests
+pass. Thirty-one-second Windows CUDA/CPU and Linux ROCm/CPU inference passed.
+The Windows 90-second real-song comparison matched every stored sample in all
+six stems. The final complete 410.870-second MP3 comparison also matched every
+stored sample of all six stems against unsectioned CUDA reference processing.
+Whole-song CUDA streaming also passed finite-output and duration
+checks, with roughly 1.5 GiB sampled worker RSS. These are working-set observations,
+not uncontended performance claims or proof of every decoder/hardware path.
+The complete 410.870-second verified song also passed CPU-only processing in
+30-second sections with six finite stereo outputs. Its model receipt contains
+only CPU parameters. A separate NVIDIA hardware-counter trace observed global
+used VRAM rising from 4,306 to 6,882 MiB with up to 100% GPU utilization during a
+31-second CUDA run; other applications were not subtracted. Per-worker CUDA
+tensor/allocation receipts remain the evidence tying inference to this worker.
+
+The first real-song listening input was incorrectly assumed to be interchangeable
+with a same-named MP3. The WAV contained little of the project's main vocal; the
+user rejected both reference and streaming excerpts from it. Reruns from the MP3
+again matched all six stems exactly, and the user confirmed expected singing in
+the exact new 20-second vocal preview. Full-song and other-stem subjective quality
+remain unasserted. The project and original media were not modified. This source
+selection failure is distinct from the issue #38 runtime/DirectML crash.
+
+On Linux Radeon 8060S, FP16/BF16 alone used about 7.1 GiB peak device allocations,
+more than the current FP32 path's approximately 6.74 GiB. BF16 also required a
+model-local float32 boundary before complex reconstruction. With explicit FP16
+and `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1`, the same 31-second fixture passed
+at about 1.87 GiB and had lower observed latency. MoDiff sets this environment
+option; OpenStudio does not enable it by default. A subsequent bounded CPU
+profiler trace of three real FP16 attention calls recorded
+`aten::_scaled_dot_product_flash_attention` and `aten::_flash_attention_forward`
+for both time and frequency attention shapes; no GPU kernel timing was asserted.
+The subsequent three-run full-song matrix measured medians of 216.508 seconds
+for FP32 and 69.842 seconds for FP16/AOTriton, with peaks of 6.74 and 1.87 GiB.
+The user accepted the presented vocal, guitar and drum comparison. The new
+opt-in recipe checks exact runtime, architecture and model/config hashes; other
+configurations keep standard precision. Rolling FP16 output also matched all
+six full-buffer stems exactly. Standard precision remains the default.
+
+The Windows native cancellation/locked-file cleanup and Windows/Linux decoder
+gates now pass. Automatic rolling selection was tested with a controlled RAM
+limit and full-song CUDA output parity. Native/UI packaging on all target
+platforms, real memory-pressure/live-audio checks and broader listening remain.
+
+Generation work now includes stable ACE-Step automatic disk placement for the
+tested Windows CUDA adapter, real compiled-region evidence, bounded compiler
+cache ownership, repeated 30/60-second worker requests and native dependency
+handshake checks. Compilation remains opt-in. Stable Audio now has app setup
+for an isolated, pinned Torch 2.10/CUDA 12.8/Triton Windows runtime, with two real
+compiled generations required before atomic activation. Repair stages a new
+slot and retains the prior selection if validation fails. The reviewed closure
+and Diffusers source revision are checked before model allocation. Windows
+uses one Inductor compile worker because its subprocess pool's `pass_fds` path
+is unsupported. Cold compilation cost and scoped listening acceptance are
+recorded in the November report; broader qualification remains open. The new TorchAO INT8 Stable
+Audio candidate failed user audition and is blocked. Original weights and
+separately saved INT8 assets remain separate. The separately auditioned Stable
+Audio FP8-storage recipe is an explicit local option on the reviewed Windows
+RTX 4080 runtime. Selected transformer weights use FP8 storage with BF16
+computation; boundaries, conditioning and normalization retain normal precision.
+Both Torch 2.10 and 2.11 qualification runtimes passed real forwards; the Torch
+2.10 persistent worker passed 30/60/300-second requests and variation, inpainting
+and continuation, including restoration of storage precision after each forward.
+The exact preview was accepted; quality of other outputs is not asserted.
+The separate Linux gfx1151 ACE-Step MIOpen fast-selection recipe passed three
+fresh-worker source-workflow sequences and the paired preview audition. It is
+an explicit local option, scoped to the reviewed Torch/HIP/MIOpen/Diffusers
+versions and cached model revision/configurations. It retains normal precision,
+requires resident placement, and does not change the Automatic default. Native
+hardware status includes platform and GPU architecture for option availability;
+the worker validates the full recipe before loading weights.
+Execution preferences apply at the native request boundary and do not enter
+portable project state. MiniMax's updated planner and
+component-by-component disk loading now include automatic staged loading when
+host memory cannot fit the normal CPU loading peak. Original 30-second Windows
+CUDA and longer structured Linux ROCm normal-worker requests passed. The Linux
+full 300-second capacity stress test and native Windows all-model handoff also
+passed; their exact scope and platform limits are recorded separately. See the
+[November report](ai-optimization-qualification-2026-11-06.md) for exact artifacts,
+retained failures and `not_asserted` platform/quality limits. Phases 4–6 are not
+declared universally complete.
+
+### Automatic generation loading and request growth — November 7, 2026
+
+The shared service separates **loading headroom** from **inference placement**.
+MiniMax's header-only plan reads component and layer sizes, normalized tokenizer
+counts and maximum requested KV storage before allocating model weights. The
+worker repeats planning with live tensors and the current device/host budgets.
+Low host memory chooses component-by-component immutable disk backing instead
+of overlapping every CPU component and conversion peak. A component can load
+directly on the selected GPU when it fits there and CPU conversion would exceed
+host headroom; archiving returns its parameters and registered buffers to CPU.
+Writes finish before loading the next component, and temporary device loading
+allocations are collected/released before assigning the inference budget.
+
+| Model | Automatic inference placement | Request boundary |
+|---|---|---|
+| Stable Audio | Resident or component offload; group/sequential modes remain excluded | Replans for the requested duration and retires shared source-pipeline hooks before a placement rebuild |
+| ACE-Step | Resident, component/group offload, and bounded temporary disk on the qualified adapter | Rechecks device/host headroom; disk placement stays stable until unload |
+| MiniMax Original | Resident when all weights/cache fit; component/group placement with sufficient host memory; disk-backed partial residency when host loading cannot fit | A larger duration **or normalized input-token count** rebuilds every placement's budget, including resident and ordinary group modes |
+
+Disk-backed MiniMax retains a bounded GPU prefix plus fixed LM/RVQ stages and
+at most two prefetch blocks. Zero retained transformer blocks still means GPU
+forward execution with streamed weights, not CPU inference. The byte planner
+includes the stage that must coexist with the language model, request KV,
+transfer staging and reserve. Unknown/malformed layouts do not establish a
+capacity guarantee. FP32 CUDA can use staged loading without first requiring
+space for an entire additional CPU model; CPU/resident FP32 retains its host
+capacity guard. The new regression covers that distinction without claiming
+physical FP32 hardware qualification.
+
+This service does not choose lower precision or alter duration, lyrics, seed,
+steps or model. Explicit compilation/FP8/saved-INT8 keep their separate policies;
+unsupported combinations do not gain qualification through Automatic. The
+native offline qualification sequence exercises the real AudioEngine dispatch,
+warm worker ownership, busy memory-release rejection and cross-model handoff.
+Its existing-model/runtime fixtures and measured results are documented in the
+[November report](ai-optimization-qualification-2026-11-06.md).

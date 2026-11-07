@@ -1,21 +1,8 @@
 {
   "steps": [
     {
-      "type": "pip_install",
-      "description": "Installing CPU stem separation packages",
-      "stepLabel": "Installing CPU stem separation packages",
-      "features": [
-        "stemSeparation"
-      ],
-      "packages": [
-        "audio-separator[cpu]==0.41.1"
-      ]
-    },
-    {
       "type": "pip_uninstall",
-      "features": [
-        "audioGeneration"
-      ],
+      "features": ["stemSeparation", "audioGeneration"],
       "packages": [
         "torch",
         "torchvision",
@@ -26,15 +13,24 @@
       "type": "pip_install",
       "description": "Installing ROCm-capable PyTorch wheels",
       "stepLabel": "Installing ROCm PyTorch wheels",
-      "features": [
-        "audioGeneration"
-      ],
+      "features": ["stemSeparation", "audioGeneration"],
       "packages": [
         "torch==2.9.1+rocm7.2.0.lw.git7e1940d4",
         "torchvision==0.24.0+rocm7.2.0.gitb919bd0c",
         "torchaudio==2.9.0+rocm7.2.0.gite3c6ee2b"
       ],
       "findLinks": "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/"
+    },
+    {
+      "type": "pip_install",
+      "description": "Installing CPU stem separation packages",
+      "stepLabel": "Installing CPU stem separation packages",
+      "features": [
+        "stemSeparation"
+      ],
+      "packages": [
+        "audio-separator[cpu]==0.41.1", "librosa==0.11.0", "audioread==3.1.0"
+      ]
     },
     {
       "type": "pip_install",

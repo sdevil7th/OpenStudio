@@ -8,19 +8,10 @@
   "packageSource": "repo-pinned-windows-acceleration-manifest",
   "steps": [
     {
-      "type": "pip_install",
-      "description": "Installing GPU stem separation packages",
-      "stepLabel": "Installing GPU stem separation packages",
-      "features": ["stemSeparation", "audioGeneration"],
-      "packages": [
-        "audio-separator[gpu]==0.41.1"
-      ]
-    },
-    {
       "type": "pip_uninstall",
       "description": "Removing default PyTorch wheels before applying the CUDA overlay",
       "stepLabel": "Removing default PyTorch wheels",
-      "features": ["audioGeneration"],
+      "features": ["stemSeparation", "audioGeneration"],
       "packages": [
         "torch",
         "torchvision",
@@ -31,13 +22,23 @@
       "type": "pip_install",
       "description": "Installing CUDA-capable PyTorch wheels from the official PyTorch index",
       "stepLabel": "Downloading CUDA PyTorch wheels",
-      "features": ["audioGeneration"],
+      "features": ["stemSeparation", "audioGeneration"],
       "downloadHint": "This is the largest Windows AI download and can take several minutes depending on your connection.",
       "isLargeDownload": true,
       "indexUrl": "https://download.pytorch.org/whl/cu128",
       "packages": [
         "torch==2.11.0+cu128",
+        "torchvision==0.26.0+cu128",
         "torchaudio==2.11.0+cu128"
+      ]
+    },
+    {
+      "type": "pip_install",
+      "description": "Installing GPU stem separation packages",
+      "stepLabel": "Installing GPU stem separation packages",
+      "features": ["stemSeparation", "audioGeneration"],
+      "packages": [
+        "audio-separator[gpu]==0.41.1", "librosa==0.11.0", "audioread==3.1.0"
       ]
     },
     {

@@ -297,6 +297,32 @@ int OwnedChildProcess::readProcessOutput(void* destination, int capacity)
 OwnedChildProcess::OwnedChildProcess() = default;
 OwnedChildProcess::~OwnedChildProcess() { kill(); }
 
+bool OwnedChildProcess::terminateAndWait(int timeoutMs)
+{
+    if (! impl) return true;
+    if (! kill()) return false;
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + juce::jmax(0, timeoutMs);
+    do
+    {
+        if (retirementConfirmed()) return true;
+        juce::Thread::sleep(5);
+    } while (juce::Time::getMillisecondCounterHiRes() < deadline);
+    return false;
+}
+
+bool OwnedChildProcess::retirementConfirmed() const
+{
+    if (! impl) return true;
+   #if JUCE_WINDOWS
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting {};
+    return WaitForSingleObject(impl->process, 0) == WAIT_OBJECT_0
+        && QueryInformationJobObject(impl->job, JobObjectBasicAccountingInformation,
+        &accounting, static_cast<DWORD>(sizeof(accounting)), nullptr) && accounting.ActiveProcesses == 0;
+   #else
+    return ! isRunning();
+   #endif
+}
+
 bool OwnedChildProcess::waitForProcessToFinish(int timeoutMs, const std::atomic<bool>& keepRunning)
 {
     const auto started = juce::Time::getMillisecondCounterHiRes();

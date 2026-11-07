@@ -16231,6 +16231,9 @@ MainComponent::MainComponent(AudioEngine& audioEngineIn,
                     .withNativeFunction ("resetAiTools", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         completion(audioEngine.resetAiTools());
                     })
+                    .withNativeFunction ("releaseIdleAIMemory", [this] (const juce::Array<juce::var>&, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
+                        completion(audioEngine.releaseIdleAIMemory());
+                    })
                     .withNativeFunction ("separateStemsAsync", [this] (const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion completion) {
                         if (args.size() >= 3)
                             completion(audioEngine.separateStemsAsync(args[0].toString(), args[1].toString(), args[2].toString()));

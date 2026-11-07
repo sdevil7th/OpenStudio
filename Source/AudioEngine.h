@@ -1,5 +1,6 @@
 #include "BuiltInIRPreparation.h"
 #pragma once
+#include "AIResourceCoordinator.h"
 #include "RealtimeTrackExecutor.h"
 #include "RealtimeCallbackTrace.h"
 #include "RealtimeDiagnosticsConfig.h"
@@ -739,6 +740,7 @@ public:
     juce::var installAiTools(bool userConfirmedDownload);
     juce::var installAiTools(const juce::String& optionsJSON);
     juce::var resetAiTools();
+    juce::var releaseIdleAIMemory();
     juce::var separateStemsAsync(const juce::String& trackId, const juce::String& clipId, const juce::String& optionsJSON);
     juce::var getStemSeparationProgress();
     void cancelStemSeparation();
@@ -778,6 +780,8 @@ public:
     juce::Optional<juce::AudioPlayHead::PositionInfo> getPosition() const override;
 
 private:
+    friend class AIQualificationHarness;
+    juce::File qualificationGeneratedAudioRoot;
     struct RealtimeResolvedSend
     {
         TrackProcessor::RealtimeSendInfo config;
@@ -1485,6 +1489,9 @@ private:
     // Source Separation (Phase 8 + Phase 10) — Python subprocess
     StemSeparator stemSeparator;
     AITrackEngine aiTrackEngine;
+    AIResourceCoordinator aiResources;
+    std::atomic<AIResourceCoordinator::Token> generationResourceToken { 0 }, separationResourceToken { 0 }, installResourceToken { 0 };
+    void reconcileAIResources();
 
     // Stem file cache: hash(filePath+offset+duration) -> stem files (name -> path)
     std::map<juce::String, juce::StringPairArray> stemFileCache;

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { getAIExecutionPreference, subscribeAIExecutionPreferences } from "../services/aiExecutionPreferences";
 import { nativeBridge, type AIGenerationPreflight } from "../services/NativeBridge";
 import { Button } from "./ui";
 
@@ -12,7 +13,9 @@ export function AIGenerationHardwareCheck({ modelId, workflowId, params, enabled
 }) {
   const [refresh, setRefresh] = useState(0);
   const [state, setState] = useState<{ key: string; report?: AIGenerationPreflight }>({ key: "" });
-  const requestKey = JSON.stringify({ modelId, workflowId, params });
+  const executionPreference = useSyncExternalStore(subscribeAIExecutionPreferences,
+    () => getAIExecutionPreference(modelId), () => "standard" as const);
+  const requestKey = JSON.stringify({ modelId, workflowId, params, executionPreference });
   const latest = useRef(requestKey);
   latest.current = requestKey;
   useEffect(() => {

@@ -201,7 +201,7 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 |---|---:|---:|
 | AI tools runtime status, install, cancel, reset flow | H | H |
 | Feature-selective AI setup with hardware/model readiness and background progress | H | H |
-| Stem separation workflow with selectable stems and progress polling | H | H |
+| Stem separation with selectable stems, CPU-only processing, rolling buffers, optional 30-second sections and qualified Linux gfx1151 FP16 acceleration | H | H |
 | Stem separation result import into new tracks/clips | H | H |
 | AI track type and AI track header controls | M | H |
 | ACE-Step text-to-music and lyrics-plus-style generation | H | H |
@@ -210,6 +210,7 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 | ACE-Step/Stable Audio source-conditioned variation, inpaint-selection, and continue-clip workflows | H | H |
 | AI setup totals, remaining bytes, cache reuse, persistent active-job display, and logs | M | H |
 | AI generation stage/step/frame progress and cancellation | M | H |
+| Automatic generation memory planning across ACE-Step, Stable Audio and MiniMax, with request-growth checks, bounded MiniMax loading and shared worker handoff (development checkout; hardware scope in November qualification report) | H | H |
 
 ## Workflow / UI Customization
 
@@ -254,6 +255,7 @@ These have real code surfaces, but should not be counted as fully delivered DAW 
 | Signed updates and macOS/Linux replacement | Current checkout authenticates manifests/packages and supports guarded replacement of eligible user-owned app bundles/AppImages with retained backups. Requires a new release; real installed upgrades, unsigned Gatekeeper acceptance, AppImage/FUSE, and Store delivery remain unqualified. See [updater guide](updater-security-and-migration.md) |
 | Separate-process plugin hosting | Windows-only per-plugin opt-in, applied on next load; adds latency, limits audio to 32 active channels, and excludes ARA. Fault reporting/restart exists, but individual vendor compatibility requires qualification |
 | AI hardware check and adaptive memory placement | Current checkout provides advisory request estimates and supported workers adapt placement/offloading; estimates are not admission guarantees, speed or quality claims, or proof of support on every GPU |
+| Local generation optimization choices (development) | Qualified RTX 4080 ACE-Step disk offload and Stable Audio FP8 storage/compilation; isolated compiler setup validates real forwards before activation. Linux gfx1151 ACE-Step offers the qualified MIOpen startup recipe. Exact preview auditions and hardware/runtime limits are recorded in [November qualification](ai-optimization-qualification-2026-11-06.md); Automatic remains the default |
 | Polyphonic pitch correction / solo-note resynthesis | Detection and MIDI extraction exist; `PolyResynthesizer` is still stub-like |
 | AAF import | Stubbed in session interchange |
 | LTC output | Bridge stub exists, not a real implementation |

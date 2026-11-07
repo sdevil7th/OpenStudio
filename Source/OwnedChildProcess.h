@@ -16,6 +16,10 @@ public:
     bool isRunning() const;
     int readProcessOutput(void* destination, int capacity);
     bool kill();
+    // A stop request is not a retirement acknowledgement. Control threads may
+    // wait boundedly before reusing a worker's memory budget or scratch files.
+    bool terminateAndWait(int timeoutMs = 2000);
+    bool retirementConfirmed() const;
     bool waitForProcessToFinish(int timeoutMs, const std::atomic<bool>& keepRunning);
     juce::uint32 getExitCode() const;
     unsigned long getProcessId() const;

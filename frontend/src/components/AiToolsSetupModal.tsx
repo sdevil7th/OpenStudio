@@ -1,4 +1,5 @@
 import { AIModelVariantSelector, type AIModelVariant } from "./AIModelVariantSelector";
+import { AIExecutionOptions } from "./AIExecutionOptions";
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -352,6 +353,8 @@ export default function AiToolsSetupModal() {
   const [stableAudioSetupBusy, setStableAudioSetupBusy] = useState(false);
   const [huggingFaceToken, setHuggingFaceToken] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [memoryReleasePending, setMemoryReleasePending] = useState(false);
+  const [memoryReleaseMessage, setMemoryReleaseMessage] = useState("");
 
   useEffect(() => {
     setModelVariant(aiToolsStatus.installInProgress && aiToolsStatus.requestedModelId === selectedItemId
@@ -496,6 +499,32 @@ export default function AiToolsSetupModal() {
 
   const handleReset = async () => {
     await resetAiTools();
+  };
+
+  const handleRepairStems = async () => {
+    await installAiTools({ userConfirmedDownload: true, repairRuntime: true,
+      selectedFeatures: ["stemSeparation"], requestedFeature: "stemSeparation" });
+  };
+
+  const handlePrepareCompiler = async () => {
+    setStableAudioSetupError("");
+    await installAiTools({ userConfirmedDownload: true, prepareOptimization: "compile", repairRuntime: true,
+      selectedFeatures: ["audioGeneration"], requestedFeature: "audioGeneration",
+      modelId: STABLE_AUDIO_3_MODEL_ID, modelVariant: "original" });
+  };
+
+  const handleReleaseMemory = async () => {
+    setMemoryReleasePending(true);
+    try {
+      const result = await nativeBridge.releaseIdleAIMemory();
+      setMemoryReleaseMessage(result.success
+        ? result.released ? "Idle AI memory released. The model will reload when needed." : "No idle AI worker was using memory."
+        : result.error ?? "AI memory could not be released.");
+    } catch (error) {
+      setMemoryReleaseMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMemoryReleasePending(false);
+    }
   };
 
   const renderReadyPane = () => (
@@ -779,6 +808,8 @@ export default function AiToolsSetupModal() {
 
             {selectedItem.modelId ? <AIModelVariantSelector modelId={selectedItem.modelId} value={modelVariant}
               status={aiToolsStatus} onChange={setModelVariant} disabled={aiToolsStatus.installInProgress} setup /> : null}
+            {selectedItem.modelId ? <AIExecutionOptions modelId={selectedItem.modelId} variant={modelVariant}
+                status={aiToolsStatus} disabled={aiToolsStatus.installInProgress} onPrepareCompiler={() => void handlePrepareCompiler()} /> : null}
 
             {aiToolsStatus.installInProgress
               ? <div className="space-y-3 rounded border border-daw-border bg-daw-dark/50 p-4">
@@ -808,6 +839,7 @@ export default function AiToolsSetupModal() {
             ) : null}
 
             {renderDetails()}
+            {memoryReleaseMessage && <p role="status" className="break-words text-sm text-daw-text-secondary">{memoryReleaseMessage}</p>}
           </main>
         </div>
       </ModalContent>
@@ -820,6 +852,18 @@ export default function AiToolsSetupModal() {
             <Button variant="ghost" onClick={() => void handleOpenInstallLog()} icon={<Info size={14} />}>
               Open Install Log
             </Button>
+          ) : null}
+          {!aiToolsStatus.installInProgress ? (
+            <Button variant="ghost" onClick={() => void handleReleaseMemory()} disabled={memoryReleasePending}>
+              {memoryReleasePending ? "Releasing memory..." : "Release idle AI memory"}
+            </Button>
+          ) : null}
+          {!aiToolsStatus.installInProgress ? (
+            selectedItem.featureId === "stemSeparation" && selectedItem.ready ? (
+              <Button variant="ghost" onClick={() => void handleRepairStems()} title="Rebuild the runtime and keep downloaded models.">
+                Repair Stem Separation
+              </Button>
+            ) : null
           ) : null}
           {!aiToolsStatus.installInProgress ? (
             <Button variant="ghost" onClick={() => void handleReset()} icon={<RotateCcw size={14} />}>

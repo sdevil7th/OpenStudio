@@ -3910,12 +3910,18 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     },
     installAiTools: async (options = {}) => {
         const currentStatus = get().aiToolsStatus;
+        const isCompilerSetup = options.prepareOptimization === "compile";
         const isStableAudioImport = isDiffusersImportModel(options.modelId) || options.modelVariant === "int8";
         const selectedFeatures = options.selectedFeatures?.length
           ? options.selectedFeatures
           : [options.requestedFeature ?? "stemSeparation"];
         const selectedFeaturesReady = selectedFeatures.every((featureId) => isAiFeatureReady(currentStatus, featureId));
-        if (currentStatus.installInProgress || (!isStableAudioImport && selectedFeaturesReady)) return undefined;
+        if (currentStatus.installInProgress || (!isStableAudioImport && selectedFeaturesReady && !options.repairRuntime)) return undefined;
+        if (!isStableAudioImport && currentStatus.state === "checking") {
+          get().openAiToolsSetup(options.requestedFeature);
+          get().showToast("Wait for the current AI runtime check to finish before setup.", "info");
+          return undefined;
+        }
 
         if (!isStableAudioImport && currentStatus.statusWarningCode === "reconciling_install_state") {
           get().openAiToolsSetup(options.requestedFeature);
@@ -3935,13 +3941,13 @@ export const useDAWStore = create<DAWState & DAWActions>()(
         }
 
       get().showToast(
-        isStableAudioImport
+        isCompilerSetup ? "Optional compilation setup is starting in the background." : isStableAudioImport
           ? "Diffusers audio setup is starting in the background."
           : "Selected AI features are being installed in the background.",
         "info",
       );
 
-      const pendingMessage = isStableAudioImport
+      const pendingMessage = isCompilerSetup ? "Preparing optional compilation runtime..." : isStableAudioImport
         ? "Preparing Diffusers audio model setup..."
         : currentStatus.buildRuntimeMode === "downloaded-runtime"
           ? "Checking OpenStudio AI runtime downloads..."
@@ -5123,7 +5129,9 @@ export const useDAWStore = create<DAWState & DAWActions>()(
     // ========== Markers + Tempo Map → store/actions/markers.ts ==========
 
     // ========== UI State (extracted to store/actions/uiState.ts) ==========
-    completeStemSeparation: (sourceTrackId, _sourceClipId, clipName, stemFiles, sourceClipStartTime) => {
+    completeStemSeparation: (sourceTrackId, sourceClipId, clipName, stemFiles, sourceClipStartTime) => {
+      const sourceClip = get().tracks.find(track => track.id === sourceTrackId)?.clips.find(clip => clip.id === sourceClipId);
+      if (!sourceClip) return;
       const STEM_COLORS: Record<string, string> = {
         Vocals: "#ec4899", Drums: "#f97316", Bass: "#3b82f6",
         Guitar: "#a855f7", Piano: "#06b6d4", Other: "#22c55e",
@@ -5149,8 +5157,8 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           name: stem.name,
           filePath: stem.filePath,
           startTime: sourceClipStartTime,
-          duration: stem.duration || 0,
-          offset: 0,
+          duration: Math.min(sourceClip.duration, Math.max(0, (stem.duration ?? sourceClip.offset + sourceClip.duration) - sourceClip.offset)),
+          offset: sourceClip.offset,
           color: STEM_COLORS[stem.name] || "#666666",
           volumeDB: 0,
           fadeIn: 0,
@@ -5161,6 +5169,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
       }
 
       const groupName = `Stems: ${clipName}`;
+      const groupId = crypto.randomUUID();
       const wasSourceMuted = get().tracks.find((t) => t.id === sourceTrackId)?.muted ?? false;
 
       const command: Command = {
@@ -5188,7 +5197,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             }
             const newGroups = stemTrackIds.length > 1
               ? [...state.trackGroups, {
-                  id: crypto.randomUUID(), name: groupName,
+                  id: groupId, name: groupName,
                   leadTrackId: stemTrackIds[0], memberTrackIds: stemTrackIds,
                   linkedParams: ["volume", "mute", "solo"],
                 }]
@@ -5210,7 +5219,7 @@ export const useDAWStore = create<DAWState & DAWActions>()(
             }
             return {
               tracks: newTracks,
-              trackGroups: s.trackGroups.filter((g) => g.name !== groupName),
+              trackGroups: s.trackGroups.filter((g) => g.id !== groupId),
             };
           });
           // Remove from C++ backend

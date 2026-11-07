@@ -69,17 +69,33 @@ lives in [Testing](testing.md) and the
   setup reliable on clean systems.
 - Preserve old projects and presets while strengthening audio-thread safety,
   deterministic state migration, and failure recovery.
-- Implement and qualify [AI generation memory and speed improvements](runtime-dependency-contract.md#remaining-implementation-plan-september-12-2026),
-  extending the shared execution policy with qualified optional attention
-  packages and platform testing. MiniMax measures actual input tokens, exposes
+- Implement and qualify the [AI memory, speed and hardware plan](runtime-dependency-contract.md#ai-optimization-implementation-plan-november-6-2026).
+  Current results and retained failures are in the [November qualification
+  report](ai-optimization-qualification-2026-11-06.md). Windows/Linux decoder
+  checks, native rolling cancellation, full-song CUDA parity and the opt-in
+  gfx1151 FP16/AOTriton recipe pass their recorded gates. Automatic ACE-Step disk
+  placement and compiled generation pass repeated 30/60-second worker tests;
+  the Linux gfx1151/MIOpen startup recipe passed three fresh-worker source
+  workflow sequences and its paired audition, and is available as a local opt-in.
+  Stable Audio optional compiler setup now stages a separate runtime and validates
+  real compiled forwards before activation; its paired preview passed audition.
+  Broader hardware coverage remains open.
+  The new TorchAO INT8 Stable Audio preview failed audition and is blocked.
+  Continue optional attention-package and platform qualification. MiniMax measures actual input tokens, exposes
   selected precision, and stops unqualified INT8 requests before silently
-  loading unquantized weights. Request-boundary CUDA cache cleanup is being
-  requalified on the local Windows RTX 4080; the latest full-duration test
-  stopped under system RAM pressure. Full cold/warm capacity and normal-worker
-  validation remain pending, and the old local profile is not promoted to the
-  updated worker. The user's earlier short-sample INT8 audition remains recorded.
-  Unquantized partial residency and disk staging remain experimental. Warm
-  worker reuse and generation/separation resource handoff are implemented.
+  loading unquantized weights. Automatic now separates MiniMax loading headroom
+  from inference placement, stages components through disk when host memory is
+  limited, and rebuilds every placement for larger duration or lyrics-token
+  budgets. Original Windows CUDA 30-second generation, Linux ROCm normal
+  30/60-second and structured 300-second-maximum requests passed; the latter
+  ended normally at 125.56 seconds. The separate EOS-suppressed full 300-second
+  capacity run passed all phases, exact output geometry and process retirement
+  on the 128 GiB Linux host. Native Windows all-model warm reuse, resident/offload changes,
+  exclusive generation/separation ownership and worker retirement passed nine
+  requests. Linux ACE-Step 30/60/30 and Stable Audio 30/300/30 automatic sequences
+  also passed. These results do not promote the old INT8 calibration or qualify
+  every hardware family. The user's earlier short-sample INT8 audition remains
+  recorded. See the November report for exact runtime and audio-quality scope.
   Both generation dialogs now expose request-specific memory estimates and
   available hardware headroom. Full-song ACE-Step and Stable Audio timings,
   bounded SAME decoding, and remaining listening/precision limits are recorded
