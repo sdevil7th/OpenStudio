@@ -200,6 +200,7 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | AI tools runtime status, install, cancel, reset flow | H | H |
+| Automatic compatibility repair for installed managed stem runtimes, with staged accelerator validation, retained models, rollback and CPU-only setup preservation (development) | H | H |
 | Feature-selective AI setup with hardware/model readiness and background progress | H | H |
 | Stem separation with selectable stems, CPU-only processing, rolling buffers, optional 30-second sections and qualified Linux gfx1151 FP16 acceleration | H | H |
 | Stem separation result import into new tracks/clips | H | H |

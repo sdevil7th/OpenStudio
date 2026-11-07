@@ -15,6 +15,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import stem_separator as worker
 
 
+class InstalledRuntimeFeatureTests(unittest.TestCase):
+    def test_native_maintenance_can_preserve_generation_dependencies_despite_broken_torch(self):
+        import ai_runtime_probe as probe
+        with patch.object(probe, "_get_dist_version", side_effect=lambda name: "installed" if name in {"audio-separator", "diffusers"} else None), \
+                patch.dict(sys.modules, {"torch": None}):
+            report = probe.probe_runtime_capabilities(include_installed_features=True)
+        self.assertFalse(report["runtimeReady"])
+        self.assertEqual(report["installedRuntimeFeatures"], ["stemSeparation", "audioGeneration"])
+
+    def test_ordinary_worker_probe_does_not_run_the_maintenance_inventory(self):
+        import ai_runtime_probe as probe
+        with patch.object(probe, "_get_dist_version") as distribution, patch.dict(sys.modules, {"torch": None}):
+            report = probe.probe_runtime_capabilities()
+        self.assertNotIn("installedRuntimeFeatures", report)
+        distribution.assert_not_called()
+
+
 class StemWorkerTests(unittest.TestCase):
     def test_only_qualification_starts_profiling_even_if_separation_fails(self):
         with tempfile.TemporaryDirectory() as root:

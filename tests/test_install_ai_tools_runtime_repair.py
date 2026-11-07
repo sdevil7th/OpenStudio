@@ -21,6 +21,74 @@ class FailCalled(Exception):
         self.kwargs = kwargs
 
 
+class AutomaticBackendValidationTests(unittest.TestCase):
+    def test_native_maintenance_arguments_are_accepted_by_real_cli(self):
+        class ParsedArguments(Exception):
+            pass
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(sys, "argv", ["install_ai_tools.py", "--runtime-root", directory,
+                "--models-dir", directory, "--required-backend", "cuda", "--skip-generation-checkpoints"]),
+            patch.object(installer, "write_log"), patch.object(installer, "log_event"),
+            patch.object(installer, "probe_hardware_requirements", side_effect=ParsedArguments),
+        ):
+            # Reach the first hardware operation through the actual parser;
+            # --help would accept unknown arguments without validating them.
+            with self.assertRaises(ParsedArguments):
+                installer.main()
+
+    def test_required_backend_rejects_import_failure_or_cpu_fallback(self):
+        for report in ({"runtimeReady": False, "selectedBackend": "cuda"},
+                       {"runtimeReady": True, "selectedBackend": "cpu"},
+                       {"runtimeReady": True, "selectedBackend": "directml"}):
+            with self.subTest(report=report), self.assertRaises(installer.InstallerStepError) as error:
+                installer.required_backend_validation_command(report, "cuda", Path("python"))
+            self.assertEqual(error.exception.error_code, "required_backend_unavailable")
+
+    def run_validation(self, backend, torch):
+        import contextlib
+        import io
+        command = installer.required_backend_validation_command(
+            {"runtimeReady": True, "selectedBackend": backend}, backend, Path("python"))
+        with patch.dict(sys.modules, {"torch": torch}), contextlib.redirect_stdout(io.StringIO()):
+            exec(command[-1], {})
+
+    def torch(self, *, available=True, hip=None, gpu_tensor=True):
+        from types import SimpleNamespace as NS
+        class Tensor:
+            is_cuda = gpu_tensor
+            def __mul__(self, _other): return self
+            def sum(self): return NS(item=lambda: 256.0)
+        return NS(version=NS(hip=hip), cuda=NS(is_available=lambda: available, synchronize=Mock()),
+                  full=Mock(return_value=Tensor()))
+
+    def test_required_cuda_checks_allocation_kernel_result_and_sync(self):
+        torch = self.torch()
+        self.run_validation("cuda", torch)
+        self.assertEqual(torch.full.call_args.kwargs["device"], "cuda:0")
+        torch.cuda.synchronize.assert_called_once()
+
+    def test_cuda_label_does_not_accept_unavailable_gpu_or_cpu_tensor_or_rocm(self):
+        for torch in (self.torch(available=False), self.torch(gpu_tensor=False), self.torch(hip="7.2")):
+            with self.assertRaises(AssertionError): self.run_validation("cuda", torch)
+
+    def test_cpu_validation_does_not_initialize_cuda(self):
+        torch = self.torch(available=False, gpu_tensor=False)
+        self.run_validation("cpu", torch)
+        self.assertEqual(torch.full.call_args.kwargs["device"], "cpu")
+        torch.cuda.synchronize.assert_not_called()
+
+    def test_required_backend_disables_directml_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "openstudio-ai-backend-plans/ai-runtime-install-plan-windows-directml.json"
+            plan.parent.mkdir(); plan.touch()
+            with patch.object(installer.platform, "system", return_value="Windows"), patch.object(
+                    installer, "load_backend_install_plan", return_value={"backend": "directml"}):
+                self.assertEqual(installer.resolve_fallback_backend_install_plan(root, "cuda")[0], "directml")
+                self.assertIsNone(installer.resolve_fallback_backend_install_plan(root, "cuda", required_backend="cuda"))
+
+
 class RepairWindowsReusedRuntimeTests(unittest.TestCase):
     def make_runtime_layout(self, temp_dir: str) -> tuple[Path, Path, Path, Path]:
         runtime_root = Path(temp_dir) / "stem-runtime"

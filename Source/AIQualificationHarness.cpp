@@ -21,7 +21,11 @@ int AIQualificationHarness::run(const juce::File& configuration)
     if (! config.isObject()) return 2;
     const auto input = juce::File(config.getProperty("input", "").toString());
     if (! input.existsAsFile()) return 2;
-    StemSeparator separator;
+    const bool automaticMaintenance = static_cast<bool>(config.getProperty("automaticRuntimeMaintenance", false));
+    std::unique_ptr<AudioEngine> maintenanceAudio;
+    if (automaticMaintenance) maintenanceAudio = std::make_unique<AudioEngine>(AudioEngine::DeviceStartup::offline);
+    StemSeparator standaloneSeparator;
+    auto& separator = maintenanceAudio ? maintenanceAudio->stemSeparator : standaloneSeparator;
     separator.qualificationDataRoot = root.getChildFile("user-data");
     separator.qualificationDataRoot.createDirectory();
     separator.qualificationManifestUrl = config.getProperty("manifestUrl", "").toString();
@@ -40,12 +44,80 @@ int AIQualificationHarness::run(const juce::File& configuration)
     const auto started = juce::Time::getMillisecondCounterHiRes();
     auto save = [&] (int code, const juce::String& error)
     {
+        const auto probes = separator.qualificationHardwareProbeCount.load();
+        const bool excessiveProbes = code == 0 && automaticMaintenance && probes > 64;
+        if (excessiveProbes) code = 1;
         report->setProperty("status", code == 0 ? "pass" : "fail");
-        report->setProperty("error", error);
+        report->setProperty("error", excessiveProbes ? "Automatic setup repeated hardware probes during download." : error);
+        report->setProperty("hardwareProbeCount", static_cast<int>(probes));
         report->setProperty("elapsedMs", juce::Time::getMillisecondCounterHiRes() - started);
         reportFile.replaceWithText(juce::JSON::toString(juce::var(report.release()), true));
         return code;
     };
+    if (maintenanceAudio)
+    {
+        report->setProperty("scope", "automatic app-update runtime compatibility check, staged repair, backend validation and real stem separation");
+        maintenanceAudio->qualificationAutomaticRuntimeMaintenance = true;
+        const auto before = AIManagedRuntime::getActiveStemRuntimeRoot(separator.qualificationDataRoot);
+        const auto marker = separator.qualificationDataRoot.getChildFile("stem-runtime-active.txt");
+        const auto markerBefore = marker.loadFileAsString();
+        const auto oldPython = separator.findPythonInRuntimeRoot(before);
+        if (! oldPython.existsAsFile() || ! separator.hasRequiredModel(separator.getUserModelsDir()))
+            return save(1, "Automatic maintenance requires an installed owned runtime/model");
+        const auto hash = [] (const juce::File& file) { juce::FileInputStream stream(file); return juce::SHA256(stream).toHexString(); };
+        const auto pythonBefore = hash(oldPython);
+        const auto modelBefore = hash(separator.getUserModelsDir().getChildFile("BS-Roformer-SW.ckpt"));
+        if (static_cast<bool>(config.getProperty("testBusyDeferral", false)))
+        {
+            maintenanceAudio->isPlaying.store(true); (void) maintenanceAudio->getAiToolsStatus(); maintenanceAudio->isPlaying.store(false);
+            maintenanceAudio->isRecordMode.store(true); (void) maintenanceAudio->getAiToolsStatus(); maintenanceAudio->isRecordMode.store(false);
+            maintenanceAudio->isRendering.store(true); (void) maintenanceAudio->getAiToolsStatus(); maintenanceAudio->isRendering.store(false);
+            const auto busy = maintenanceAudio->aiResources.begin(AIResourceCoordinator::Owner::generation);
+            (void) maintenanceAudio->getAiToolsStatus(); maintenanceAudio->aiResources.finish(busy);
+            if (! busy || separator.automaticRuntimeCheckRequested) return save(1, "Automatic check ran during active audio/AI work");
+            report->setProperty("busyDeferral", "pass");
+        }
+        const auto expected = config.getProperty("expectAutomaticState", "current").toString();
+        const auto timeout = juce::jlimit(30.0, 10800.0, static_cast<double>(config.getProperty("timeoutSeconds", 1800))) * 1000;
+        bool observedInstall = false, cancelled = false;
+        juce::var status;
+        while (juce::Time::getMillisecondCounterHiRes() - started < timeout)
+        {
+            status = maintenanceAudio->getAiToolsStatus();
+            const bool installing = static_cast<bool>(status.getProperty("installInProgress", false));
+            observedInstall = observedInstall || installing || separator.automaticRuntimeRepairAttempts > 0;
+            if (installing && ! cancelled && static_cast<bool>(config.getProperty("cancelAutomaticUpdate", false)))
+            {
+                maintenanceAudio->cancelAiToolsInstall(); cancelled = true;
+            }
+            const auto state = status.getProperty("runtimeMaintenance", {}).getProperty("state", "").toString();
+            if (! installing && ! separator.installWorkerActive.load() && state == expected) break;
+            if (! installing && ! separator.installWorkerActive.load()
+                && (state == "failed" || state == "cancelled" || state == "interrupted" || state == "unavailable" || state == "cpu_only") && state != expected)
+                return save(1, "Unexpected automatic update result: " + juce::JSON::toString(status));
+            juce::Thread::sleep(100);
+        }
+        report->setProperty("automaticUpdate", status);
+        report->setProperty("observedAutomaticInstall", observedInstall);
+        if (status.getProperty("runtimeMaintenance", {}).getProperty("state", "").toString() != expected
+            || observedInstall != static_cast<bool>(config.getProperty("expectAutomaticInstall", true)))
+            return save(1, "Automatic update did not reach its expected result");
+        const bool sourceRetained = oldPython.existsAsFile() && hash(oldPython) == pythonBefore
+            && hash(separator.getUserModelsDir().getChildFile("BS-Roformer-SW.ckpt")) == modelBefore;
+        report->setProperty("existingPythonAndModelUnchanged", sourceRetained);
+        if (! sourceRetained) return save(1, "Automatic repair changed its source runtime/model");
+        const auto after = AIManagedRuntime::getActiveStemRuntimeRoot(separator.qualificationDataRoot);
+        const bool shouldChange = observedInstall && expected == "current";
+        if (shouldChange ? before == after : (before != after || markerBefore != marker.loadFileAsString()))
+            return save(1, "Automatic activation/rollback did not match the expected result");
+        // Terminal failure/cancellation/healthy checks must not launch again.
+        for (int poll = 0; poll < 5; ++poll)
+            if (static_cast<bool>(maintenanceAudio->getAiToolsStatus().getProperty("installInProgress", false)))
+                return save(1, "Automatic repair repeated after its terminal result");
+        report->setProperty("automaticRetryLoop", "absent");
+        report->setProperty("activeRuntime", after.getFullPathName());
+        if (static_cast<bool>(config.getProperty("skipSeparation", false))) return save(0, {});
+    }
     if (const auto* workloads = config.getProperty("generationMemorySequence", {}).getArray())
     {
         if (workloads->isEmpty() || workloads->size()>16) return save(1,"Invalid generation sequence");
@@ -285,7 +357,7 @@ int AIQualificationHarness::run(const juce::File& configuration)
         if (! static_cast<bool>(previousStatus.getProperty("available", false)))
             return save(1, "Repair test requires an actually ready runtime before repair");
     }
-    if (static_cast<bool>(config.getProperty("install", true)))
+    if (! automaticMaintenance && static_cast<bool>(config.getProperty("install", true)))
     {
         auto options = std::make_unique<juce::DynamicObject>();
         options->setProperty("userConfirmedDownload", true);

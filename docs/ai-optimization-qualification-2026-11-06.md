@@ -587,3 +587,186 @@ Final cleanup confirmed no qualification-owned inference worker remained on
 either machine and port 5183 was clear. Other applications were left running.
 The CMake Debug refresh is complete; `python build.py dev --run` needs no
 pre-running server. Failed attempts and their diagnostics remain available.
+
+## Automatic existing-runtime maintenance — November 7 follow-up
+
+This follow-up is development work based on app commit `e8c9c013`,
+not a published update. It adds the missing startup migration for installed
+managed stem tools. The existing manual Repair action remains a recovery option.
+The app checks its reviewed core package pins and selected backend while audio
+and other AI work are idle. It stages an incompatible runtime's replacement and
+requires real execution on the expected backend before activation. Models and
+the selected old runtime remain intact until that point. An explicit CPU-only
+setup preference is preserved. No first-use AI setup or new generation checkpoint
+download is started by this service.
+
+### Windows native startup and recovery matrix
+
+These runs used the CMake Debug host on the RTX 4080 machine described above.
+Every case called the real AudioEngine status service; none invoked the manual
+Repair action. The old runtime was a real installer-qualified Torch 2.11 CPU
+installation, copied into marked test storage. The replacement used the pinned
+0.0.16 base archive and app-local CUDA recipe, not a prebuilt CUDA fixture.
+
+| Case | Result |
+|---|---|
+| Existing CPU runtime on NVIDIA, Automatic | **pass**: automatic CUDA replacement and six finite stems from the 31-second user-song excerpt; 458.36 seconds including setup, imports and separation |
+| Restart with compatible CUDA runtime | **pass**: no replacement or duplicate download; 37.66 seconds including probes |
+| Invalid pinned archive | **pass**: checksum failure retained the old selection and unchanged interpreter/model; actual CPU separation still produced six stems; 62.15 seconds |
+| Restart after failed update | **pass**: failure remained visible and no automatic retry; 37.76 seconds |
+| Cancel automatic setup | **pass**: cancellation retained the old selection; 37.87 seconds |
+| Restart after cancellation | **pass**: no automatic retry; 37.25 seconds |
+| Explicit CPU-only setup on NVIDIA | **pass**: no CUDA conversion; six CPU stems; 48.54 seconds |
+
+The successful NVIDIA run retained measured device evidence:
+`parameterBytesByDevice={"cuda:0":698626256}`, peak CUDA allocation
+**1,899,336,704 bytes (1.77 GiB)**, Torch CUDA 12.8, RTX 4080. This establishes
+actual model placement and VRAM use for that run. Every matrix case checked busy
+deferral, source interpreter/model hashes, expected activation or rollback and
+absence of a retry loop. No qualification-owned child remained after each case.
+Evidence is retained under ignored
+`output/automatic-runtime-maintenance/native-matrix.json` and the marked
+`E:/OpenStudio-AI-Qualification/automatic-runtime-maintenance-v1/` fixtures.
+
+An initial qualification failed because the new native maintenance command
+passed `--skip-generation-checkpoints` before its Python parser/behavior had been
+implemented. That integration failure was corrected, a real-parser regression
+was added, and the failed fixture/logs were retained. The outer observer also
+needed to tolerate a process exiting during descendant enumeration; its corrected
+seven-case rerun passed. These were development qualification failures, not new
+reproductions of the reporter's original 0xC0000409 crash.
+
+### Both-feature automatic repair and CI regression driver
+
+**pass**: the same `qualify_automatic_repair` function used by the new CI option
+was run against a separately copied, real installer-qualified runtime containing
+both stem and generation libraries. Its owned audio-separator metadata was
+temporarily hidden to create a reversible compatibility failure. App startup
+automatically staged and selected the replacement; both feature selections were
+retained, Diffusers 0.39.0 was present afterward, and no generation checkpoint
+files were downloaded. Actual CUDA separation produced six valid one-second
+stems. Model parameters occupied 698,626,256 bytes on `cuda:0`; peak measured
+allocation was **1,194,659,840 bytes (1.11 GiB)**. The run took **501.46 seconds**
+including setup. The previous slot's metadata was restored in `finally`, its
+interpreter/model hashes stayed unchanged, and no test-owned child remained.
+
+This fixture intentionally had generation libraries without generation
+checkpoints; it establishes dependency preservation, not generation output from
+this replacement. Earlier generation qualification remains separately scoped.
+Evidence: `output/automatic-runtime-maintenance/both-ci.log`,
+`both-ci-processes.json` and
+`E:/OpenStudio-AI-Qualification/automatic-runtime-maintenance-v1/both-ci/native-result-automatic-upgrade.json`.
+Together with the seven-case matrix, **eight native end-to-end cases passed**.
+
+### Checks and remaining limits
+
+- **pass**: 444 Windows native safety checks, including migration decisions,
+  persistent attempt claims, interrupted/failing/cancelled attempt suppression,
+  stale interpreter probes and terminal-state preservation.
+- **pass**: 87 Windows Python checks plus 120 subtests; Linux ran the same 87
+  cases with 83 passing and four PowerShell-only skips.
+- **pass**: real Linux ROCm tensor allocation, multiplication, synchronized result
+  verification using the installed Torch 2.9.1/ROCm 7.2 runtime. As in prior Linux
+  qualification, this installation required `LD_LIBRARY_PATH=/opt/rocm/lib`.
+  Omitting that local driver-library path failed to import `libroctx64.so.4`;
+  that failure is retained. Initial isolated Linux test bundles also lacked
+  numerical dependencies/source fixtures; the complete fixture/runtime run above
+  passed without modifying the installed runtime.
+- **pass**: 11 Chromium separation/setup scenarios, including automatic-update
+  progress, cancellation, failure notice and narrow-window geometry; frontend
+  TypeScript and production build; website guide TypeScript and Vite build.
+- **pass**: final CMake Debug build with no compiler warnings. Packaged installer,
+  probe, CUDA/CPU plans and all 148 frontend distribution files byte-match their
+  current sources. No test-owned worker remained and ports 5183/5197 were clear.
+  `python build.py dev --run` requires no pre-running server.
+- **not_asserted**: subjective quality of these new outputs, NVIDIA Linux
+  migration, macOS maintenance, or all GPU/driver combinations. Native Linux
+  ROCm/CPU migration was subsequently qualified below. Platforms without an applicable reviewed plan do not auto-update.
+  The reporter's RTX 3060 machine has not been retested by the reporter here.
+
+The Windows and Linux Release CI installer-to-separation commands now include
+`--automatic-repair-regression`: after fresh installation it makes a reversible
+metadata incompatibility inside its owned runtime and requires startup repair
+and separation again. They retain native result JSON and the automatic-upgrade
+log. Remote results belong to the specific PR commit/run; the local results here
+do not establish that an unrun workflow has passed.
+
+
+## Native Linux migration completion — November 7
+
+The isolated Linux Debug app was built from the same AI runtime sources on the
+Ubuntu 26.04 / Radeon 8060S (`gfx1151`) machine above. The fixture started with the
+published Linux CPU archive (Torch **2.5.1+cpu**, archive SHA-256
+`9261faee0ac3886d45e09fc38961becc9ada9c8dfe87b982535c095d11680bd6`).
+The downloaded catalog's old feature-gated ROCm plan was retained in the fixture;
+the app's reviewed gfx1151 recipe selected Torch **2.9.1 / ROCm 7.2** instead.
+There was no external-Python bootstrap or manual Repair call in these migrations.
+
+**pass: nine native Linux end-to-end cases**, all using the real AudioEngine
+status service, installer, activation marker and separation worker:
+
+| Case | Result |
+|---|---|
+| Explicit CPU-only setup on the AMD machine | **pass**: no automatic conversion; six CPU stems; 58.96 s |
+| Published CPU runtime to ROCm, 31-second song excerpt | **pass**: automatic replacement, six GPU stems, original interpreter/model retained; 444.91 s |
+| Compatible ROCm runtime after restart | **pass**: no installation or retry; 35.26 s |
+| Invalid archive checksum | **pass**: old runtime retained and six CPU stems still produced; 60.00 s |
+| Restart after failure | **pass**: no automatic retry; 34.77 s |
+| Cancel setup | **pass**: prior selection retained; 39.36 s |
+| Restart after cancellation | **pass**: no automatic retry; 34.81 s |
+| Both-feature CPU runtime, reversible separator-metadata fault | **pass**: automatic ROCm replacement, shared generation libraries retained, no new generation checkpoints, six GPU stems; 229.45 s |
+| Cache-isolated stems-only CPU runtime | **pass**: only `stemSeparation` selected, automatic ROCm replacement and six GPU stems; 212.82 s |
+
+The main song run put **698,626,256 parameter bytes on `cuda:0`**, with
+**7,237,764,096 bytes (6.74 GiB)** of peak device allocation. On this machine the
+`cuda:` device name is PyTorch's HIP API: the device was **Radeon 8060S Graphics**,
+`torchCudaVersion=null`, `torchHipVersion=7.2.26015-fc0010cf6a`. The shorter GPU
+cases peaked at **1,348,024,832 bytes (1.26 GiB)**. These are measured GPU
+allocations on an APU with unified memory, not dedicated NVIDIA VRAM figures.
+The native host launched with **no DISPLAY and no LD_LIBRARY_PATH override**;
+the app supplied the standard ROCm library path only to its AI children.
+
+The published CPU archive bundles Diffusers. Additionally, normal capability
+probing found the machine's existing ACE-Step snapshot in its standard Hugging
+Face cache. Preserving that detected feature is expected, but it would conceal a
+stems-only feature-gating regression. The final fixture therefore moved its
+owned generation library folders out of Python's search path and supplied an
+empty, fixture-local Hugging Face cache. Its selected feature list was exactly
+`["stemSeparation"]`. The qualification tool now gives its children a private
+cache too, and a regression verifies that the parent environment is unchanged.
+The real user cache/model files were retained.
+
+Native testing also found hardware detection inside **every 64 KiB download
+progress callback**, under the status lock. The interrupted diagnostic run is
+retained. The fix captures hardware once outside that callback. Automatic native
+qualification now rejects more than 64 hardware probes over the transaction;
+positive Linux and Windows migrations each recorded **19**. Probe counting is
+restricted to explicitly marked qualification runs. A missing progress-field
+default initializer was corrected after GCC exposed warnings. The qualified
+Linux and Windows builds have no compiler warnings.
+
+An initial fixture had a checkpoint without the YAML required by the native
+app. Its precondition failure was retained; the corrected fixture reused the
+already-qualified configuration. The completed runs verified old interpreter
+and checkpoint hashes, unchanged configuration files, correct activation or
+rollback, busy deferral and absence of retry loops. Final process inspection
+found **no qualification-owned worker remaining**.
+
+The current Windows build also repeated a fresh CPU-to-CUDA automatic migration:
+**pass**, six GPU stems, 574.02 s including downloads, **19 hardware probes** and
+**1,194,659,840 bytes** peak VRAM allocation on RTX 4080. Together with the earlier
+Windows matrix, nine Windows end-to-end cases have passed across this follow-up.
+Current native safety runs passed **444 Windows checks** and **395 Linux checks**.
+The final focused Python suite passed **88 Windows tests plus 120 subtests**;
+Linux ran the same 88 cases with **84 passing and four PowerShell-only skips**.
+The previously recorded 11 browser scenarios cover the unchanged frontend.
+Subjective quality of the new outputs remains **not_asserted**.
+
+Retained local evidence is under `output/native-linux-migration/`; the remote
+owned source/build and fixtures are under
+`/home/sayak/dev_work/openstudio-native-migration-20261107/`. The evidence archive
+contains the native result files, device receipts, safety results and source
+hashes. Release CI now executes fresh native setup, automatic repair and real
+separation on both Windows and Linux; remote CI results must be checked at the
+pushed PR head. This work does not publish an app release or qualify NVIDIA Linux,
+macOS migration, arbitrary drivers or every possible GPU.

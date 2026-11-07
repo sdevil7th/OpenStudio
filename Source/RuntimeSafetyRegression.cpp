@@ -14,6 +14,7 @@
 #include "ControlSurfaceMidiInbox.h"
 #include "AITrackEngine.h"
 #include "AIManagedRuntime.h"
+#include "AIRuntimeMaintenance.h"
 #include "AIStemWorkspace.h"
 #include "AIResourceCoordinator.h"
 #include "RecordingWriterSafety.h"
@@ -198,6 +199,74 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         existing.musicGenerationLayoutValid = true;
         const auto repair = StemSeparator::featuresForRuntimeCandidate(requested, existing);
         check("stem_repair_keeps_generation_without_requiring_an_old_performance_profile", repair.contains("audioGeneration") && repair.contains("stemSeparation"));
+    }
+    {
+        auto context = juce::JSON::parse(R"({"appVersion":"test-update","expectedBackend":"cuda","gpuName":"NVIDIA test","managedRuntimePresent":true,"stemModelInstalled":true})");
+        const auto plan = juce::JSON::parse(R"({"steps":[{"type":"pip_install","features":["stemSeparation"],"packages":["torch==2.11.0+cu128","torchvision==0.26.0+cu128","torchaudio==2.11.0+cu128","audio-separator[gpu]==0.41.1"]}]})");
+        auto probe = juce::JSON::parse(R"({"runtimeReady":true,"selectedBackend":"cpu","torchVersion":"2.3.1+cpu","torchvisionVersion":"0.18.1+cpu","torchaudioVersion":"2.3.1+cpu","audioSeparatorVersion":"0.41.1"})");
+        auto decision = AIRuntimeMaintenance::evaluate(context, probe, plan, {});
+        check("runtime_update_detects_cpu_wheels_on_nvidia", decision.getProperty("state", "").toString() == "needed");
+        auto attempted = decision.clone();
+        attempted.getDynamicObject()->setProperty("state", "attempting");
+        check("runtime_update_interrupted_attempt_does_not_loop", AIRuntimeMaintenance::evaluate(context, probe, plan, attempted).getProperty("state", "").toString() == "interrupted");
+        for (const auto* state : { "failed", "cancelled" })
+        {
+            attempted.getDynamicObject()->setProperty("state", state);
+            check(juce::String(state) == "failed" ? "runtime_update_failed_does_not_loop" : "runtime_update_cancelled_does_not_loop",
+                AIRuntimeMaintenance::evaluate(context, probe, plan, attempted).getProperty("state", "").toString() == state);
+        }
+        context.getDynamicObject()->setProperty("appVersion", "next-update");
+        check("runtime_update_new_contract_can_retry", AIRuntimeMaintenance::evaluate(context, probe, plan, attempted).getProperty("state", "").toString() == "needed");
+        context.getDynamicObject()->setProperty("explicitCpuOnly", true);
+        check("runtime_update_honours_explicit_cpu_setup", AIRuntimeMaintenance::evaluate(context, probe, plan, {}).getProperty("state", "").toString() == "cpu_only");
+        context.getDynamicObject()->setProperty("explicitCpuOnly", false);
+        context.getDynamicObject()->setProperty("managedRuntimePresent", false);
+        check("runtime_update_does_not_install_new_optional_tools", AIRuntimeMaintenance::evaluate(context, probe, plan, {}).getProperty("state", "").toString() == "not_installed");
+        context.getDynamicObject()->setProperty("managedRuntimePresent", true);
+        context.getDynamicObject()->setProperty("stemModelInstalled", false);
+        check("runtime_update_does_not_opt_into_new_models", AIRuntimeMaintenance::evaluate(context, probe, plan, {}).getProperty("state", "").toString() == "not_installed");
+        context.getDynamicObject()->setProperty("stemModelInstalled", true);
+        probe = juce::JSON::parse(R"({"runtimeReady":true,"selectedBackend":"cuda","torchVersion":"2.11.0+cu128","torchvisionVersion":"0.26.0+cu128","torchaudioVersion":"2.11.0+cu128","audioSeparatorVersion":"0.41.1"})");
+        check("runtime_update_leaves_compatible_cuda_alone", AIRuntimeMaintenance::evaluate(context, probe, plan, attempted).getProperty("state", "").toString() == "current");
+        probe.getDynamicObject()->setProperty("runtimeReady", false);
+        check("runtime_update_repairs_broken_imports", AIRuntimeMaintenance::evaluate(context, probe, plan, {}).getProperty("state", "").toString() == "needed");
+        check("runtime_update_defers_while_audio_or_ai_is_busy", ! AIRuntimeMaintenance::canStart(true, false, false, false)
+            && ! AIRuntimeMaintenance::canStart(false, true, false, false) && ! AIRuntimeMaintenance::canStart(false, false, true, false)
+            && ! AIRuntimeMaintenance::canStart(false, false, false, true) && AIRuntimeMaintenance::canStart(false, false, false, false));
+        const auto receipt = directory.getChildFile("automatic-runtime-state.json");
+        check("runtime_update_receipt_round_trip", AIRuntimeMaintenance::writeDocument(receipt, attempted)
+            && AIRuntimeMaintenance::readDocument(receipt).getProperty("contractKey", "").toString() == attempted.getProperty("contractKey", "").toString());
+        const auto claimFile = directory.getChildFile("automatic-runtime-claim.json");
+        attempted.getDynamicObject()->setProperty("state", "attempting");
+        check("runtime_update_claim_is_persisted", AIRuntimeMaintenance::claim(claimFile, attempted) == AIRuntimeMaintenance::Claim::started);
+        check("runtime_update_late_second_window_cannot_claim_the_same_update", AIRuntimeMaintenance::claim(claimFile, attempted) == AIRuntimeMaintenance::Claim::previousAttempt);
+    }
+    {
+        StemSeparator maintenance;
+        maintenance.qualificationDataRoot = directory.getChildFile("automatic-result-reconciliation");
+        maintenance.runtimeMaintenance = juce::JSON::parse(R"({"contractKey":"fixture","expectedBackend":"cpu"})");
+        maintenance.automaticRuntimeRepairActive = true;
+        maintenance.automaticRuntimeTerminalState = "error";
+        maintenance.lastAiToolsStatus.state = "ready"; // The retained CPU runtime refreshed successfully.
+        maintenance.lastAiToolsStatus.selectedBackend = "cpu";
+        maintenance.finishAutomaticRuntimeRepair();
+        check("runtime_update_retained_readiness_does_not_hide_failed_repair",
+            maintenance.runtimeMaintenance.getProperty("state", "").toString() == "failed");
+        maintenance.automaticRuntimeRepairActive = true;
+        maintenance.automaticRuntimeTerminalState = "cancelled";
+        maintenance.finishAutomaticRuntimeRepair();
+        check("runtime_update_refresh_cannot_erase_cancellation",
+            maintenance.runtimeMaintenance.getProperty("state", "").toString() == "cancelled");
+       #if JUCE_WINDOWS
+        const auto selectedPython = maintenance.qualificationDataRoot.getChildFile("stem-runtime/python/python.exe");
+       #else
+        const auto selectedPython = maintenance.qualificationDataRoot.getChildFile("stem-runtime/python/bin/python3");
+       #endif
+        selectedPython.getParentDirectory().createDirectory(); selectedPython.replaceWithText("fixture");
+        StemSeparator::RuntimeCapabilities staleProbe;
+        staleProbe.interpreterPath = directory.getChildFile("retired-slot/python").getFullPathName();
+        check("runtime_update_rechecks_a_probe_from_the_previous_active_slot",
+            maintenance.evaluateRuntimeMaintenance(staleProbe, {}).getProperty("state", "").toString() == "recheck");
     }
     {
         AIResourceCoordinator resources;

@@ -7,12 +7,74 @@ remain inside it. Cached archives/models can be reused without modifying them.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import uuid
 
 from qualify_stem_installation import read_catalog
+
+
+def qualification_environment(root: Path) -> dict[str, str]:
+    """Keep a workstation's generation snapshots out of isolated stem tests."""
+    cache = root.resolve() / "huggingface-cache"
+    return dict(os.environ, HF_HOME=str(cache), HF_HUB_CACHE=str(cache / "hub"),
+                HUGGINGFACE_HUB_CACHE=str(cache / "hub"))
+
+
+def hide_owned_separator_metadata(root: Path, runtime: Path) -> tuple[Path, Path]:
+    """A reversible, test-only incompatibility; never touch an external runtime."""
+    root, runtime = root.resolve(), runtime.resolve()
+    if (root / ".openstudio-ai-qualification").read_text().strip() != "owned-test-data-v1" or not runtime.is_relative_to(root):
+        raise ValueError("Automatic repair fixtures require an owned runtime beneath the qualification root")
+    candidates = list(runtime.rglob("audio_separator-*.dist-info"))
+    if len(candidates) != 1:
+        raise ValueError("Expected one audio-separator distribution in the owned runtime")
+    original = candidates[0].resolve()
+    hidden = original.with_name(".openstudio-qa-separator-" + uuid.uuid4().hex).resolve()
+    if not original.is_relative_to(runtime) or not hidden.is_relative_to(runtime):
+        raise ValueError("Metadata fixture escaped its owned runtime")
+    original.rename(hidden)
+    return original, hidden
+
+
+def require_gpu_placement(report: dict, expected_backend: str) -> None:
+    if expected_backend not in {"cuda", "rocm"} or report.get("status") != "pass":
+        return
+    receipt = report.get("diagnostics", {}).get("deviceReceipt", {})
+    devices = receipt.get("parameterBytesByDevice", {})
+    if not devices or not all(name.startswith("cuda:") for name in devices) or receipt.get("cudaPeakAllocatedBytes", 0) <= 0:
+        raise RuntimeError("Native transport did not retain actual GPU placement/allocation evidence")
+
+
+def qualify_automatic_repair(root: Path, app: Path, config: dict, report: dict, timeout: int) -> None:
+    """Require startup maintenance and real separation of a deliberately incompatible owned runtime."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    original, hidden = hide_owned_separator_metadata(root, Path(report["activeRuntime"]))
+    try:
+        # This fixture represents Automatic setup. The separate native
+        # policy tests verify preservation of an explicit CPU-only choice.
+        (root / "user-data/ai-runtime-preference.json").write_text('{"cpuOnly":false}', encoding="utf-8")
+        automatic = dict(config, install=False, automaticRuntimeMaintenance=True, testBusyDeferral=True,
+                         expectAutomaticState="current", expectAutomaticInstall=True, accelerationMode="auto")
+        automatic_file = root / "automatic-upgrade.json"
+        automatic_file.write_text(json.dumps(automatic, indent=2), encoding="utf-8")
+        with (root / "automatic-upgrade.log").open("wb") as log:
+            completed = subprocess.run([str(Path(app).resolve()), "--ai-native-qualification", str(automatic_file)],
+                stdout=log, stderr=subprocess.STDOUT, creationflags=flags, env=qualification_environment(root),
+                timeout=timeout + 60, check=False)
+        automatic_report = json.loads((root / "native-result-automatic-upgrade.json").read_text(encoding="utf-8"))
+        if completed.returncode or automatic_report.get("status") != "pass" or not automatic_report.get("observedAutomaticInstall"):
+            raise RuntimeError("Automatic app-update repair did not activate and separate: " + str(automatic_report.get("error")))
+        require_gpu_placement(automatic_report, config["expectedBackend"])
+        print(json.dumps({"automaticRuntimeRepair":"pass","backend":automatic_report.get("backend")}),flush=True)
+    finally:
+        # Both resolved targets were checked above. Keep the previous slot
+        # intact after the deliberate metadata fault, including on failure.
+        if hidden.exists() and not original.exists():
+            hidden.rename(original)
 
 
 def main():
@@ -27,6 +89,8 @@ def main():
     parser.add_argument("--acceleration-mode", choices=["auto", "cpu-only"], default="auto")
     parser.add_argument("--chunk-duration", type=int, choices=[0, 30], default=0)
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--automatic-repair-regression", action="store_true",
+                        help="After fresh setup, test app-startup repair of a reversible owned compatibility failure")
     args = parser.parse_args()
     root = Path(args.output_dir).resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -71,7 +135,8 @@ def main():
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     with (root / "native-host.log").open("wb") as log:
         process = subprocess.Popen([str(Path(args.app).resolve()), "--ai-native-qualification", str(config_file)],
-                                   stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
+                                   stdout=log, stderr=subprocess.STDOUT, creationflags=flags,
+                                   env=qualification_environment(root))
         try:
             result = process.wait(timeout=args.timeout + 60)
         except subprocess.TimeoutExpired:
@@ -79,14 +144,14 @@ def main():
             process.wait(timeout=15)
             raise
     report = json.loads((root / "native-result.json").read_text(encoding="utf-8"))
-    receipt = report.get("diagnostics", {}).get("deviceReceipt", {})
-    if args.expected_backend in {"cuda", "rocm"} and report.get("status") == "pass":
-        devices = receipt.get("parameterBytesByDevice", {})
-        if not devices or not all(name.startswith("cuda:") for name in devices) or receipt.get("cudaPeakAllocatedBytes", 0) <= 0:
-            raise RuntimeError("Native transport did not retain actual GPU placement/allocation evidence")
+    require_gpu_placement(report, args.expected_backend)
     print(json.dumps({"status": report.get("status"), "backend": report.get("backend"),
                       "error": report.get("error"), "exitCode": result}), flush=True)
-    return 0 if result == 0 and report.get("status") == "pass" else 1
+    if result != 0 or report.get("status") != "pass":
+        return 1
+    if args.automatic_repair_regression:
+        qualify_automatic_repair(root, Path(args.app), config, report, args.timeout)
+    return 0
 
 
 if __name__ == "__main__":

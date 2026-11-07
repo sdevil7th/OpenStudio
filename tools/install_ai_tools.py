@@ -3091,7 +3091,10 @@ def probe_runtime(
     return report
 
 
-def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested: str) -> tuple[str, dict[str, Any]] | None:
+def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested: str,
+                                         *, required_backend: str = "") -> tuple[str, dict[str, Any]] | None:
+    if required_backend:
+        return None
     normalized_backend = backend_requested.strip().lower()
 
     if platform.system() == "Windows":
@@ -4174,6 +4177,29 @@ def download_music_gen_model(
     )
 
 
+def required_backend_validation_command(report: dict, backend: str, runtime_python: Path) -> list[str]:
+    """A maintenance candidate must prove the intended backend before activation.
+
+    Importability or a CUDA-labelled wheel alone does not prove GPU execution.
+    The child performs a real allocation, kernel and synchronized result read.
+    """
+    if not report.get("runtimeReady") or report.get("selectedBackend") != backend:
+        raise InstallerStepError(
+            f"The updated runtime could not use the required {backend.upper()} backend. "
+            "The previous runtime remains active. Check the GPU driver and AI Tools details.",
+            error_code="required_backend_unavailable", progress=.99)
+    code = "import torch; "
+    if backend in {"cuda", "rocm"}:
+        code += ("assert torch.cuda.is_available(); "
+            + ("assert torch.version.hip is None; " if backend == "cuda" else "assert torch.version.hip; ")
+            + "x=torch.full((64,),2.0,device='cuda:0'); assert x.is_cuda; "
+            "y=(x*x).sum(); torch.cuda.synchronize(); assert y.item()==256.0; ")
+    else:
+        code += "x=torch.full((64,),2.0,device='cpu'); assert (x*x).sum().item()==256.0; "
+    code += "print('Required backend execution verified')"
+    return [str(runtime_python), "-I", "-c", code]
+
+
 def main() -> None:
     global LOG_PATH, SESSION_ID, RUNTIME_CANDIDATE, FALLBACK_ATTEMPTED
     global START_TIME_MONOTONIC
@@ -4195,6 +4221,10 @@ def main() -> None:
     parser.add_argument("--runtime-candidate", default="", help="Selected runtime candidate identity")
     parser.add_argument("--fallback-attempted", action="store_true", help="True when this install is using a fallback runtime candidate")
     parser.add_argument("--backend-requested", default="", help="Requested backend overlay identity for Windows base runtimes")
+    parser.add_argument("--required-backend", choices=["cuda", "rocm", "cpu"], default="",
+                        help="Require actual execution on this backend before activating a maintenance candidate")
+    parser.add_argument("--skip-generation-checkpoints", action="store_true",
+                        help="Maintain installed generation libraries without downloading new model checkpoints")
     parser.add_argument("--backend-install-plan", default="", help="Path to a JSON backend install plan")
     parser.add_argument("--features", default=",".join(DEFAULT_INSTALL_FEATURES), help="Comma-separated AI feature ids to install")
     args = parser.parse_args()
@@ -4351,7 +4381,8 @@ def main() -> None:
                     raise_on_error=True,
                 )
             except InstallerStepError as primary_exc:
-                fallback_plan = resolve_fallback_backend_install_plan(runtime_root, effective_backend_requested)
+                fallback_plan = resolve_fallback_backend_install_plan(runtime_root, effective_backend_requested,
+                                                                      required_backend=args.required_backend)
                 if fallback_plan is None or FALLBACK_ATTEMPTED:
                     fail(
                         primary_exc.message,
@@ -4556,7 +4587,7 @@ def main() -> None:
             buildRuntimeMode=build_runtime_mode,
         )
 
-    if FEATURE_AUDIO_GENERATION in install_features:
+    if FEATURE_AUDIO_GENERATION in install_features and not args.skip_generation_checkpoints:
         download_music_gen_model(
             runtime_python,
             args.music_gen_model,
@@ -4570,7 +4601,9 @@ def main() -> None:
         emit(
             "downloading_model",
             0.95,
-            message="Audio Generation was not selected or is incompatible; skipping ACE-Step model downloads.",
+            message=("Keeping existing generation checkpoints during the runtime update."
+                     if args.skip_generation_checkpoints else
+                     "Audio Generation was not selected or is incompatible; skipping ACE-Step model downloads."),
             stepLabel="Skipping Audio Generation model downloads",
             selectedFeatures=install_features,
             requestedFeatures=requested_features,
@@ -4605,6 +4638,17 @@ def main() -> None:
         python_detected=python_detected,
         build_runtime_mode=build_runtime_mode,
     )
+
+    if args.required_backend:
+        try:
+            command = required_backend_validation_command(runtime_probe, args.required_backend, runtime_python)
+        except InstallerStepError as exc:
+            fail(exc.message, progress=exc.progress, error_code=exc.error_code)
+        run_step(command, state="verifying_runtime", progress=.99,
+                 description=f"Verifying real {args.required_backend.upper()} execution before activation",
+                 install_source=install_source, requires_external_python=requires_external_python,
+                 python_detected=python_detected, build_runtime_mode=build_runtime_mode,
+                 error_code="required_backend_execution_failed")
 
     music_generation_ready = bool(runtime_probe.get("musicGenerationReady", False))
     music_generation_layout_valid = bool(runtime_probe.get("musicGenerationLayoutValid", False))

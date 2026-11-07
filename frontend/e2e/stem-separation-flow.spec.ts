@@ -174,6 +174,38 @@ test.describe("macOS stem processing", () => {
   });
 });
 
+test("automatic runtime update explains model retention, supports cancel, and needs no manual repair click", async ({ page }) => {
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.evaluate(async () => {
+    const storeUrl = "/src/store/useDAWStore.ts", bridgeUrl = "/src/services/NativeBridge.ts";
+    const { useDAWStore } = await import(/* @vite-ignore */ storeUrl);
+    const { nativeBridge } = await import(/* @vite-ignore */ bridgeUrl);
+    const ready = useDAWStore.getState().aiToolsStatus;
+    nativeBridge.getAiToolsStatus = async () => useDAWStore.getState().aiToolsStatus;
+    nativeBridge.refreshAiToolsStatus = async () => useDAWStore.getState().aiToolsStatus;
+    nativeBridge.cancelAiToolsInstall = async () => {
+      ++(window as any).__stemQA.cancels;
+      useDAWStore.setState({ aiToolsStatus: { ...ready, state: "cancelled", installInProgress: false,
+        runtimeMaintenance: { state: "cancelled", automatic: true, expectedBackend: "cuda",
+          message: "Automatic AI update was cancelled. Your previous runtime was retained." } } });
+    };
+    useDAWStore.setState({ aiToolsStatus: { ...ready, state: "installing", available: false, installInProgress: true,
+      runtimeMaintenance: { state: "attempting", automatic: true, expectedBackend: "cuda", message: "Updating installed AI tools automatically." } } });
+    useDAWStore.getState().openAiToolsSetup("stemSeparation");
+  });
+  await page.setViewportSize({ width: 390, height: 760 });
+  const notice = page.getByRole("status", { name: "Automatic AI update" });
+  await expect(notice).toContainText("Your downloaded models will be kept");
+  const box = (await notice.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+  const cancel = page.getByRole("button", { name: "Cancel Setup", exact: true });
+  await expect(cancel).toBeEnabled();
+  await cancel.click();
+  await expect(notice).toContainText("previous runtime was retained");
+  expect(await page.evaluate(() => (window as any).__stemQA.repairs.length)).toBe(0);
+});
+
 test.describe("Linux AMD stem processing", () => {
   test.use({ stemHardware: { platform: "linux", gpuBackend: "rocm", gpuArchitecture: "gfx1151", gpuName: "Radeon 8060S" } });
 

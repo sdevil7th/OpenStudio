@@ -9,6 +9,7 @@
 #include "BuiltInInstrumentPreviewBindings.h"
 #include "RuntimeLocation.h"
 #include "AudioEngine.h"
+#include "AIRuntimeMaintenance.h"
 #include "ClipSourceDescriptor.h"
 #include "AudioXRunTelemetry.h"
 #include "ClipTempoAnalyzer.h"
@@ -83547,6 +83548,16 @@ void AudioEngine::reconcileAIResources()
 juce::var AudioEngine::getAiToolsStatus()
 {
     reconcileAIResources();
+    // Called by the main-window status timer. Never launch maintenance from
+    // the realtime callback, during transport/render, or beside another AI job.
+    if ((deviceStartupMode == DeviceStartup::openHardware || qualificationAutomaticRuntimeMaintenance)
+        && AIRuntimeMaintenance::canStart(isPlaying.load(), isRecordMode.load(), isRendering.load(),
+            aiResources.snapshot().getProperty("owner", "idle").toString() != "idle"))
+    {
+        stemSeparator.checkAutomaticRuntimeRepair();
+        const auto options = stemSeparator.automaticRuntimeRepairOptions();
+        if (options.isObject()) (void) installAiTools(juce::JSON::toString(options));
+    }
     auto status = stemSeparator.getAiToolsStatus();
     if (auto* object = status.getDynamicObject()) object->setProperty("resources", aiResources.snapshot());
     return status;

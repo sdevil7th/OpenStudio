@@ -101,6 +101,10 @@ public:
     /** Schedule a background AI tools status refresh and return the current cached status. */
     juce::var refreshAiToolsStatus();
 
+    /** Check a previously installed managed runtime once, off the audio thread. */
+    void checkAutomaticRuntimeRepair();
+    juce::var automaticRuntimeRepairOptions() const;
+
     /** Start installing the optional AI tools into the user's app-data directory after explicit user confirmation. */
     juce::var installAiTools (bool userConfirmedDownload);
 
@@ -128,7 +132,7 @@ public:
         juce::String backend { "cpu" };
         juce::String accelerationMode { "auto" };
         int threadCap = 0;
-        juce::String fallbackReason;
+        juce::String fallbackReason {};
         juce::var diagnostics {};
     };
 
@@ -171,6 +175,7 @@ private:
     juce::File qualificationDataRoot;
     juce::String qualificationManifestUrl;
     double qualificationGpuFraction = 0;
+    mutable std::atomic<unsigned int> qualificationHardwareProbeCount { 0 };
     juce::String separationJobId;
     unsigned long separationWorkerPid = 0;
     bool separationOutputPublished = false;
@@ -253,6 +258,8 @@ private:
 
     struct RuntimeCapabilities
     {
+        juce::var probeReport;
+        juce::String interpreterPath;
         bool baseRuntimeReady = false;
         bool runtimeReady = false;
         bool modelInstalled = false;
@@ -284,6 +291,8 @@ private:
         bool userConfirmedDownload = false;
         bool cpuOnly = false;
         bool repairRuntime = false;
+        bool automaticRepair = false;
+        juce::String requiredBackend;
         juce::String prepareOptimization;
         juce::StringArray selectedFeatures;
         juce::String requestedFeature;
@@ -360,7 +369,9 @@ private:
     /** Schedule a background refresh if one is not already running. */
     void scheduleStatusRefresh();
 
-    void publishStatusRefresh (const AiToolsStatus& status, juce::uint64 revision);
+    void publishStatusRefresh (const AiToolsStatus& status, juce::uint64 revision, const juce::var& maintenance = {});
+    void finishAutomaticRuntimeRepair();
+    juce::var evaluateRuntimeMaintenance(const RuntimeCapabilities&, const HardwareStatus&) const;
     static bool applyDiffusersSetupProgress (const juce::String& line, AiToolsStatus& status);
     friend class RuntimeSafetyRegression;
 
@@ -436,6 +447,12 @@ private:
     mutable bool statusRefreshInFlight = false;
     juce::uint64 aiToolsStatusRevision = 0;
     mutable bool initialStatusPrepared = false;
+    bool automaticRuntimeCheckRequested = false;
+    juce::String automaticRuntimeCheckedRoot;
+    bool automaticRuntimeRepairActive = false;
+    unsigned int automaticRuntimeRepairAttempts = 0;
+    juce::String automaticRuntimeTerminalState;
+    juce::var runtimeMaintenance;
     std::atomic<bool> aiToolsInstallWorkInProgress { false };
     std::atomic<bool> aiToolsCancelRequested { false };
     std::atomic<bool> aiToolsInstallMonitorStopRequested { false };

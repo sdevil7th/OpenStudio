@@ -694,7 +694,7 @@ jobs:
           $exePath = Join-Path $env:GITHUB_WORKSPACE "$env:BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio.exe"
           $inputPath = Join-Path $env:RUNNER_TEMP 'native-stem-input.wav'
           python -c "import math,struct,wave; f=wave.open(r'$inputPath','wb'); f.setparams((2,2,44100,0,'NONE','not compressed')); f.writeframes(b''.join(struct.pack('<hh',int(8000*math.sin(i*2*math.pi*220/44100)),int(6000*math.sin(i*2*math.pi*330/44100))) for i in range(44100))); f.close()"
-          python tools/qualify_ai_native.py --app $exePath --output-dir "$env:RUNNER_TEMP/native-stem-qualification" --catalog https://openstudio.org.in/releases/ai-runtime/stable/latest.json --input $inputPath --expected-backend cpu --acceleration-mode cpu-only --timeout 1800
+          python tools/qualify_ai_native.py --app $exePath --output-dir "$env:RUNNER_TEMP/native-stem-qualification" --catalog https://openstudio.org.in/releases/ai-runtime/stable/latest.json --input $inputPath --expected-backend cpu --acceleration-mode cpu-only --automatic-repair-regression --timeout 1800
           if ($LASTEXITCODE -ne 0) { throw 'Native installer-to-separation qualification failed.' }
           $report = Get-Content -Raw "$env:RUNNER_TEMP/native-stem-qualification/native-result.json" | ConvertFrom-Json
           $runtimePython = Join-Path $report.activeRuntime 'python/python.exe'
@@ -718,6 +718,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-stem-qualification/native-result*.json
             ${{ runner.temp }}/native-stem-qualification/native-host.log
+            ${{ runner.temp }}/native-stem-qualification/automatic-upgrade.log
             ${{ runner.temp }}/native-stem-qualification/user-data/logs/**
           if-no-files-found: warn
 
@@ -1077,6 +1078,30 @@ jobs:
             fi
             exit 1
           fi
+
+      - name: Qualify native Linux automatic AI runtime migration
+        shell: bash
+        timeout-minutes: 40
+        run: |
+          python3 -c "import math,struct,wave; f=wave.open('$RUNNER_TEMP/native-stem-input.wav','wb'); f.setparams((2,2,44100,0,'NONE','not compressed')); f.writeframes(b''.join(struct.pack('<hh',int(8000*math.sin(i*2*math.pi*220/44100)),int(6000*math.sin(i*2*math.pi*330/44100))) for i in range(44100))); f.close()"
+          xvfb-run -a python3 tools/qualify_ai_native.py \
+            --app "$BUILD_DIR/OpenStudio_artefacts/Release/OpenStudio" \
+            --output-dir "$RUNNER_TEMP/native-stem-qualification" \
+            --catalog https://openstudio.org.in/releases/ai-runtime/stable/latest.json \
+            --input "$RUNNER_TEMP/native-stem-input.wav" --expected-backend cpu \
+            --acceleration-mode cpu-only --automatic-repair-regression --timeout 1800
+
+      - name: Retain native Linux AI migration evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-stem-migration-linux
+          path: |
+            ${{ runner.temp }}/native-stem-qualification/native-result*.json
+            ${{ runner.temp }}/native-stem-qualification/native-host.log
+            ${{ runner.temp }}/native-stem-qualification/automatic-upgrade.log
+            ${{ runner.temp }}/native-stem-qualification/user-data/logs/
+          if-no-files-found: warn
 
       - name: Verify signed updater and restart persistence (Linux Release)
         shell: bash

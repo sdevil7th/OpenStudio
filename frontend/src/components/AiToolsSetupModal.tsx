@@ -748,6 +748,13 @@ export default function AiToolsSetupModal() {
   return (
     <Modal isOpen={showAiToolsSetup} onClose={closeAiToolsSetup} size="xl">
       <ModalHeader title="AI Tools Setup" onClose={closeAiToolsSetup} />
+      {aiToolsStatus.runtimeMaintenance && ["attempting", "failed", "cancelled", "interrupted"].includes(aiToolsStatus.runtimeMaintenance.state) && (
+        <div role="status" aria-label="Automatic AI update" className="mx-4 mb-3 rounded border border-daw-accent/40 bg-daw-accent/10 p-3 text-sm leading-5 text-daw-text">
+          {aiToolsStatus.runtimeMaintenance.state === "attempting"
+            ? "OpenStudio is updating your installed AI tools for this version. Your downloaded models will be kept. You can cancel the update below."
+            : aiToolsStatus.runtimeMaintenance.message}
+        </div>
+      )}
       {aiToolsStatus.installInProgress ? renderInstallProgress() : null}
       <ModalContent className="p-0">
         <div className="grid min-h-[620px] grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)]">
