@@ -623,8 +623,9 @@ class ExecutionPolicyError(RuntimeError):
 
 
 class StableAudioWorker:
-    def __init__(self, model_root: Path) -> None:
+    def __init__(self, model_root: Path, optimization: str = "standard") -> None:
         self.model_root = model_root
+        self.optimization = optimization
         self._variant = "legacy"
         self._model: Any | None = None
         self._lock = threading.Lock()
@@ -704,6 +705,12 @@ class StableAudioWorker:
     def _load_local_model(self, workflow: str, request_id: str) -> Any:
         from diffusers_audio_pipeline import DiffusersAudioSession
         options, qualification_note = {}, ""
+        if self.optimization == "compile":
+            options = {"compilation":True, "placement":"resident"}
+        elif self.optimization == "torchao-int8":
+            options = {"quantization":"torchao-int8", "placement":"resident"}
+        elif self.optimization == "fp8-storage":
+            options = {"quantization":"fp8-storage", "placement":"resident"}
         if MODEL_ID == "minimax-music-3" and not self._conservative and self._variant == "legacy":
             import torch
             from ai_execution_policy import qualified_minimax_options
@@ -716,6 +723,12 @@ class StableAudioWorker:
             ("INT8 language model; original-precision audio components. " if MODEL_ID == "minimax-music-3"
              else "INT8 diffusion transformer; original-precision audio components. ") + qualification_note
             if options or self._variant == "int8" else "Unquantized model; standard memory placement.")
+        if self.optimization == "compile":
+            self._selection_note = "Compiling repeated blocks for reuse on warm requests."
+        elif self.optimization == "torchao-int8":
+            self._selection_note = "TorchAO INT8 transformer; original-precision audio components."
+        elif self.optimization == "fp8-storage":
+            self._selection_note = "FP8 transformer storage with BF16 computation; original model files retained."
         self._phase_update("loading_model", "Loading the selected model precision.", -1.0)
         from ai_model_variants import variant_root
         selected_root = variant_root(MODEL_ID) if self._variant == "int8" else self.model_root
@@ -735,8 +748,7 @@ class StableAudioWorker:
 
     def _load_model(self, workflow: str, request_id: str) -> Any:
         with self._lock:
-            if (self._model is not None and (getattr(self._model, "_partial", None) is not None
-                                            or getattr(self._model, "_int8_stage", None) is not None)
+            if (MODEL_ID == "minimax-music-3" and self._model is not None
                     and (self._request_duration > self._model.request_duration
                          or self._request_prompt_tokens > self._model.request_prompt_tokens)):
                 self.unload()
@@ -774,6 +786,10 @@ class StableAudioWorker:
             params = json.loads(params_json)
             from ai_model_variants import requested_variant, variant_root, validate_variant
             variant = requested_variant(params) if "modelVariant" in params else "legacy"
+            from ai_compilation import validate_optimization
+            validate_optimization(self.optimization, MODEL_ID, variant)
+            if params.get("generationOptimization", self.optimization) != self.optimization:
+                raise ValueError("Generation optimization changed; restart this worker")
             if variant == "int8":
                 validate_variant(variant_root(MODEL_ID), MODEL_ID)
             if variant != self._variant:
@@ -813,7 +829,11 @@ class StableAudioWorker:
             self._selection_note = (
                 ("INT8 language model; original-precision audio components." if MODEL_ID == "minimax-music-3"
                  else "INT8 diffusion transformer; original-precision audio components.")
-                if getattr(model, "quantization", "none") == "int8" else "Unquantized model; standard memory placement.")
+                if getattr(model, "quantization", "none") in {"int8", "torchao-int8"} else "Unquantized model; standard memory placement.")
+            if self.optimization == "compile":
+                self._selection_note = "Repeated-block compilation selected; warm requests reuse compiled blocks."
+            elif self.optimization == "fp8-storage":
+                self._selection_note = "FP8 transformer storage with BF16 computation; audition the result."
             target_sample_rate, target_channels = get_model_audio_format(model)
 
             segment_path = None
@@ -894,6 +914,8 @@ class StableAudioWorker:
                         audio = model.generate(workflow=workflow, progress_callback=self._phase_update, **kwargs)
                         break
                     except torch.OutOfMemoryError as exc:
+                        if self.optimization != "standard":
+                            raise RuntimeError("Not enough memory for the selected optimization. Generation stopped without changing the request or optimization.") from exc
                         if getattr(model, "quantization", "none") == "int8":
                             raise RuntimeError("Not enough memory for this INT8 request. Generation stopped; "
                                                "it will not retry with unquantized weights. Close other GPU applications "
@@ -926,7 +948,7 @@ class StableAudioWorker:
                 "progress": 0.95,
                 "phase": "writing_audio",
                 "phaseProgress": -1.0,
-                "message": "Writing Stable Audio 3 output...",
+                "message": f"Writing {MODEL_LABEL} output...",
                 "backend": "stable-audio-3",
                 "modelId": MODEL_ID,
                 "workflowId": workflow,
@@ -947,7 +969,7 @@ class StableAudioWorker:
                 "state": "done",
                 "progress": 1.0,
                 "phase": "done",
-                "message": "Stable Audio 3 generation complete.",
+                "message": f"{MODEL_LABEL} generation complete.",
                 "backend": "stable-audio-3",
                 "modelId": MODEL_ID,
                 "workflowId": workflow,
@@ -1010,8 +1032,8 @@ def write_framed_json(connection: socket.socket, payload: dict[str, Any]) -> Non
     connection.sendall(encoded)
 
 
-def run_worker(model_root: Path) -> None:
-    worker = StableAudioWorker(model_root)
+def run_worker(model_root: Path, optimization: str = "standard") -> None:
+    worker = StableAudioWorker(model_root, optimization)
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
@@ -1044,6 +1066,11 @@ def run_worker(model_root: Path) -> None:
         with connection:
             request = read_framed_json(connection)
             request_id = normalize_text(request.get("requestId")) or str(uuid.uuid4())
+            if request.get("command") == "shutdown":
+                write_framed_json(connection, {"accepted":True,"requestId":request_id})
+                worker.unload()
+                server.close()
+                return
             if request.get("modelId") != MODEL_ID:
                 write_framed_json(connection, {"accepted": False, "requestId": request_id,
                                               "error": "Worker model does not match the request."})
@@ -1070,6 +1097,7 @@ def main() -> int:
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--model-id", choices=["stable-audio-3-medium", "minimax-music-3"], default="stable-audio-3-medium")
     parser.add_argument("--model-root", required=True)
+    parser.add_argument("--optimization", choices=["standard", "compile", "torchao-int8", "disk-offload", "fp8-storage"], default="standard")
     args = parser.parse_args()
     MODEL_ID = args.model_id
     from ai_execution_policy import configure_allocator_environment
@@ -1077,7 +1105,14 @@ def main() -> int:
     MODEL_LABEL = "MiniMax Music 3" if MODEL_ID == "minimax-music-3" else "Stable Audio 3 Medium"
     if not args.worker:
         raise SystemExit("--worker is required")
-    run_worker(Path(args.model_root).expanduser())
+    from ai_compilation import validate_optimization, prepare_worker_optimization
+    validate_optimization(args.optimization, MODEL_ID)
+    workspace = prepare_worker_optimization(args.optimization, MODEL_ID)
+    try:
+        run_worker(Path(args.model_root).expanduser(), args.optimization)
+    finally:
+        if workspace is not None:
+            workspace.close()
     return 0
 
 

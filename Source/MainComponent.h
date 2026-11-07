@@ -1,5 +1,6 @@
 #include "ToneSearchRequest.h"
 #pragma once
+#include "LatestAnalysisQueue.h"
 #include "ProjectFileStore.h"
 #include "RecoveryJournal.h"
 #include "OwnedBackgroundTasks.h"
@@ -238,7 +239,10 @@ private:
     juce::ThreadPool noteRenderPool { 1 };
     juce::ThreadPool fullClipHQPool { 1 };
     juce::ThreadPool mediaPreviewPool { 2 };
+    LatestAnalysisQueue tempoAnalysisQueue;
     OwnedBackgroundTasks mediaOperations;
+    juce::CriticalSection projectRateCopyJobLock;
+    std::map<juce::String, std::shared_ptr<std::atomic<bool>>> projectRateCopyJobs;
     OwnedBackgroundTasks aiPreflightOperations;
     // File jobs must finish before the WebView and completion owner disappear.
     juce::ThreadPool projectFilePool { 1 };
@@ -285,6 +289,7 @@ private:
         juce::Thread::Priority::low
     };
     juce::CriticalSection pitchCorrectionJobLock;
+    juce::String activePitchClipId;
     juce::String activePreviewRequestGroup;
     juce::String activeNoteRenderRequestGroup;
     juce::String activeFullClipRequestGroup;

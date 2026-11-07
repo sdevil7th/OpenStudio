@@ -1,0 +1,72 @@
+name: openstudio
+title: OpenStudio
+base: core22
+version: '0.1.09'
+summary: Record, edit and mix audio and MIDI
+description: |
+  OpenStudio is a digital audio workstation with audio and MIDI recording,
+  editing, instruments, effects and offline export. Optional AI features use
+  additional runtime and model downloads. OpenStudio Support runs separately,
+  only when explicitly opened, and collects existing evidence for user review.
+license: AGPL-3.0-only
+icon: icon.png
+website: https://openstudio.org.in
+issues: https://github.com/sdevil7th/OpenStudio/issues
+source-code: https://github.com/sdevil7th/OpenStudio
+contact: mailto:support@openstudio.org.in
+grade: stable
+# External native plugins and projects may live anywhere on the host. Classic
+# distribution requires Canonical review; local installation is not approval.
+confinement: classic
+architectures: [amd64]
+apps:
+  openstudio:
+    command: bin/openstudio-launch
+    desktop: usr/share/applications/openstudio.desktop
+  support:
+    command: bin/openstudio-support-launch
+    desktop: usr/share/applications/openstudio-support.desktop
+parts:
+  runtime:
+    plugin: dump
+    source: payload
+    # Run Canonical's fixups explicitly, then repair stale note references
+    # without moving the frozen Support launcher's appended archive.
+    build-attributes: [no-patchelf]
+    organize:
+      usr/lib/x86_64-linux-gnu/webkit2gtk-4.1: wk
+    build-packages: [libglib2.0-bin]
+    stage-packages:
+      - libwebkit2gtk-4.1-0
+      - libgtk-3-0
+      - libasound2
+      - libjack-jackd2-0
+      - libcurl4
+      - libx11-6
+      - libxext6
+      - libxrandr2
+      - libxinerama1
+      - libxcursor1
+      - libxcomposite1
+      - libxrender1
+      - libfreetype6
+      - libfontconfig1
+      - libxft2
+      - libxss1
+      - libgl1-mesa-dri
+      - libgl1
+      - libegl1
+      - libegl-mesa0
+      - fonts-dejavu-core
+      - ffmpeg
+      - libsecret-tools
+      - shared-mime-info
+      - desktop-file-utils
+      - procps
+    override-build: |
+      craftctl default
+      glib-compile-schemas "$CRAFT_PART_INSTALL/usr/share/glib-2.0/schemas"
+      python3 "$CRAFT_PROJECT_DIR/patch-snap-webkit.py" "$CRAFT_PART_INSTALL"
+    override-prime: |
+      craftctl default
+      snap run --shell snapcraft -c 'exec "$SNAP/bin/python3" "$1" --root "$2"' -- "$CRAFT_PROJECT_DIR/snap_elf.py" "$CRAFT_PRIME"

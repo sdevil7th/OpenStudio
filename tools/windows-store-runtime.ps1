@@ -4,7 +4,7 @@ function Copy-StoreRuntimeDirectories {
         [Parameter(Mandatory = $true)][string]$StageDir
     )
 
-    $required = @('webui', 'effects', 'licenses', 'models', 'scripts')
+    $required = @('webui', 'effects', 'licenses', 'models', 'scripts', 'support-runtime')
     foreach ($directory in $required) {
         if (!(Test-Path -LiteralPath (Join-Path $SourceDir $directory) -PathType Container)) {
             throw "Missing runtime directory: $directory"

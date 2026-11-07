@@ -22,7 +22,7 @@ inline juce::String nativePackageFormat()
 {
    #if JUCE_LINUX
     const auto format = executableFile().getSiblingFile("OpenStudio.package").loadFileAsString().trim();
-    if (format == "deb" || format == "rpm")
+    if (format == "deb" || format == "rpm" || format == "snap")
         return format;
    #endif
     return {};

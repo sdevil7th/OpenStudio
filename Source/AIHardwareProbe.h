@@ -6,10 +6,11 @@ namespace OpenStudioAI
 // A failed command may print the GPU name in its error. Only successful stdout
 // is hardware evidence. Use argv directly, never a quoted shell command string.
 inline bool readCommandOutput(const juce::StringArray& arguments, juce::String& output,
-                              const juce::StringPairArray& environment = {}, double timeoutMs = 8000.0)
+                              const juce::StringPairArray& environment = {}, double timeoutMs = 8000.0,
+                              std::intptr_t inputHandle = -1)
 {
     OwnedChildProcess process;
-    if (!process.start(arguments, 1, environment)) return false;
+    if (!process.start(arguments, 1, environment, inputHandle)) return false;
     output.clear();
     const auto deadline = juce::Time::getMillisecondCounterHiRes() + timeoutMs;
     for (;;)
@@ -69,5 +70,29 @@ inline juce::int64 rocmGpuPoolMemoryMb(const juce::String& output)
             largestKb = juce::jmax(largestKb, poolKb);
     }
     return largestKb / 1024;
+}
+
+inline juce::String rocmGpuArchitecture(const juce::String& output)
+{
+    juce::String architecture, candidate;
+    bool gpu = false;
+    int gpuCount = 0;
+    const auto finishAgent = [&]
+    {
+        if (gpu) { ++gpuCount; architecture = candidate; }
+    };
+    for (const auto& raw : juce::StringArray::fromLines(output))
+    {
+        const auto line = raw.trim();
+        if (line.startsWith("Agent ")) { finishAgent(); gpu = false; candidate.clear(); }
+        if (line.startsWith("Name:"))
+        {
+            const auto name = line.fromFirstOccurrenceOf(":", false, false).trim();
+            if (name.startsWith("gfx") && name.substring(3).containsOnly("0123456789abcdef")) candidate = name;
+        }
+        if (line.startsWith("Device Type:")) gpu = line.fromFirstOccurrenceOf(":", false, false).trim() == "GPU";
+    }
+    finishAgent();
+    return gpuCount == 1 ? architecture : juce::String();
 }
 }

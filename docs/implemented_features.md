@@ -26,6 +26,7 @@ Ratings:
 |---|---:|---:|
 | JUCE audio engine with React/WebView2 frontend bridge | H | H |
 | Real-time playback engine with sample-rate-aware clip mixing | H | H |
+| Cancellable band-limited project-rate source copies, source Undo/Redo and optional import-copy policy; originals preserved (development) | H | H |
 | Audio device setup: driver, I/O, sample rate, buffer, channels | H | H |
 | Multitrack audio recording with armed tracks, monitoring, punch range | H | H |
 | Record modes, record-safe state, input-channel selection, and set-loop-to-time-selection workflow | H | M |
@@ -43,6 +44,7 @@ Ratings:
 |---|---:|---:|
 | Konva-based timeline with ruler, grid, zoom, scroll, snap | H | H |
 | Audio and MIDI clip creation, import, drag/drop, move, trim, resize | H | H |
+| Divider insertion preserves mixed source-row order with compatible new tracks and one Undo (development) | M | H |
 | Multi-clip and multi-track selection | H | M |
 | Split, cut, copy, paste, duplicate, delete, nudge, fine nudge | H | M |
 | Time selection editing: cut, copy, delete, insert silence | H | H |
@@ -51,6 +53,9 @@ Ratings:
 | Clip fades, clip volume, gain envelopes, mute, lock, color | H | M |
 | Clip reverse, normalize, time stretch, pitch shift | H | H |
 | Auto-crossfade and crossfade editor | H | M |
+| General selected-audio crossfades: contained/nested/same-edge handoffs, editable curves/lengths, preserved manual gain and one Undo (development) | H | M |
+| Bounded multi-section audio/MIDI tempo analysis with pulse-family candidates, range/tap/count controls and explicit undoable base-tempo apply (development) | H | H |
+| Isolated dry clip + click audition, adjustable phase/grouping and bounded MIDI guide tones; cancellation preserves project transport/source files (development) | M | H |
 | Takes: add, select active, explode to tracks, and implode clips | M | M |
 | Dynamic/transient split workflow | M | H |
 | Track spacers, empty audio/MIDI items, and clip launcher | M | M |
@@ -63,6 +68,8 @@ Ratings:
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | Mixer panel, channel strips, master strip, detached mixer | H | H |
+| Numeric track/master dB entry with draft cancellation and one-step Undo (development) | M | M |
+| Persisted docked mixer resizing with pointer/keyboard controls and workspace bounds (development) | M | M |
 | Track volume, pan, mute, solo, arm, monitor controls | H | M |
 | Master volume, pan, mute, mono, master automation | H | M |
 | Peak/RMS metering, master meter, clipping reset | H | H |
@@ -124,6 +131,9 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 | Quantize using last settings, reset quantize, and freeze quantize | M | M |
 | MIDI transforms: transpose/octave, velocity scale, reverse, invert, and scale snap | M | M |
 | MIDI import/export and project MIDI export | H | M |
+| Join same-track MIDI clips with finite loop/source-window materialization and one Undo (development) | M | H |
+| MIDI export retains channel/controller events and current project tempo/time-signature changes, rebased for clip exports (development) | H | H |
+| Piano Roll note hover shows pitch name/number and velocity without pointer-driven React updates (development) | M | L |
 | Load/open virtual instrument on instrument tracks | H | H |
 | Built-in basic synth, piano, clean-guitar, drum, and fallback sampler paths | M | H |
 | Audio-to-MIDI creates an adjacent MIDI track with undo support | H | H |
@@ -150,7 +160,7 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | Offline project render through the same playback/FX engine | H | H |
-| Render formats: WAV, AIFF, FLAC, MP3, OGG (FFmpeg-backed export uses the bundled audited binary on Windows and a system dependency on macOS/Linux) | H | H |
+| Render formats: WAV, AIFF, FLAC, MP3, OGG (OGG uses built-in Vorbis; MP3 and final FFmpeg conversions use the bundled audited binary on Windows and a system dependency on macOS/Linux) | H | H |
 | Render options: sample rate, bit depth/quality, mono/stereo, normalize, tail | H | M |
 | Dithered render path | M | H |
 | Master and per-track stem render paths, plus region/razor range orchestration | H | H |
@@ -190,8 +200,9 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | AI tools runtime status, install, cancel, reset flow | H | H |
+| Optional repair before opening the DAW after Windows/Linux updates, with accelerator validation, retained stem models and CPU-only setup preservation | H | H |
 | Feature-selective AI setup with hardware/model readiness and background progress | H | H |
-| Stem separation workflow with selectable stems and progress polling | H | H |
+| Stem separation with selectable stems, CPU-only processing, rolling buffers, optional 30-second sections and qualified Linux gfx1151 FP16 acceleration | H | H |
 | Stem separation result import into new tracks/clips | H | H |
 | AI track type and AI track header controls | M | H |
 | ACE-Step text-to-music and lyrics-plus-style generation | H | H |
@@ -200,6 +211,7 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 | ACE-Step/Stable Audio source-conditioned variation, inpaint-selection, and continue-clip workflows | H | H |
 | AI setup totals, remaining bytes, cache reuse, persistent active-job display, and logs | M | H |
 | AI generation stage/step/frame progress and cancellation | M | H |
+| Automatic generation memory planning across ACE-Step, Stable Audio and MiniMax, with request-growth checks, bounded MiniMax loading and shared worker handoff (development checkout; hardware scope in November qualification report) | H | H |
 
 ## Workflow / UI Customization
 
@@ -244,6 +256,7 @@ These have real code surfaces, but should not be counted as fully delivered DAW 
 | Signed updates and macOS/Linux replacement | Current checkout authenticates manifests/packages and supports guarded replacement of eligible user-owned app bundles/AppImages with retained backups. Requires a new release; real installed upgrades, unsigned Gatekeeper acceptance, AppImage/FUSE, and Store delivery remain unqualified. See [updater guide](updater-security-and-migration.md) |
 | Separate-process plugin hosting | Windows-only per-plugin opt-in, applied on next load; adds latency, limits audio to 32 active channels, and excludes ARA. Fault reporting/restart exists, but individual vendor compatibility requires qualification |
 | AI hardware check and adaptive memory placement | Current checkout provides advisory request estimates and supported workers adapt placement/offloading; estimates are not admission guarantees, speed or quality claims, or proof of support on every GPU |
+| Local generation optimization choices (development) | Qualified RTX 4080 ACE-Step disk offload and Stable Audio FP8 storage/compilation; isolated compiler setup validates real forwards before activation. Linux gfx1151 ACE-Step offers the qualified MIOpen startup recipe. Exact preview auditions and hardware/runtime limits are recorded in [November qualification](ai-optimization-qualification-2026-11-06.md); Automatic remains the default |
 | Polyphonic pitch correction / solo-note resynthesis | Detection and MIDI extraction exist; `PolyResynthesizer` is still stub-like |
 | AAF import | Stubbed in session interchange |
 | LTC output | Bridge stub exists, not a real implementation |

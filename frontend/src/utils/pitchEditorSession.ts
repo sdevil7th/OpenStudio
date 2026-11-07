@@ -221,14 +221,22 @@ export function startPitchEditorSessionController(): () => void {
 }
 
 /** Replace every store action before mounting the remote editor. No second engine owner. */
-export async function connectPitchEditorView(onHydrated: () => void, onError: (message: string) => void): Promise<() => void> {
+export async function connectPitchEditorView(onHydrated: (canvasReady: () => void) => void, onError: (message: string) => void): Promise<() => void> {
   let snapshot: PitchSnapshot | undefined;
   let viewId = "";
   let sequence = 0;
   let sending: Promise<void> | undefined;
   const queuedCommands: Array<Omit<PitchSessionCommand, "sequence">> = [];
-  let readyGeneration = -1;
+  let readyIdentity: PitchSessionIdentity | undefined;
+  let renderedIdentity: PitchSessionIdentity | undefined;
   let active = true;
+  const acknowledgeRenderedView = () => {
+    if (!active || !viewId || !snapshot || !renderedIdentity
+      || !samePitchIdentity(renderedIdentity, snapshot)
+      || (readyIdentity && samePitchIdentity(readyIdentity, snapshot))) return;
+    readyIdentity = identityFrom(snapshot);
+    void nativeBridge.pitchEditorSession("ready", { ...identityFrom(snapshot), viewId });
+  };
   const originals = usePitchEditorStore.getState();
   const drainCommands = (): Promise<void> => {
     if (sending) return sending;
@@ -271,13 +279,13 @@ export async function connectPitchEditorView(onHydrated: () => void, onError: (m
     usePitchEditorStore.setState(incoming.pitch);
     if (incoming.daw) useDAWStore.setState({ ...incoming.daw, showPitchEditor: true });
     if (incoming.error) onError(incoming.error);
-    if (changedSession || readyGeneration !== incoming.generation) {
-      readyGeneration = incoming.generation;
-      onHydrated();
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        if (active && snapshot && document.querySelector("canvas")?.getBoundingClientRect().width)
-          void nativeBridge.pitchEditorSession("ready", { ...identityFrom(snapshot), viewId });
-      }));
+    if (changedSession || !readyIdentity || !samePitchIdentity(readyIdentity, incoming)) {
+      const expected = identityFrom(incoming);
+      onHydrated(() => {
+        if (!active || !snapshot || !samePitchIdentity(expected, snapshot)) return;
+        renderedIdentity = expected;
+        acknowledgeRenderedView();
+      });
     }
   };
   const off = nativeBridge.subscribe("pitchEditorSnapshot", apply);
@@ -285,6 +293,7 @@ export async function connectPitchEditorView(onHydrated: () => void, onError: (m
   if (!initial || !initial.snapshot?.pitch) { off(); throw new Error("The main pitch session is unavailable."); }
   viewId = initial.viewId;
   apply(initial.snapshot);
+  acknowledgeRenderedView();
   const offHarnessEdit = nativeBridge.subscribe("pitchEditorHarnessEdit", (action: string) => {
     if (action === "relative+4") { void send("selectAll"); void send("moveSelectedPitch", [4]); }
     if (action === "undo") void send("undo");

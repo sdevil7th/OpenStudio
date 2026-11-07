@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "modules": [
+    "diffusers_audio_pipeline.py",
+    "ai_execution_policy.py",
+    "ai_memory_manager.py",
+    "ai_system_memory.py",
+    "ai_attention_policy.py",
+    "ai_partial_offload.py",
+    "ai_disk_store.py",
+    "ai_group_offload.py",
+    "ai_model_variants.py",
+    "stem_acceleration.py",
+    "ai_compilation.py",
+    "ai_layerwise_storage.py",
+    "ai_rocm_startup.py",
+    "ai_compiler_profile.py"
+  ]
+}

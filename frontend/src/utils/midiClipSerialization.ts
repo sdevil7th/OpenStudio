@@ -267,7 +267,7 @@ export function applyMIDITrackEffects(events: MIDIEvent[], effects: MIDITrackEff
     }, events.map(cloneMIDIEvent));
 }
 
-export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
+export function getVisibleMIDIEventsForClip(clip: MIDIClip, options: { includeMuted?: boolean; preserveNoteIdentity?: boolean } = {}): MIDIEvent[] {
   const { offset, end } = visibleWindow(clip);
   const duration = Math.max(0, clip.duration || 0);
   const loopLength = sourceLoopLength(clip);
@@ -281,7 +281,7 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
     consumed.add(pair.offIndex);
     const pairStart = pair.startTime;
     const pairEnd = pair.startTime + pair.duration;
-    if (pair.muted) continue;
+    if (pair.muted && !options.includeMuted) continue;
 
     const firstLoop = loopLength ? loopRangeStart(offset, pairEnd, loopLength) : 0;
     const lastLoop = loopLength ? loopRangeEnd(end, pairStart, loopLength) : 0;
@@ -299,12 +299,17 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
       const noteEnd = Math.min(duration, renderedEnd - offset);
       if (noteEnd <= start) continue;
       const velocity = applyVelocityVariance(pair.velocity, pair.noteOn, seed);
+      // Namespace each source pair and loop occurrence before flattening clips.
+      // Derive from source indices rather than recursively extending prior IDs.
+      const identity = options.preserveNoteIdentity || pair.noteOn.notePairId !== undefined
+        ? { notePairId: JSON.stringify([clip.id, pair.onIndex, loopIndex]) } : {};
       const releaseVelocity = clampMIDIReleaseVelocity(
         pair.releaseVelocity ?? pair.noteOff.releaseVelocity ?? pair.noteOff.velocity ?? 0,
       );
 
       const noteOffEvent: MIDIEvent = {
           ...pair.noteOff,
+          ...identity,
           timestamp: noteEnd,
           type: "noteOff",
           note: pair.noteNumber,
@@ -319,6 +324,7 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
       pushEvent(
         {
           ...pair.noteOn,
+          ...identity,
           timestamp: start,
           type: "noteOn",
           note: pair.noteNumber,
@@ -334,7 +340,7 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
 
   for (let index = 0; index < (clip.events || []).length; index += 1) {
     const event = clip.events[index];
-    if (consumed.has(index) || event.muted) continue;
+    if (consumed.has(index) || (event.muted && !options.includeMuted)) continue;
     const eventTime = Number(event.timestamp);
     if (!Number.isFinite(eventTime)) continue;
 
@@ -353,7 +359,7 @@ export function getVisibleMIDIEventsForClip(clip: MIDIClip): MIDIEvent[] {
   return events.sort((a, b) => a.timestamp - b.timestamp || (sourceOrder.get(a) ?? 0) - (sourceOrder.get(b) ?? 0));
 }
 
-function getVisibleMIDICCEventsForClip(clip: MIDIClip): MIDICCEvent[] {
+export function getVisibleMIDICCEventsForClip(clip: MIDIClip): MIDICCEvent[] {
   const { offset, end } = visibleWindow(clip);
   const loopLength = sourceLoopLength(clip);
   const events: MIDICCEvent[] = [];

@@ -19,8 +19,7 @@ import sys
 
 GIB = 1024 ** 3
 POLICY_VERSION = 1
-WORKER_MODULES = ("diffusers_audio_pipeline.py", "ai_execution_policy.py",
-                  "ai_attention_policy.py", "ai_partial_offload.py", "ai_disk_store.py", "ai_model_variants.py")
+WORKER_MODULES = tuple(json.loads(Path(__file__).with_name("ai-worker-modules.json").read_text())["modules"])
 
 MINIMAX_ALLOCATOR = "backend:native,per_process_memory_fraction:0.9,garbage_collection_threshold:0.8,roundup_power2_divisions:4"
 MINIMAX_PROMPT_MEASUREMENT = "upstream-tokenize-step-v1"
@@ -46,8 +45,17 @@ def configure_allocator_environment(model: str) -> None:
 
 
 def worker_version(script: Path) -> str:
-    return hashlib.md5(script.read_bytes() + b"".join(
-        script.with_name(name).read_bytes() for name in WORKER_MODULES)).hexdigest()[:16]
+    manifest = script.with_name("ai-worker-modules.json").read_bytes()
+    record = json.loads(manifest)
+    modules = record.get("modules")
+    if (record.get("schemaVersion") != 1 or not isinstance(modules, list) or not 1 <= len(modules) <= 32
+            or any(not isinstance(name,str) or
+                Path(name).name != name or not name.endswith(".py") or ".." in name or
+                any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_." for c in name) for name in modules)
+            or len(set(modules)) != len(modules)):
+        raise ValueError("Invalid worker dependency manifest")
+    return hashlib.md5(script.read_bytes() + manifest + b"".join(
+        script.with_name(name).read_bytes() for name in modules)).hexdigest()[:16]
 
 
 def cuda_uuid(value) -> str:
@@ -70,7 +78,7 @@ def model_storage_identity(root: Path) -> str:
     return digest.hexdigest()
 
 
-def checkpoint_storage_bytes(root: Path, float_bytes: int) -> int | None:
+def checkpoint_storage_bytes(root: Path, float_bytes: int, *, name_prefix: str = "", largest: bool = False) -> int | None:
     """Read safetensors headers only, before a CPU/FP32 load can exhaust RAM."""
     import math
     widths = {"BOOL": 1, "I8": 1, "U8": 1, "I16": 2, "U16": 2, "I32": 4, "U32": 4, "I64": 8, "U64": 8}
@@ -88,14 +96,57 @@ def checkpoint_storage_bytes(root: Path, float_bytes: int) -> int | None:
         for name, tensor in header.items():
             if name == "__metadata__":
                 continue
+            if not name.startswith(name_prefix):
+                continue
             dtype, shape = tensor["dtype"], tensor["shape"]
             if any(not isinstance(size, int) or size < 0 for size in shape):
                 raise ValueError(f"Invalid tensor shape in {path.name}")
             width = float_bytes if dtype.startswith(("F", "BF")) else widths.get(dtype)
             if width is None:
                 return None  # Let the owning loader diagnose an unfamiliar format.
-            total += math.prod(shape) * width
+            size = math.prod(shape) * width
+            total = max(total, size) if largest else total + size
     return total
+
+
+def minimax_checkpoint_memory(root: Path, *, float_bytes: int, duration: float, prompt_tokens: int,
+                              free_vram: int | None, available_ram: int | None) -> dict | None:
+    """Shared pre-load/advisory plan; live tensor sizes are checked after load."""
+    from types import SimpleNamespace
+    from ai_memory_manager import minimax_load_backing, plan_minimax_memory
+    names = ("language_model", "rvq_depth_decoder", "condition_encoder", "transformer", "vocoder")
+    sizes = {name: checkpoint_storage_bytes(root / name, float_bytes) for name in names}
+    if any(size is None for size in sizes.values()):
+        return None
+    config = SimpleNamespace(**json.loads((root / "language_model/config.json").read_text(encoding="utf-8")))
+    blocks = [checkpoint_storage_bytes(root / "language_model", float_bytes, name_prefix=f"model.layers.{i}.")
+              for i in range(config.num_hidden_layers)]
+    if not blocks or not all(blocks):
+        return None
+    weights, largest_group = sum(sizes.values()), max(blocks)
+    kv = minimax_kv_bytes(config, duration=duration, prompt_tokens=prompt_tokens, element_size=float_bytes)
+    plan = plan_minimax_memory(free_vram=free_vram, available_ram=available_ram, weights_bytes=weights,
+        language_model_bytes=sizes["language_model"], bf16=float_bytes==2, stage_bytes=sizes,
+        kv_bytes=kv, largest_group_bytes=largest_group)
+    backing = minimax_load_backing(weights, max(sizes.values()), available_ram)
+    required = {"resident":plan.resident_required_bytes,"model-offload":plan.stage_required_bytes,
+                "group-offload":plan.group_required_bytes}[plan.mode]
+    minimum = max(max(sizes[name] for name in names[2:]),
+                  largest_group+sizes["rvq_depth_decoder"]+kv) + 3*GIB
+    placement = plan.mode
+    if backing == "disk" and plan.mode != "resident":
+        fixed = sizes["language_model"] - sum(blocks)
+        partial = plan_residency(budget=free_vram, block_bytes=blocks, fixed_bytes=fixed,
+            peer_bytes=sizes["rvq_depth_decoder"], kv_bytes=kv, available_ram=available_ram)
+        later = max(sizes[name] for name in names[2:]) + partial.reserve_bytes
+        minimum = max(later, fixed+sizes["rvq_depth_decoder"]+kv+partial.transient_bytes+partial.reserve_bytes)
+        required = max(later, partial.resident_bytes+sizes["rvq_depth_decoder"]+kv+partial.transient_bytes+partial.reserve_bytes)
+        placement = "partial-resident-disk"
+    tensor_peak = max(checkpoint_storage_bytes(root/name,float_bytes,largest=True) for name in names)
+    return {"weightsBytes":weights,"stageWeightBytes":sizes,"requestKvBytes":kv,
+        "loadingBacking":backing,"placement":placement,"requiredDeviceBytes":required,
+        "minimumDeviceBytes":minimum,"requiredHostBytes":3*GIB+2*tensor_peak if backing=="disk" else weights+max(sizes.values())+3*GIB,
+        "reason":"Checkpoint component/layer weights, normalized request tokens, KV cache and loading headroom"}
 
 
 def check_host_capacity(root: Path, *, float_bytes: int = 4) -> None:
@@ -179,11 +230,34 @@ def qualified_minimax_options(torch, root: Path, duration: float, prompt_tokens:
 
 
 def host_available() -> int | None:
-    try:
-        import psutil
-        return int(psutil.virtual_memory().available)
-    except (ImportError, OSError, AttributeError):
-        return None
+    from ai_system_memory import available_memory
+    return available_memory()
+
+
+def configure_roformer_precision(model, precision: str) -> dict:
+    """Experimental autocast boundary; complex reconstruction stays FP32.
+
+    No global Torch patch and no checkpoint mutation. Model-head hooks apply
+    only to an explicitly requested candidate and cannot be stacked/reused
+    under another precision without rebuilding the model.
+    """
+    if precision not in {"fp16", "bf16"}:
+        return {"state": "default", "qualification": "existing_default"}
+    import torch
+    heads = getattr(model, "mask_estimators", None)
+    if not isinstance(heads, torch.nn.ModuleList) or not len(heads):
+        raise ValueError("RoFormer mask-head layout changed; experimental precision needs review")
+    previous = getattr(model, "_openstudio_precision", None)
+    if previous is not None:
+        if previous != precision:
+            raise ValueError("Rebuild RoFormer before changing its precision policy")
+    else:
+        handles = [head.register_forward_hook(lambda _module, _inputs, output: output.float()) for head in heads]
+        model._openstudio_precision = precision
+        model._openstudio_precision_handles = handles
+    return {"state": "explicit_experiment", "computeAutocast": precision,
+            "complexReconstruction": "float32", "maskHeadBoundaries": len(heads),
+            "subjectiveAudioQuality": "not_asserted"}
 
 
 def release_idle_weights(idle_seconds: float, available_ram: int | None) -> bool:
@@ -331,37 +405,58 @@ def runtime_capabilities(torch) -> dict[str, Any]:
             "availableRamBytes": host_available(), "devices": [asdict(x) for x in enumerate_devices(torch)],
             "packages": packages, "cpuThreads": worker_threads(cpu=True),
             "gpuWorkerThreads": worker_threads(),
+            "attentionEnvironment": {"TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL":
+                                     os.environ.get("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL")},
             "qualification": "availability_only"}
+
+
+def stem_execution_backend(backend: str, model_name: str) -> tuple[str, str]:
+    """Select an executable model backend, not merely an importable runtime.
+
+    torch-directml 0.2.5 aborts natively on the complex output of RoFormer's
+    STFT. Python exception handling cannot recover from that abort. Keep other
+    separator architectures' DirectML paths intact.
+    """
+    if backend == "directml" and "roformer" in model_name.lower():
+        return "cpu", "Using CPU: BS-RoFormer needs complex STFT operations that this DirectML runtime does not support."
+    return backend, ""
 
 
 def model_execution_capabilities(model: str, family: str) -> dict:
     """Adapter coverage is distinct from measured hardware qualification."""
     modes = ["resident"]
+    experimental = []
     excluded = {"disk-offload": "No qualified disk storage/cleanup adapter for this model.",
                 "multi-gpu-sharding": "Single-adapter selection is implemented; distributed execution is unqualified."}
     if model == "minimax-music-3":
         if family in {"cuda", "rocm"}:
             modes += ["model-offload", "group-offload", "partial-resident", "partial-resident-disk"]
-            excluded["disk-offload"] = "Bounded disk-backed partial placement is experimental; full-model RAM qualification is incomplete."
+            excluded["disk-offload"] = "Generic disk hooks are unsupported; MiniMax uses its model-specific partial-resident-disk placement."
         excluded["sequential-offload"] = "Direct embedding/head calls require the model-specific placement owner."
     elif model in {"stable-audio-3-medium", "ace-step-v15-xl-turbo"}:
         if family in {"cuda", "rocm", "xpu"}:
             modes += ["model-offload"]
             if model == "ace-step-v15-xl-turbo":
                 modes += ["group-offload"]
+                if family == "cuda":
+                    modes += ["group-offload-disk"]
+                    experimental += ["group-offload-disk"]
+                    excluded.pop("disk-offload", None)
         excluded["sequential-offload"] = "Prior warm-output/meta-tensor qualification failed."
         if model == "stable-audio-3-medium":
             excluded["group-offload"] = "Only resident/component placement has valid workflow qualification."
     elif model == "bs-roformer":
-        modes = ["resident-model-with-cpu-chunk-storage"]
+        modes = [] if family == "directml" else ["resident-model-with-cpu-chunk-storage"]
+        if family == "directml":
+            excluded["directml-inference"] = "Complex STFT operations abort this DirectML runtime; use CPU execution."
         excluded["diffusers-offload"] = "audio-separator is a separate engine; Diffusers hooks are inapplicable."
         excluded["batch-size-tuning"] = "The pinned Roformer loop ignores batch_size."
     else:
         raise ValueError(f"Unknown execution adapter: {model}")
     return {"model": model, "family": family, "implementedPlacementModes": modes,
             "excluded": excluded, "qualification": "adapter_coverage_only",
-            "experimentalPlacementModes": ["partial-resident", "partial-resident-disk"]
-                if model == "minimax-music-3" and family in {"cuda", "rocm"} else []}
+            "experimentalPlacementModes": experimental + (["partial-resident", "partial-resident-disk"]
+                if model == "minimax-music-3" and family in {"cuda", "rocm"} else [])}
 
 
 def nvidia_link_snapshot() -> dict:
@@ -569,13 +664,31 @@ def compile_components(components: dict, device: str) -> dict:
     if device.startswith("cuda") and optimization_candidates()["compile"]["state"] == "unavailable":
         raise ValueError("CUDA compilation requires a working, qualified Triton runtime.")
     compiled = []
+    seen = set()
     for name, model in components.items():
+        if id(model) in seen:
+            continue
+        seen.add(id(model))
         if callable(getattr(model, "compile_repeated_blocks", None)) and getattr(model, "_repeated_blocks", None):
-            model.compile_repeated_blocks(fullgraph=True)
+            model.compile_repeated_blocks(fullgraph=True, dynamic=True, options={"triton.cudagraphs": False})
+            compiled.append(name)
+        elif (type(model).__name__ == "AceStepTransformer1DModel"
+              and type(model).__module__ == "diffusers.models.transformers.ace_step_transformer"):
+            # This pinned upstream model omits _repeated_blocks metadata.
+            # Compile only the audited repeated forward functions. Placement
+            # hooks run outside them, so transfers and disk IO stay eager.
+            import torch
+            blocks = list(model.layers)
+            if not blocks or any(type(block).__name__ != "AceStepTransformerBlock" for block in blocks):
+                raise ValueError("ACE-Step repeated block layout changed; compilation needs review")
+            for block in blocks:
+                block.forward = torch.compile(block.forward, fullgraph=True, dynamic=True,
+                                              options={"triton.cudagraphs": False})
             compiled.append(name)
     if not compiled:
         raise ValueError("This pipeline exposes no supported repeated-block compilation targets.")
-    return {"targets": compiled, "state": "pending_first_forward", "audioQuality": "not_asserted"}
+    return {"targets": compiled, "state": "pending_first_forward", "audioQuality": "not_asserted",
+            "fullgraph": True, "dynamic": True, "cudaGraphs": False, "matmulPrecision": "unchanged"}
 
 
 def probe_compile(torch, device: str) -> dict:

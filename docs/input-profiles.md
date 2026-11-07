@@ -1,5 +1,22 @@
 # Keyboard, Hotkey, Mouse, and Scroll Profiles
 
+Maintainers can check the scoped source/documentation contract after installing
+frontend dependencies:
+
+```bash
+node tools/validate-input-docs.mjs
+node tools/validate-input-docs.mjs --website-root ../openstudio-website
+node --test tools/validate-input-docs.test.mjs
+```
+
+The optional website argument checks six development guides and the preview arm
+tooltip. The validator reads the TypeScript action/profile/menu AST and the
+document data; it does not start the app or import its browser store. It covers
+OpenStudio Record/aliases, Timeline Join/Crossfade, F1 Help Reference and the
+Keyboard, Mouse & Trackpad label. It does not claim to validate every vendor
+profile, user override, translation or arbitrary prose. Changed source bindings
+require matching scoped documentation; fixture tests verify stale claims fail.
+
 OpenStudio can adopt the familiar input conventions of another DAW without
 changing the project or audio engine. Keyboard and mouse/scroll behavior are
 separate choices: for example, you can use Cubase-style keys with REAPER-style
@@ -244,6 +261,18 @@ profiles, and OpenStudio adaptations are distinct.
 | OpenStudio | Application defaults | Native application behavior, not a vendor compatibility claim. |
 
 ## Navigation qualification
+
+The November 4 development workflow shows **Time selection** with range/duration
+and clear, select-clips and loop actions for the blue editing range. Under the
+OpenStudio Windows mouse defaults, Ctrl+drag on empty space creates that range;
+Ctrl+drag on a clip copies it, Ctrl+click toggles selection, and Ctrl+Shift+drag
+slips its source. Feedback uses the resolved profile action. Persistent MIDI
+**Source offset** labels describe retained content, not an active gesture.
+**Join Selected MIDI Clips** shows its effective shortcut and disabled reason.
+**Export Selected MIDI Clips...** is available in the clip menu and action catalog;
+it has no new default shortcut and can be assigned in Keyboard, Mouse & Trackpad.
+Pointer resizing of the mixer releases temporary shortcut ownership on completion;
+Tab focus intentionally retains keyboard resizing until focus moves elsewhere.
 
 Use `tools/input-profile-browser-regression.js` in a disposable browser session
 against the real App. Resolver/dispatch-table tests alone do not prove that a

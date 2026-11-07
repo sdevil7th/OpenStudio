@@ -97,6 +97,15 @@ public:
         };
         AppUpdater updater(directory);
         updater.trustedPublicKey = publicHex;
+       #if JUCE_LINUX
+        if (OpenStudioRuntime::nativePackageFormat() == "snap")
+        {
+            const auto status = updater.getLastStatus();
+            check("snap_updates_use_store_without_appimage_restore",
+                  status["status"] == "manual-update" && status["updateSource"] == "snap-store"
+                  && status["releasePageUrl"] == "https://snapcraft.io/openstudio");
+        }
+       #endif
         const auto root = directory.getChildFile("updates");
         const auto folder = root.getChildFile(juce::Uuid().toString());
         folder.createDirectory();
@@ -156,16 +165,32 @@ public:
         staged->setProperty("signedEnvelope", envelope);
         updater.persistedState.getDynamicObject()->setProperty("stagedDownload", juce::var(staged));
         check("persists_staged_download", updater.savePersistedState());
+        const auto stagedStateFile = directory.getChildFile("updater-state.json");
+        const auto savedState = stagedStateFile.loadFileAsString();
         AppUpdater reopened(directory);
         reopened.trustedPublicKey = publicHex;
-        check("restart_restores_and_reverifies_download", reopened.restoreDownload()["status"] == "download-ready"
+        const bool packageManaged = OpenStudioRuntime::nativePackageFormat().isNotEmpty();
+        if (packageManaged)
+        {
+            check("native_package_restart_leaves_appimage_state_unloaded",
+                  !reopened.persistedState.isObject() && reopened.downloadedInstaller == juce::File()
+                  && reopened.getLastStatus()["status"] == "manual-update"
+                  && file.existsAsFile() && stagedStateFile.loadFileAsString() == savedState);
+            // Native packages deliberately do not load an AppImage offer on
+            // startup. Inject only this test fixture to exercise the shared
+            // signature/hash verifier independently of that routing contract.
+            reopened.persistedState = juce::JSON::parse(savedState);
+        }
+        check(packageManaged ? "staged_verifier_reverifies_download" : "restart_restores_and_reverifies_download",
+            reopened.restoreDownload()["status"] == "download-ready"
             && reopened.downloadedInstaller == file);
         reopened.cancelDownload();
         check("cancelled_install_never_launches_verified_package", reopened.performInstall()["status"] == "cancelled");
         reopened.cancelRequested = false;
         file.appendText("tampered");
         check("install_rechecks_package_before_launch", reopened.performInstall()["status"] == "error");
-        check("restart_discards_corrupt_staged_package", !reopened.restoreDownload().isObject() && !file.existsAsFile());
+        check(packageManaged ? "staged_verifier_discards_corrupt_package" : "restart_discards_corrupt_staged_package",
+              !reopened.restoreDownload().isObject() && !file.existsAsFile());
         check("rejects_staged_path_escape", AppUpdater::stagedFile(root, "../outside.exe") == juce::File()
             && AppUpdater::stagedFile(root, "C:/outside.exe") == juce::File()
             && AppUpdater::stagedFile(root, juce::Uuid().toString() + "/../outside.exe") == juce::File());

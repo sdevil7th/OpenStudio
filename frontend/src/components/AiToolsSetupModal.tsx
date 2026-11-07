@@ -1,4 +1,5 @@
 import { AIModelVariantSelector, type AIModelVariant } from "./AIModelVariantSelector";
+import { AIExecutionOptions } from "./AIExecutionOptions";
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -352,6 +353,9 @@ export default function AiToolsSetupModal() {
   const [stableAudioSetupBusy, setStableAudioSetupBusy] = useState(false);
   const [huggingFaceToken, setHuggingFaceToken] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [memoryReleasePending, setMemoryReleasePending] = useState(false);
+  const [memoryReleaseMessage, setMemoryReleaseMessage] = useState("");
+  const [repairMessage, setRepairMessage] = useState("");
 
   useEffect(() => {
     setModelVariant(aiToolsStatus.installInProgress && aiToolsStatus.requestedModelId === selectedItemId
@@ -360,6 +364,7 @@ export default function AiToolsSetupModal() {
     setHuggingFaceToken("");
     setStableAudioSelectedFolder("");
     setStableAudioSetupError("");
+    setRepairMessage("");
   }, [selectedItemId, showAiToolsSetup]);
 
   const catalog = useMemo(() => buildSetupCatalog(aiToolsStatus), [aiToolsStatus]);
@@ -496,6 +501,34 @@ export default function AiToolsSetupModal() {
 
   const handleReset = async () => {
     await resetAiTools();
+  };
+
+  const handleRepairStems = async () => {
+    const result = await installAiTools({ userConfirmedDownload: true, repairRuntime: true,
+      selectedFeatures: ["stemSeparation"], requestedFeature: "stemSeparation" });
+    setRepairMessage(result?.error ?? result?.message ?? "");
+  };
+
+  const handlePrepareCompiler = async () => {
+    setStableAudioSetupError("");
+    const result = await installAiTools({ userConfirmedDownload: true, prepareOptimization: "compile", repairRuntime: true,
+      selectedFeatures: ["audioGeneration"], requestedFeature: "audioGeneration",
+      modelId: STABLE_AUDIO_3_MODEL_ID, modelVariant: "original" });
+    setRepairMessage(result?.error ?? result?.message ?? "");
+  };
+
+  const handleReleaseMemory = async () => {
+    setMemoryReleasePending(true);
+    try {
+      const result = await nativeBridge.releaseIdleAIMemory();
+      setMemoryReleaseMessage(result.success
+        ? result.released ? "Idle AI memory released. The model will reload when needed." : "No idle AI worker was using memory."
+        : result.error ?? "AI memory could not be released.");
+    } catch (error) {
+      setMemoryReleaseMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMemoryReleasePending(false);
+    }
   };
 
   const renderReadyPane = () => (
@@ -719,6 +752,7 @@ export default function AiToolsSetupModal() {
   return (
     <Modal isOpen={showAiToolsSetup} onClose={closeAiToolsSetup} size="xl">
       <ModalHeader title="AI Tools Setup" onClose={closeAiToolsSetup} />
+      {repairMessage && <p role="status" aria-label="AI runtime repair" className="mx-4 mb-3 text-sm text-daw-text">{repairMessage}</p>}
       {aiToolsStatus.installInProgress ? renderInstallProgress() : null}
       <ModalContent className="p-0">
         <div className="grid min-h-[620px] grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)]">
@@ -779,6 +813,8 @@ export default function AiToolsSetupModal() {
 
             {selectedItem.modelId ? <AIModelVariantSelector modelId={selectedItem.modelId} value={modelVariant}
               status={aiToolsStatus} onChange={setModelVariant} disabled={aiToolsStatus.installInProgress} setup /> : null}
+            {selectedItem.modelId ? <AIExecutionOptions modelId={selectedItem.modelId} variant={modelVariant}
+                status={aiToolsStatus} disabled={aiToolsStatus.installInProgress} onPrepareCompiler={() => void handlePrepareCompiler()} /> : null}
 
             {aiToolsStatus.installInProgress
               ? <div className="space-y-3 rounded border border-daw-border bg-daw-dark/50 p-4">
@@ -808,6 +844,7 @@ export default function AiToolsSetupModal() {
             ) : null}
 
             {renderDetails()}
+            {memoryReleaseMessage && <p role="status" className="break-words text-sm text-daw-text-secondary">{memoryReleaseMessage}</p>}
           </main>
         </div>
       </ModalContent>
@@ -820,6 +857,16 @@ export default function AiToolsSetupModal() {
             <Button variant="ghost" onClick={() => void handleOpenInstallLog()} icon={<Info size={14} />}>
               Open Install Log
             </Button>
+          ) : null}
+          {!aiToolsStatus.installInProgress ? (
+            <Button variant="ghost" onClick={() => void handleReleaseMemory()} disabled={memoryReleasePending}>
+              {memoryReleasePending ? "Releasing memory..." : "Release idle AI memory"}
+            </Button>
+          ) : null}
+          {!aiToolsStatus.installInProgress && selectedItem.featureId === "stemSeparation" ? (
+              <Button variant="ghost" onClick={() => void handleRepairStems()} title="Schedule repair for the next launch. Your downloaded models are kept.">
+                Repair Stem Separation
+              </Button>
           ) : null}
           {!aiToolsStatus.installInProgress ? (
             <Button variant="ghost" onClick={() => void handleReset()} icon={<RotateCcw size={14} />}>

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useDAWStore } from "../store/useDAWStore";
 import { useShallow } from "zustand/shallow";
-import { nativeBridge } from "../services/NativeBridge";
+import { isMac } from "../utils/platform";
+import { nativeBridge, type StemSepProgress } from "../services/NativeBridge";
 import {
   Button,
   Checkbox,
@@ -21,16 +22,6 @@ const STEM_COLORS: Record<string, string> = {
 };
 
 const ALL_STEMS = ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"];
-
-interface StemSepProgress {
-  state: "idle" | "loading" | "analyzing" | "writing" | "done" | "error";
-  progress: number;
-  stemFiles?: Array<{ name: string; filePath: string }>;
-  error?: string;
-  backend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
-  accelerationMode?: "auto" | "cpu-only";
-  threadCap?: number;
-}
 
 export default function StemSeparationModal() {
   const {
@@ -61,11 +52,18 @@ export default function StemSeparationModal() {
 
   const [selectedStems, setSelectedStems] = useState<string[]>([...ALL_STEMS]);
   const [separating, setSeparating] = useState(false);
+  const [accelerationMode, setAccelerationMode] = useState<"auto" | "cpu-only">("auto");
+  const [chunkDuration, setChunkDuration] = useState<0 | 30>(0);
+  const [memoryMode, setMemoryMode] = useState<"automatic" | "streaming-preview">("automatic");
+  const [performanceMode, setPerformanceMode] = useState<"standard" | "qualified-fast">("standard");
   const [progress, setProgress] = useState<StemSepProgress>({ state: "idle", progress: 0 });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const completedRef = useRef(false);
+  const requestSerialRef = useRef(0);
   const stemFeature = aiToolsStatus.features?.stemSeparation;
   const isStemSeparationReady = Boolean(stemFeature?.ready ?? aiToolsStatus.available);
+  const rollingSupported = aiToolsStatus.hardware?.platform
+    ? ["windows", "linux"].includes(aiToolsStatus.hardware.platform.toLowerCase()) : !isMac;
   const isStemSeparationCompatible = stemFeature?.compatible ?? true;
   const stemSeparationBlockMessage =
     stemFeature?.message
@@ -80,7 +78,11 @@ export default function StemSeparationModal() {
     }
   }, []);
 
-  useEffect(() => stopPolling, [stopPolling]);
+  useEffect(() => () => {
+    ++requestSerialRef.current;
+    completedRef.current = true;
+    stopPolling();
+  }, [stopPolling]);
 
   const toggleStem = (stem: string) => {
     setSelectedStems((prev) =>
@@ -111,6 +113,8 @@ export default function StemSeparationModal() {
     setSeparating(true);
     setProgress({ state: "loading", progress: 0 });
     completedRef.current = false;
+    const requestSerial = ++requestSerialRef.current;
+    const isCurrent = () => requestSerialRef.current === requestSerial;
 
     try {
       const state = useDAWStore.getState();
@@ -125,8 +129,12 @@ export default function StemSeparationModal() {
       const result = await nativeBridge.separateStemsAsync(stemSepTrackId, stemSepClipId, {
         stems: selectedStems,
         filePath: sourceClip.filePath,
-        accelerationMode: "auto",
+        accelerationMode,
+        chunkDuration,
+        memoryMode,
+        performanceMode,
       });
+      if (!isCurrent()) return;
 
       if (!result.started) {
         setProgress({ state: "error", progress: 0, error: result.error || "Failed to start separation." });
@@ -135,11 +143,25 @@ export default function StemSeparationModal() {
       }
 
       let idleCount = 0;
+      let pollInFlight = false;
       pollRef.current = setInterval(async () => {
-        if (completedRef.current) return;
+        if (!isCurrent() || completedRef.current || pollInFlight) return;
+        pollInFlight = true;
 
-        const nextProgress = await nativeBridge.getStemSeparationProgress();
-        if (completedRef.current) return;
+        let nextProgress: StemSepProgress;
+        try {
+          nextProgress = await nativeBridge.getStemSeparationProgress();
+        } catch (error) {
+          if (!isCurrent() || completedRef.current) return;
+          completedRef.current = true;
+          stopPolling();
+          setProgress({ state: "error", progress: 0, error: error instanceof Error ? error.message : "Could not read separation progress." });
+          setSeparating(false);
+          return;
+        } finally {
+          pollInFlight = false;
+        }
+        if (!isCurrent() || completedRef.current) return;
 
         setProgress(nextProgress);
 
@@ -155,9 +177,15 @@ export default function StemSeparationModal() {
         }
         idleCount = 0;
 
-        if (nextProgress.state === "done" && nextProgress.stemFiles) {
+        if (nextProgress.state === "done") {
           completedRef.current = true;
           stopPolling();
+          if (!nextProgress.stemFiles || selectedStems.some(name =>
+            nextProgress.stemFiles!.filter(stem => stem.name === name && stem.filePath).length !== 1)) {
+            setProgress({ state: "error", progress: 0, error: "The separator did not return every requested stem. No tracks were added." });
+            setSeparating(false);
+            return;
+          }
           const latestState = useDAWStore.getState();
           const latestTrack = latestState.tracks.find((t) => t.id === stemSepTrackId);
           const latestClip = latestTrack?.clips.find((c) => c.id === stemSepClipId);
@@ -165,24 +193,34 @@ export default function StemSeparationModal() {
           if (latestClip) {
             const enrichedStems = await Promise.all(
               nextProgress.stemFiles.map(async (stem) => {
-                try {
-                  const info = await nativeBridge.importMediaFile(stem.filePath);
-                  return {
-                    name: stem.name,
-                    filePath: stem.filePath,
-                    duration: info?.duration || latestClip.duration,
-                    sampleRate: info?.sampleRate || latestClip.sampleRate || 44100,
-                  };
-                } catch {
-                  return {
-                    name: stem.name,
-                    filePath: stem.filePath,
-                    duration: latestClip.duration,
-                    sampleRate: latestClip.sampleRate || 44100,
-                  };
+                const info = await nativeBridge.importMediaFile(stem.filePath);
+                if (!info || !Number.isFinite(info.duration) || info.duration <= 0
+                  || !Number.isFinite(info.sampleRate) || info.sampleRate <= 0) {
+                  throw new Error(`Cannot read the ${stem.name} stem. No tracks were added.`);
                 }
+                return {
+                  name: stem.name,
+                  filePath: stem.filePath,
+                  duration: info.duration,
+                  sampleRate: info.sampleRate,
+                };
               }),
-            );
+            ).catch((error: unknown) => {
+              if (isCurrent()) {
+                setProgress({ state: "error", progress: 0, error: error instanceof Error ? error.message : "Could not read stem files. No tracks were added." });
+                setSeparating(false);
+              }
+              return null;
+            });
+            if (!isCurrent()) return;
+            if (!enrichedStems) return;
+            const currentTrack = useDAWStore.getState().tracks.find((track) => track.id === stemSepTrackId);
+            const currentClip = currentTrack?.clips.find((clip) => clip.id === stemSepClipId);
+            if (!currentClip || currentClip.filePath !== sourceClip.filePath) {
+              setProgress({ state: "error", progress: 0, error: "The source clip changed during separation. No tracks were added." });
+              setSeparating(false);
+              return;
+            }
 
             latestState.completeStemSeparation(
               stemSepTrackId,
@@ -194,7 +232,7 @@ export default function StemSeparationModal() {
           }
 
           setSeparating(false);
-          setTimeout(() => closeStemSeparation(), 800);
+          setTimeout(() => { if (isCurrent()) closeStemSeparation(); }, 800);
         } else if (nextProgress.state === "error") {
           completedRef.current = true;
           stopPolling();
@@ -202,6 +240,7 @@ export default function StemSeparationModal() {
         }
       }, 200);
     } catch (err: any) {
+      if (!isCurrent()) return;
       setProgress({ state: "error", progress: 0, error: err.message || "Separation failed" });
       setSeparating(false);
     }
@@ -214,6 +253,8 @@ export default function StemSeparationModal() {
   };
 
   const handleCancel = async () => {
+    ++requestSerialRef.current;
+    completedRef.current = true;
     if (separating) {
       stopPolling();
       await nativeBridge.cancelStemSeparation();
@@ -330,6 +371,42 @@ export default function StemSeparationModal() {
                 </div>
               </div>
 
+              <div className="space-y-2">
+                <label className="block text-sm text-daw-text-secondary">
+                  Processing device
+                  <select className="mt-1 block w-full rounded border border-neutral-700 bg-daw-dark p-2 text-daw-text focus-visible:outline-2 focus-visible:outline-daw-accent"
+                    value={accelerationMode} disabled={separating}
+                    onChange={(event) => setAccelerationMode(event.target.value as "auto" | "cpu-only")}>
+                    <option value="auto">Automatic (use GPU when available)</option>
+                    <option value="cpu-only">CPU only</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <Checkbox checked={chunkDuration === 30} disabled={separating || memoryMode === "streaming-preview"}
+                    onChange={() => setChunkDuration((value) => value === 0 ? 30 : 0)} />
+                  Process in 30-second sections to reduce memory use
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <Checkbox checked={memoryMode === "streaming-preview"} disabled={separating || !rollingSupported}
+                    onChange={() => { setMemoryMode((mode) => mode === "automatic" ? "streaming-preview" : "automatic"); setChunkDuration(0); }} />
+                  Use rolling output buffers
+                </label>
+                {!rollingSupported && <p className="text-xs text-daw-text-secondary">Rolling buffers are currently qualified on Windows and Linux. Use Automatic or 30-second sections on this platform.</p>}
+                <p className="text-xs text-daw-text-secondary">Automatic mode uses rolling buffers when RAM is limited and the runtime is supported. Rolling buffers need temporary disk space and preserve the model’s window boundaries. Explicit 30-second sections can change results at section boundaries.</p>
+                {aiToolsStatus.hardware?.gpuBackend === "rocm" && (
+                  <label className="block text-sm text-daw-text-secondary">
+                    AMD performance
+                    <select className="mt-1 block w-full rounded border border-neutral-700 bg-daw-dark p-2 text-daw-text focus-visible:outline-2 focus-visible:outline-daw-accent"
+                      value={performanceMode} disabled={separating || accelerationMode === "cpu-only"}
+                      onChange={(event) => setPerformanceMode(event.target.value as "standard" | "qualified-fast")}>
+                      <option value="standard">Standard precision</option>
+                      <option value="qualified-fast">Faster when qualified (FP16)</option>
+                    </select>
+                    <span className="mt-1 block text-xs">Qualified on Linux gfx1151 with the reviewed ROCm 7.2 runtime. Other configurations keep standard precision.</span>
+                  </label>
+                )}
+              </div>
+
               <div>
                 <label className="text-sm text-daw-text-secondary block mb-2">Stems to extract</label>
                 <div className="grid grid-cols-3 gap-2">
@@ -369,8 +446,25 @@ export default function StemSeparationModal() {
             </div>
           )}
 
+          {progress.fallbackReason && (
+            <p role="status" className="break-words text-xs text-daw-text-secondary">{progress.fallbackReason}</p>
+          )}
+          {progress.diagnostics?.memoryPlan && (
+            <details className="rounded border border-daw-border p-2 text-xs text-daw-text-secondary">
+              <summary className="cursor-pointer focus-visible:outline focus-visible:outline-daw-accent">Processing details</summary>
+              <div className="mt-2 space-y-1 break-words">
+                <p>{progress.diagnostics.executionDetails?.deviceReceipt?.cudaDeviceName ?? progress.backend?.toUpperCase()}</p>
+                <p>{progress.diagnostics.memoryPlan.reason}</p>
+                <p>{progress.diagnostics.memoryPlan.memory_mode === "streaming" ? "Rolling output buffers with temporary disk storage" : progress.diagnostics.memoryPlan.chunk_duration > 0 ? `${progress.diagnostics.memoryPlan.chunk_duration}-second output sections` : "Whole-recording output buffers"}</p>
+              </div>
+            </details>
+          )}
+          {progress.diagnostics?.performancePolicy && (
+            <p className="text-xs text-daw-text-secondary">{progress.diagnostics.performancePolicy.reason}</p>
+          )}
+
           {progress.state === "error" && !separating && (
-            <p className="text-xs text-daw-record text-center">{progress.error}</p>
+            <p className="break-words text-xs text-daw-record text-center">{progress.error}</p>
           )}
         </div>
       </ModalContent>

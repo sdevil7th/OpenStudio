@@ -34,7 +34,8 @@ export function AppUpdatePanel() {
 
   const downloading = update.status.status === "downloading";
   const storeManaged = (update.status.updateSource || update.offer?.updateSource) === "microsoft-store";
-  const nativePackage = update.status.updateSource === "linux-package";
+  const snapManaged = update.status.updateSource === "snap-store";
+  const nativePackage = update.status.updateSource === "linux-package" || snapManaged;
   const installing = update.status.status === "installing";
   const progress = Math.max(0, Math.min(100, Math.round((update.status.progress ?? 0) * 100)));
   const platform = update.offer?.platform || update.status.platform;
@@ -43,7 +44,8 @@ export function AppUpdatePanel() {
   const notes = update.offer?.notes?.trim();
   const actions = <div className="flex w-full flex-wrap justify-end gap-2">
     <Button disabled={installing} onClick={() => update.setOpen(false)}>{downloading ? "Keep working" : "Later"}</Button>
-    {nativePackage ? <Button variant="primary" onClick={() => { void nativeBridge.openExternalURL(update.status.releasePageUrl || "https://openstudio.org.in/download"); }}>Get Linux installer</Button>
+    {snapManaged ? <Button variant="primary" onClick={() => { void nativeBridge.openExternalURL("https://snapcraft.io/openstudio"); }}>Open Snap Store</Button>
+      : nativePackage ? <Button variant="primary" onClick={() => { void nativeBridge.openExternalURL(update.status.releasePageUrl || "https://openstudio.org.in/download"); }}>Get Linux installer</Button>
       : downloading ? <Button onClick={() => { void update.cancel(); }}>Cancel download</Button>
       : update.downloaded ? <Button variant="primary" disabled={update.pending || playing} onClick={() => { void update.install(); }}>{update.pending ? "Preparing update…" : modified ? "Save & prepare update" : installLabel}</Button>
       : update.offer ? <Button variant="primary" disabled={update.pending} onClick={() => { void update.download(); }}>Download update</Button>

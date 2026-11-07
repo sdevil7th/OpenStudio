@@ -1,4 +1,6 @@
 audio-separator[cpu]==0.41.1
+librosa==0.11.0
+audioread==3.1.0
 diffusers==0.39.0
 transformers==4.57.6
 accelerate==1.12.0

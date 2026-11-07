@@ -1,24 +1,24 @@
 {
   "steps": [
     {
-      "type": "pip_install",
-      "description": "Installing CPU stem separation packages",
-      "stepLabel": "Installing CPU stem separation packages",
-      "features": ["stemSeparation"],
-      "packages": ["audio-separator[cpu]==0.41.1"]
-    },
-    {
       "type": "pip_uninstall",
-      "features": ["audioGeneration"],
+      "features": ["stemSeparation", "audioGeneration"],
       "packages": ["torch", "torchvision", "torchaudio"]
     },
     {
       "type": "pip_install",
       "description": "Installing ROCm-capable PyTorch wheels",
       "stepLabel": "Installing ROCm PyTorch wheels",
-      "features": ["audioGeneration"],
+      "features": ["stemSeparation", "audioGeneration"],
       "indexUrl": "https://download.pytorch.org/whl/rocm6.2",
-      "packages": ["torch==2.5.1", "torchaudio==2.5.1"]
+      "packages": ["torch==2.5.1", "torchvision==0.20.1", "torchaudio==2.5.1"]
+    },
+    {
+      "type": "pip_install",
+      "description": "Installing CPU stem separation packages",
+      "stepLabel": "Installing CPU stem separation packages",
+      "features": ["stemSeparation"],
+      "packages": ["audio-separator[cpu]==0.41.1", "librosa==0.11.0", "audioread==3.1.0"]
     },
     {
       "type": "pip_install",

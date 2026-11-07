@@ -84,9 +84,15 @@ function sameView(a: RecordingPreviewView, b: RecordingPreviewView | null): bool
     && a.clips.every((clip, index) => clip.trackId === b.clips[index].trackId && clip.startTime === b.clips[index].startTime);
 }
 
+function sameRecording(a: RecordingPreviewView, b: RecordingPreviewView | null): boolean {
+  return b !== null && a.sampleRate === b.sampleRate && a.clips.length === b.clips.length
+    && a.clips.every((clip, index) => clip.trackId === b.clips[index].trackId && clip.startTime === b.clips[index].startTime);
+}
+
 interface RecordingPreviewOptions {
   readView: () => RecordingPreviewView | null;
-  isSuspended: () => boolean;
+  isInteracting: () => boolean;
+  now?: () => number;
   request: (trackId: string, samplesPerPixel: number, numPixels: number, startSample: number) => Promise<WaveformPeak[]>;
   publish: (cache: RecordingWaveformCache) => void;
   onError: (error: unknown) => void;
@@ -96,6 +102,9 @@ interface RecordingPreviewOptions {
 export class RecordingPreviewScheduler {
   private inFlight = false;
   private generation = 0;
+  private recordingGeneration = 0;
+  private lastPollTime = -Infinity;
+  private nextTrackId: string | undefined;
   private active = true;
   private cache: RecordingWaveformCache = new Map();
 
@@ -104,10 +113,12 @@ export class RecordingPreviewScheduler {
   setActive(active: boolean): void {
     this.active = active;
     this.generation++;
+    this.recordingGeneration++;
   }
 
   invalidate(clear = false): void {
     this.generation++;
+    if (clear) this.recordingGeneration++;
     if (clear && this.cache.size > 0) {
       this.cache = new Map();
       if (this.active) this.options.publish(this.cache);
@@ -121,11 +132,19 @@ export class RecordingPreviewScheduler {
       this.invalidate(true);
       return;
     }
-    if (this.inFlight || this.options.isSuspended()) return;
+    const now = this.options.now?.() ?? performance.now();
+    // A sustained gesture must not freeze the growing waveform. Retain the
+    // normal polling budget even when obsolete viewport work completes early.
+    if (this.inFlight || (this.options.isInteracting()
+      && now - this.lastPollTime < RECORDING_PREVIEW_POLL_MS)) return;
+    this.lastPollTime = now;
     this.inFlight = true;
     const generation = this.generation;
+    const recordingGeneration = this.recordingGeneration;
     const isCurrent = () => this.active && generation === this.generation
       && sameView(view, this.options.readView());
+    const isSameRecording = () => this.active && recordingGeneration === this.recordingGeneration
+      && sameRecording(view, this.options.readView());
 
     try {
       const retained = new Map([...this.cache].filter(([trackId, data]) => view.clips.some(
@@ -135,8 +154,10 @@ export class RecordingPreviewScheduler {
         this.cache = retained;
         this.options.publish(this.cache);
       }
-      for (const clip of view.clips) {
-        if (!isCurrent() || this.options.isSuspended()) break;
+      const nextIndex = Math.max(0, view.clips.findIndex(clip => clip.trackId === this.nextTrackId));
+      const orderedClips = [...view.clips.slice(nextIndex), ...view.clips.slice(0, nextIndex)];
+      for (const clip of orderedClips) {
+        if (!isCurrent()) break;
         const window = planRecordingPreviewWindow(view, clip);
         if (!window) continue;
         const existing = this.cache.get(clip.trackId);
@@ -152,11 +173,15 @@ export class RecordingPreviewScheduler {
         const requestLimit = Math.max(1, Math.floor(MAX_RECORDING_PEAK_BASE_ENTRIES
           / (window.samplesPerPixel / RECORDING_PEAK_STRIDE + 1)));
         const numPixels = Math.min(missing, MAX_RECORDING_PREVIEW_PEAKS, requestLimit);
+        const clipIndex = view.clips.indexOf(clip);
+        this.nextTrackId = view.clips[(clipIndex + 1) % view.clips.length]?.trackId;
         const received = await this.options.request(clip.trackId, window.samplesPerPixel, numPixels,
           window.startSample + peaks.length * window.samplesPerPixel);
-        // Stop, a new take, or a viewport change invalidates the whole old batch,
-        // including its next track. Never publish an old completion after Stop.
-        if (!isCurrent()) return;
+        // Samples retain absolute source coordinates across viewport changes.
+        // Publish a completed valid window so continuous navigation cannot
+        // starve previews, but retire the old batch before its next track.
+        // Stop/new-take/unmount must still reject late data, even at equal times.
+        if (!isSameRecording()) return;
         if (received.length === 0) continue;
         const data: RecordingWaveformData = {
           peaks: [...peaks, ...received.slice(0, numPixels)],
@@ -169,11 +194,12 @@ export class RecordingPreviewScheduler {
         this.options.publish(this.cache);
       }
     } catch (error) {
-      if (isCurrent()) this.options.onError(error);
+      if (isSameRecording()) this.options.onError(error);
     } finally {
       this.inFlight = false;
       // Coalesce arbitrarily many changes into the current view after the old
-      // request retires. The zoom/scroll debounce can postpone this until idle.
+      // request retires. During interaction the polling budget defers this to
+      // the next regular tick instead of creating a retry loop.
       if (this.active && !isCurrent()) void this.poll();
     }
   }

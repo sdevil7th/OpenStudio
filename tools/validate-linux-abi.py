@@ -16,11 +16,14 @@ import re
 import subprocess
 
 
-def run(*command):
+def run(*command, private_runtime=None):
     env = os.environ.copy()
     for name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_AUDIT'):
         env.pop(name, None)
     env['LC_ALL'] = 'C'
+    if private_runtime is not None:
+        # Match the frozen helper's own loader. Never expose these libraries to the DAW.
+        env['LD_LIBRARY_PATH'] = str(private_runtime)
     return subprocess.run(command, env=env, text=True, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, timeout=60)
 
@@ -63,7 +66,10 @@ def audit(root, max_glibc=None, require_os=None):
                     errors.append(f'{name} exceeds declared GLIBC_{max_glibc} baseline')
         loader = ''
         if '(NEEDED)' in dynamic.stdout:
-            resolved = run('ldd', '-v', str(path))
+            private_runtime = None
+            if 'support-runtime' in path.parts:
+                private_runtime = Path(*path.parts[:path.parts.index('support-runtime') + 1])
+            resolved = run('ldd', '-v', str(path), private_runtime=private_runtime)
             loader = resolved.stdout
             if resolved.returncode or re.search(r'not found|version lookup error', loader):
                 errors.append('Loader rejected a dependency or required symbol version')

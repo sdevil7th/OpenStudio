@@ -115,7 +115,14 @@ for (const viewport of [{ width: 640, height: 480 }, { width: 900, height: 600 }
     await knob.focus();
     await expect(knob).toBeFocused();
     await expect(knob).toHaveCSS("outline-style", "solid");
-    await page.screenshot({ path: testInfo.outputPath(`fuzz-keyboard-focus-${viewport.width}.png`) });
+    // Keep the full-layout capture above, but capture focus locally. Encoding a
+    // second complete 4K WebKit image consumed the interaction test's deadline.
+    const focused = await knob.boundingBox();
+    if (!focused) throw new Error("Focused Fuzz control has no bounds");
+    const focusX = Math.max(0, focused.x - 6), focusY = Math.max(0, focused.y - 6);
+    await page.screenshot({ path: testInfo.outputPath(`fuzz-keyboard-focus-${viewport.width}.png`),
+      clip: { x: focusX, y: focusY, width: Math.min(viewport.width - focusX, focused.width + 12),
+        height: Math.min(viewport.height - focusY, focused.height + 12) } });
     await knob.press("Enter");
     const number = page.getByRole("spinbutton", { name: "Fuzz Clean blend percentage", exact: true });
     await expect(number).toBeInViewport();

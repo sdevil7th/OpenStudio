@@ -9,6 +9,20 @@ const base = {
 };
 
 describe("audio deadline warning state", () => {
+  it("does not treat unavailable timing or stale counters as measured health", () => {
+    const status = resolveAudioDeadlineStatus({
+      ...base,
+      audioCallbackTimingAvailable: false,
+      audioCallbackDeadlineMissCount: 12,
+      lastAudioCallbackDeadlineMissCounter: 999,
+      lastAudioCallbackDeadlineMissWhileRecording: true,
+    });
+    expect(status.available).toBe(false);
+    expect(status.shouldWarn).toBe(false);
+    expect(resolveAudioDeadlineStatus(undefined).available).toBe(false);
+    expect(resolveAudioDeadlineStatus({ ...base, audioCallbackDeadlineMissCount: 0 }).available).toBe(true);
+  });
+
   it("stays quiet without deadline misses", () => {
     expect(resolveAudioDeadlineStatus(base)).toMatchObject({
       recent: false,

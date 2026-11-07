@@ -5,10 +5,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import sys
+import json
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
 spec = importlib.util.spec_from_file_location('linux_native', ROOT / 'tools/package-linux-native.py')
 packaging = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packaging)
@@ -27,6 +30,16 @@ class NativePackageTests(unittest.TestCase):
             shutil.copyfile('/bin/true', self.bundle / name)
             (self.bundle / name).chmod(0o755)
         (self.bundle / 'OpenStudio.version').write_text('1.2.3\n')
+        (self.bundle / 'OpenStudio.build-policy.json').write_text('{"version":"1.2.3","callbackDiagnostics":false,"araDiagnostics":false,"hangMonitoring":false}')
+        shutil.copy2('/bin/true', self.bundle / 'OpenStudioSupport')
+        resources = self.bundle / 'support-runtime'
+        (resources / 'support-licenses').mkdir(parents=True)
+        (resources / 'support-build.json').write_text(json.dumps({'version':'1.2.3','launch':'manual_only'}))
+        for name in ['support-midi.js', 'support-midi-sources.json', 'support-licenses/README.txt'] + [f'fixture-{i}' for i in range(20)]:
+            (resources / name).write_text('fixture')
+        from support_package import write_inventory
+        write_inventory(self.bundle, '1.2.3', platform='linux')
+
         for name in ('webui/index.html', 'effects/example.jsfx', 'scripts/example.lua',
                      'models/basic_pitch_nmp.onnx', 'licenses/fixture.txt'):
             path = self.bundle / name
@@ -88,6 +101,27 @@ class NativePackageTests(unittest.TestCase):
         self.assertFalse(runtime.stat().st_mode & 0o022)
         self.assertEqual((unpacked / 'usr/lib/openstudio/OpenStudio.package').read_text(), 'deb\n')
 
+    @unittest.skipUnless(shutil.which('cc') and shutil.which('strip'), 'Native compiler and strip required')
+    def test_deb_excludes_debug_sections_preserving_archive_source_and_build_id(self):
+        from openstudio_support.common import sha256
+        from openstudio_support.identity import native_ids
+        source = self.root / 'fixture.c'
+        source.write_text('int main(void) { return 0; }\n')
+        original = self.bundle / 'OpenStudio'
+        subprocess.run(['cc', '-g', '-Wl,--build-id=sha1', source, '-o', original], check=True)
+        original_hash = sha256(original)
+        support_hash = sha256(self.bundle / 'OpenStudioSupport')
+        self.assertIn('.debug_info', subprocess.check_output(['readelf', '-S', original], text=True))
+        runtime = packaging.stage_bundle(self.bundle, self.root / 'package', 'deb')
+        packaged = runtime / 'OpenStudio'
+        self.assertNotIn('.debug_info', subprocess.check_output(['readelf', '-S', packaged], text=True))
+        self.assertTrue(native_ids(original))
+        self.assertEqual(native_ids(packaged), native_ids(original))
+        self.assertEqual(sha256(original), original_hash)
+        self.assertEqual(sha256(runtime / 'OpenStudioSupport'), support_hash)
+        self.assertLess(packaged.stat().st_size, original.stat().st_size)
+        self.assertEqual(subprocess.run([packaged]).returncode, 0)
+
     def test_release_entry_point_rejects_missing_notes_before_build(self):
         process = subprocess.run(['python3', ROOT / 'tools/package-linux-native.py',
                                   '--format', 'deb', '--version', '1.2.3',
@@ -99,7 +133,7 @@ class NativePackageTests(unittest.TestCase):
 
     def test_windows_snapshot_desktop_entry_is_staged_with_unix_line_endings(self):
         source_root = self.root / 'source'
-        for relative in ('tools/OpenStudio.desktop', 'assets/icon-256x256.png',
+        for relative in ('tools/OpenStudio.desktop', 'packaging/linux/OpenStudioSupport.desktop', 'assets/icon-256x256.png',
                          'packaging/linux/openstudio-mime.xml',
                          'packaging/linux/in.org.openstudio.OpenStudio.metainfo.xml', 'LICENSE'):
             target = source_root / relative

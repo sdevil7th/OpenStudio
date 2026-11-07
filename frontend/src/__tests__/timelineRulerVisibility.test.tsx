@@ -16,7 +16,7 @@ vi.mock("react-konva", () => {
   return {
     Stage: container, Layer: container, Rect: () => null,
     Line: ({ points }: { points: number[] }) => React.createElement("i", { "data-x": points[0] }),
-    Text: ({ text }: { text: string }) => React.createElement("span", null, text),
+    Text: ({ text, x }: { text: string; x: number }) => React.createElement("span", { "data-x": x }, text),
   };
 });
 vi.mock("../components/Playhead", () => ({ MemoizedPlayhead: () => null }));
@@ -39,5 +39,10 @@ describe("zoomed timeline ruler", () => {
   });
   it("keeps subdivisions when their beat starts offscreen", () => {
     expect(render(100)).toContain(">1.1.3</span>");
+  });
+  it("places compound-meter bars at the same time as the snap grid", () => {
+    useDAWStore.setState({ pixelsPerSecond: 1000, scrollX: 1000,
+      timeSignature: { numerator: 6, denominator: 8 }, transport: { ...original.transport, tempo: 120 } });
+    expect(renderToStaticMarkup(<TimelineRuler />)).toContain('<span data-x="503">2</span>');
   });
 });

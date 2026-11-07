@@ -555,6 +555,12 @@ function getPianoRollClipEventsSnapshot(
 
 export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], isDetached = false, onDetach }: PianoRollProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const noteHoverRef = useRef<HTMLDivElement>(null);
+  const hoveredNoteIdRef = useRef<string | null>(null);
+  const clearNoteHover = useCallback(() => {
+    if (noteHoverRef.current) noteHoverRef.current.hidden = true;
+    hoveredNoteIdRef.current = null;
+  }, []);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const controllerLaneSelectorRef = useRef<HTMLSelectElement>(null);
   const scrollbarRef = useRef<HTMLDivElement>(null);
@@ -1411,7 +1417,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   }, [clipStartTime, pixelsPerSecond, timelineScrollX]);
 
   const pianoRollHitNotes = useMemo(() => notePairs.map((pair) => ({
-    id: noteIdFor(clipId, pair.startTime, pair.noteNumber),
+    id: noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId),
     x: PIANO_WIDTH + midiSourceTimeToProjectX(pair.startTime, {
       pixelsPerSecond,
       scrollX: timelineScrollX,
@@ -1421,6 +1427,11 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     width: Math.max(4, pair.duration * pixelsPerSecond),
     height: noteHeight,
   })), [clipId, clipStartTime, getNoteY, noteHeight, notePairs, pixelsPerSecond, timelineScrollX]);
+
+  const hoverNotePairs = useMemo(() => new Map(notePairs.map((pair) => [
+    noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId), pair,
+  ])), [clipId, notePairs]);
+  useEffect(() => clearNoteHover(), [clearNoteHover, pianoRollHitNotes]);
 
   const pianoRollHitLanes = useMemo(() => {
     if (!activeLane) return [];
@@ -1797,7 +1808,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         const currentEvents = getLatestClipEvents();
         const currentNoteId = matchingTarget?.currentNoteId ?? wheelHit.noteId;
         const pair = parseNotePairs(currentEvents).find((candidate) =>
-          noteIdFor(clipId, candidate.startTime, candidate.noteNumber) === currentNoteId,
+          noteIdFor(clipId, candidate.startTime, candidate.noteNumber, candidate.noteOn.notePairId) === currentNoteId,
         );
         if (!pair) return;
         const nextStart = Math.max(0, pair.startTime + direction * stepDurationSeconds);
@@ -1864,7 +1875,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         const oldEvents = getLatestClipEvents();
         const currentNoteId = matchingTarget?.currentNoteId ?? wheelHit.noteId;
         const pair = parseNotePairs(oldEvents).find((candidate) =>
-          noteIdFor(clipId, candidate.startTime, candidate.noteNumber) === currentNoteId,
+          noteIdFor(clipId, candidate.startTime, candidate.noteNumber, candidate.noteOn.notePairId) === currentNoteId,
         );
         if (!pair) return;
         const integerStep = Math.trunc(stepCount);
@@ -2090,14 +2101,14 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const anchorId = selectedNoteIds[selectedNoteIds.length - 1];
       if (!anchorId) return "claimed_noop";
       const currentIndex = orderedPairs.findIndex((pair) => (
-        noteIdFor(clipId, pair.startTime, pair.noteNumber) === anchorId
+        noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId) === anchorId
       ));
       const nextIndex = currentIndex + (actionId === "midi.selectNextNote" ? 1 : -1);
       if (currentIndex < 0 || nextIndex < 0 || nextIndex >= orderedPairs.length) {
         return "claimed_noop";
       }
       const next = orderedPairs[nextIndex];
-      setSelectedNoteIds([noteIdFor(clipId, next.startTime, next.noteNumber)]);
+      setSelectedNoteIds([noteIdFor(clipId, next.startTime, next.noteNumber, next.noteOn.notePairId)]);
       setMIDIEditRange(null);
       return "handled";
     }
@@ -2109,7 +2120,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
     if (actionId === "midi.loopFromSelectedNotes") {
       const actionPairs = parseNotePairs(getLatestClipEvents()).filter((pair) =>
-        selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)),
+        selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId)),
       );
       if (actionPairs.length === 0) return "claimed_noop";
       const start = Math.min(...actionPairs.map((pair) => pair.startTime));
@@ -2127,7 +2138,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     }
     if (actionId === "midi.noteProperties") {
       const selectedPair = parseNotePairs(getLatestClipEvents()).find((pair) =>
-        selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)),
+        selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId)),
       );
       if (!selectedPair) return "claimed_noop";
       setTransformDialog({ type: "velocity", value: selectedPair.velocity });
@@ -2259,7 +2270,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         if (nextIds.length > 0) {
           setSelectedNoteIds(nextIds);
           const nextPair = parseNotePairs(getLatestClipEvents()).find((pair) =>
-            nextIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)),
+            nextIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId)),
           );
           if (nextPair) auditionNote(nextPair.noteNumber, nextPair.velocity);
         }
@@ -3467,7 +3478,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     });
     if (!pair) return;
 
-    const id = noteIdFor(clipId, pair.startTime, pair.noteNumber);
+    const id = noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId);
     const velocity = getVelocityFromLaneY(pos.y);
     setSelectedNoteIds([id]);
     setVelocityEdit({
@@ -3632,7 +3643,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   const handleNoteMouseDown = useCallback((event: KonvaEvent, pair: NotePair) => {
     event.cancelBubble = true;
     const nativeEvent = event.evt as MouseEvent;
-    const id = noteIdFor(clipId, pair.startTime, pair.noteNumber);
+    const id = noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId);
     const pos = getPointer(event);
     const noteX = PIANO_WIDTH + pair.startTime * pixelsPerSecond - scrollX;
     const noteWidth = Math.max(4, pair.duration * pixelsPerSecond);
@@ -3695,7 +3706,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const pairChannel = pair.channel ?? 1;
       const nextEvents = sortEvents([
         ...oldEvents.filter((event) => {
-          if (event.note !== pair.noteNumber || (event.channel ?? 1) !== pairChannel) return true;
+          if (event.notePairId !== pair.noteOn.notePairId || event.note !== pair.noteNumber || (event.channel ?? 1) !== pairChannel) return true;
           if (event.type === "noteOn" && Math.abs(event.timestamp - pair.startTime) < 0.000001) return false;
           if (event.type === "noteOff" && Math.abs(event.timestamp - noteEnd) < 0.000001) return false;
           return true;
@@ -3707,8 +3718,8 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       ]);
       commitMIDIClipEvents(trackId, clipId, oldEvents, nextEvents, "Split MIDI note");
       setSelectedNoteIds([
-        noteIdFor(clipId, pair.startTime, pair.noteNumber),
-        noteIdFor(clipId, splitTime, pair.noteNumber),
+        noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId),
+        noteIdFor(clipId, splitTime, pair.noteNumber, pair.noteOn.notePairId),
       ]);
       auditionNote(pair.noteNumber, pair.velocity);
       return;
@@ -3844,7 +3855,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     event.evt.preventDefault();
     event.cancelBubble = true;
     if (shouldSuppressWorkspaceContextMenu(event.evt.target)) return;
-    const id = noteIdFor(clipId, pair.startTime, pair.noteNumber);
+    const id = noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId);
     if (!selectedNoteIds.includes(id)) {
       setSelectedNoteIds([id]);
     }
@@ -3865,6 +3876,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   ]);
 
   const handleStageMouseDown = useCallback((event: KonvaEvent) => {
+    clearNoteHover();
     const pos = getPointer(event);
     if (!pos) return;
     const hitTarget = hitTestPianoRoll(pos.x, pos.y, {
@@ -4036,6 +4048,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     ccLaneHeight,
     ccLaneY,
     clearMIDIEditRange,
+    clearNoteHover,
     clip,
     clipDuration,
     contentDuration,
@@ -4111,6 +4124,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       const container = stage?.container?.();
       if (container) container.style.cursor = cursor;
     };
+    if ((event.evt?.buttons ?? 0) !== 0) clearNoteHover();
 
     if (laneResizeState) {
       setStageCursor("row-resize");
@@ -4247,6 +4261,21 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
       loopEndX: loopBoundaryEndX,
       loopBoundaryHitWidth: 6,
     });
+    const hoverNote = hoverTarget.kind === "note" ? hoverNotePairs.get(hoverTarget.noteId) : undefined;
+    const tooltip = noteHoverRef.current;
+    if (hoverTarget.kind === "note" && hoverNote && tooltip && (event.evt?.buttons ?? 0) === 0) {
+      // The existing canvas hit test owns hover. Update only on note entry,
+      // keeping pointer movement out of React state and reconciliation.
+      if (hoveredNoteIdRef.current !== hoverTarget.noteId) {
+        hoveredNoteIdRef.current = hoverTarget.noteId;
+        tooltip.textContent = `${getNoteNameFromPitch(hoverNote.noteNumber)} (${hoverNote.noteNumber}) · Velocity ${hoverNote.velocity}`;
+        tooltip.style.setProperty("--note-hover-x", `${Math.max(4, Math.min(pos.x + 12, stageWidth - 210))}px`);
+        tooltip.style.setProperty("--note-hover-y", `${Math.max(4, Math.min(pos.y + 18, stageHeight - 28))}px`);
+        tooltip.hidden = false;
+      }
+    } else {
+      clearNoteHover();
+    }
     setStageCursor(hoverTarget.kind === "loop-boundary" && clip?.loopEnabled ? "ew-resize" : "");
   }, [
     activeControllerLane,
@@ -4254,6 +4283,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     ccLaneHeight,
     ccLaneY,
     ccDrawState,
+    clearNoteHover,
     clip,
     clipDuration,
     clipId,
@@ -4263,6 +4293,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     getLatestCCEvents,
     getLatestClipEvents,
     getNoteFromY,
+    hoverNotePairs,
     getTimeFromX,
     getVelocityFromLaneY,
     isVelocityLaneActive,
@@ -4284,7 +4315,6 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     snapTime,
     setTimelineScroll,
     setPianoRollEditCursorTime,
-    stageWidth,
     timelineScrollX,
     timelineScrollY,
     trackId,
@@ -4299,13 +4329,16 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     velocityEdit,
     velocityLaneHeight,
     velocityLaneY,
+    stageHeight,
+    stageWidth,
   ]);
 
   const handleStageMouseLeave = useCallback((event: KonvaEvent) => {
+    clearNoteHover();
     const stage = event.target?.getStage?.();
     const container = stage?.container?.();
     if (container) container.style.cursor = "";
-  }, []);
+  }, [clearNoteHover]);
 
   const handleStageMouseUp = useCallback(() => {
     const activeCCDrawState = ccDrawStateRef.current;
@@ -4420,7 +4453,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
     if (velocityEdit) {
       const finalPair = parseNotePairs(getLatestClipEvents()).find((pair) =>
-        noteIdFor(clipId, pair.startTime, pair.noteNumber) === velocityEdit.noteId
+        noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId) === velocityEdit.noteId
         || (Math.abs(pair.startTime - velocityEdit.timestamp) < 0.001 && pair.noteNumber === velocityEdit.noteNumber),
       );
       commitMIDIClipEvents(trackId, clipId, velocityEdit.originalEvents, getLatestClipEvents(), "Edit MIDI velocity");
@@ -4632,7 +4665,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
     const localStartTime = Math.max(0, pair.startTime - pair.timeOffset);
     openPianoRoll(trackId, pair.clipId);
     useDAWStore.getState().setSelectedNoteIds([
-      noteIdFor(pair.clipId, localStartTime, pair.noteNumber),
+      noteIdFor(pair.clipId, localStartTime, pair.noteNumber, pair.noteOn.notePairId),
     ]);
   }, [openPianoRoll, trackId]);
 
@@ -4670,7 +4703,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
   const renderPrimaryNotes = () => {
     return notePairs.map((pair) => {
-      const id = noteIdFor(clipId, pair.startTime, pair.noteNumber);
+      const id = noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId);
       const x = PIANO_WIDTH + pair.startTime * pixelsPerSecond - scrollX;
       const y = getNoteY(pair.noteNumber);
       const width = Math.max(4, pair.duration * pixelsPerSecond);
@@ -4878,7 +4911,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
           width={width}
           height={barHeight}
           fill={velocityColor(pair.velocity)}
-          opacity={pair.muted ? 0.25 : selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)) ? 1 : 0.8}
+          opacity={pair.muted ? 0.25 : selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId)) ? 1 : 0.8}
           cornerRadius={1}
         />,
       );
@@ -4953,7 +4986,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
         const rawValue = noteMetadataValueForPair(pair, selectedNoteMetadataLaneType);
         const barHeight = (rawValue / maxValue) * (ccLaneHeight - 4);
         const y = ccLaneY + ccLaneHeight - barHeight - 2;
-        const id = noteIdFor(clipId, pair.startTime, pair.noteNumber);
+        const id = noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId);
         const selected = selectedNoteIds.includes(id);
         elements.push(
           <Rect
@@ -5183,7 +5216,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
   };
 
   const selectedPairs = notePairs.filter((pair) =>
-    selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber)),
+    selectedNoteIds.includes(noteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId)),
   );
   const selectedMuted = selectedPairs.length > 0 && selectedPairs.every((pair) => pair.noteOn.muted || pair.noteOff.muted);
   const inspectedNotePair = selectedPairs.length === 1 ? selectedPairs[0] : null;
@@ -5265,7 +5298,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
 
   const editInspectedNote = useCallback((field: "note" | "start" | "duration" | "velocity", value: number) => {
     if (!inspectedNotePair) return;
-    const id = noteIdFor(clipId, inspectedNotePair.startTime, inspectedNotePair.noteNumber);
+    const id = noteIdFor(clipId, inspectedNotePair.startTime, inspectedNotePair.noteNumber, inspectedNotePair.noteOn.notePairId);
     if (field === "note") {
       const nextNote = clamp(Math.round(value), 0, 127);
       const ids = moveMIDINotes(trackId, clipId, [id], 0, nextNote - inspectedNotePair.noteNumber);
@@ -6291,6 +6324,7 @@ export function PianoRoll({ clipId, trackId, sessionId, additionalClipIds = [], 
                   />
                 </Layer>
               </Stage>
+              <div ref={noteHoverRef} role="tooltip" className="piano-roll-note-hover absolute z-20 max-w-[calc(100%-8px)] rounded border border-daw-border bg-daw-dark px-[7px] py-1 text-[11px] leading-[1.3] text-daw-text pointer-events-none whitespace-nowrap" hidden />
             </div>
             <div
               className="piano-roll-vertical-scroll"

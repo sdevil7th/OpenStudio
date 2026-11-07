@@ -11,97 +11,13 @@ import { syncAutomationLaneToBackend, syncTempoMarkersToBackend } from "./storeH
 import { serializeMIDIClipsForBackend } from "../../utils/midiClipSerialization";
 import { createDefaultTrack } from "../useDAWStore";
 import { getProjectEpoch } from "../../utils/projectLifetime";
+import { getClipPlaybackGainEnvelope, reconcileCrossfadeTracks } from "../../utils/clipCrossfades";
+import { prepareImportedProjectRateCopy } from "./audioConversion";
 
+import { clipSyncCache, enqueueClipBackendSync, makeClipKey, requireClipBridgeSuccess,
+  type SyncedPlaybackClip } from "./clipBackendSync";
+export { resetSyncCache } from "./clipBackendSync";
 const AUDIO_PLAYBACK_LOG_PREFIX = "[audio.playback]";
-
-type SyncedPlaybackClip = {
-  trackId: string;
-  filePath: string;
-  startTime: number;
-  duration: number;
-  offset: number;
-  volumeDB: number;
-  fadeIn: number;
-  fadeOut: number;
-  clipId: string;
-  pitchCorrectionSourceFilePath?: string;
-  pitchCorrectionSourceOffset?: number;
-};
-
-// Diff-based sync cache: retains the identity needed to remove one logical clip.
-let _lastSyncedClips = new Map<string, SyncedPlaybackClip>();
-let _clipSyncTail: Promise<void> = Promise.resolve();
-let _clipSyncEpoch = 0;
-let _clipSyncRequestedRevision = 0;
-let _clipSyncCompletedRevision = 0;
-
-function makeClipKey(
-  trackId: string, clipId: string, filePath: string, startTime: number, duration: number,
-  offset: number, volumeDB: number, fadeIn: number, fadeOut: number
-): string {
-  return `${trackId}|${clipId}|${filePath}|${startTime}|${duration}|${offset}|${volumeDB}|${fadeIn}|${fadeOut}`;
-}
-
-export function resetSyncCache(): Promise<void> {
-  _clipSyncEpoch += 1;
-  _clipSyncRequestedRevision = 0;
-  _clipSyncCompletedRevision = 0;
-
-  // Reset is a queue barrier: direct backend mutations must await it so no
-  // older sync can publish clips after a project or recording reset.
-  const resetPromise = _clipSyncTail.then(() => {
-    _lastSyncedClips = new Map<string, SyncedPlaybackClip>();
-  });
-  _clipSyncTail = resetPromise.catch(() => {});
-  return resetPromise;
-}
-
-function enqueueClipBackendSync(syncTask: () => Promise<void>): Promise<void> {
-  const requestEpoch = _clipSyncEpoch;
-  const requestRevision = ++_clipSyncRequestedRevision;
-  const syncPromise = _clipSyncTail.then(async () => {
-    // Several edits can request a sync before the queued work begins. The task
-    // reads Zustand only after it owns the queue, so one pass can publish the
-    // newest state and superseded tasks behind it can become no-ops.
-    if (requestEpoch !== _clipSyncEpoch || _clipSyncCompletedRevision >= requestRevision) return;
-    const revisionBeingApplied = _clipSyncRequestedRevision;
-    try {
-      await syncTask();
-    } catch (firstError) {
-      if (requestEpoch !== _clipSyncEpoch) throw firstError;
-
-      // A failed call may have partially mutated native state. Invalidate the
-      // cache and make one bounded full-rebuild attempt unless a newer queued
-      // request is already responsible for recovery.
-      _lastSyncedClips = new Map<string, SyncedPlaybackClip>();
-      if (_clipSyncRequestedRevision > revisionBeingApplied) throw firstError;
-      console.warn(`${AUDIO_PLAYBACK_LOG_PREFIX} sync failed; retrying one full rebuild`, firstError);
-      try {
-        await syncTask();
-      } catch (retryError) {
-        if (requestEpoch === _clipSyncEpoch) {
-          _lastSyncedClips = new Map<string, SyncedPlaybackClip>();
-        }
-        throw retryError;
-      }
-    }
-
-    if (requestEpoch === _clipSyncEpoch) {
-      _clipSyncCompletedRevision = revisionBeingApplied;
-    }
-  });
-
-  // Keep the queue usable after a rejected bridge call while preserving the
-  // rejection for the caller that requested this particular sync.
-  _clipSyncTail = syncPromise.catch(() => {});
-  return syncPromise;
-}
-
-function requireClipBridgeSuccess(result: boolean, operation: string) {
-  if (result !== true) {
-    throw new Error(`${AUDIO_PLAYBACK_LOG_PREFIX} ${operation} returned false`);
-  }
-}
 
 function clampInsertIndex(index, trackCount) {
   if (!Number.isFinite(Number(index))) return trackCount;
@@ -129,11 +45,16 @@ function normalizeMIDIImportTrack(rawTrack, index, fallbackName) {
       : undefined;
 
     if (rawEvent?.type === "noteOn" || rawEvent?.type === "noteOff") {
+      const noteValue = Number(rawEvent.note);
+      const releaseValue = Number(rawEvent.releaseVelocity ?? rawEvent.velocity ?? 0);
       events.push({
         timestamp,
         type: rawEvent.type,
-        note: Math.max(0, Math.min(127, Math.round(Number(rawEvent.note) || 60))),
-        velocity: rawEvent.type === "noteOn" ? normalizeMIDIVelocity(rawEvent.velocity) : 0,
+        note: Math.max(0, Math.min(127, Math.round(Number.isFinite(noteValue) ? noteValue : 60))),
+        velocity: rawEvent.type === "noteOn" ? normalizeMIDIVelocity(rawEvent.velocity)
+          : Math.max(0, Math.min(127, Math.round(Number.isFinite(releaseValue) ? releaseValue : 0))),
+        ...(rawEvent.type === "noteOff" && rawEvent.releaseVelocity !== undefined
+          ? { releaseVelocity: Math.max(0, Math.min(127, Math.round(Number.isFinite(releaseValue) ? releaseValue : 0))) } : {}),
         channel,
       });
       continue;
@@ -150,12 +71,20 @@ function normalizeMIDIImportTrack(rawTrack, index, fallbackName) {
     }
 
     if (rawEvent?.type === "pitchBend") {
+      const bend = Number(rawEvent.value);
       events.push({
         timestamp,
         type: "pitchBend",
-        value: Math.max(0, Math.min(16383, Math.round(Number(rawEvent.value) || 8192))),
+        value: Math.max(0, Math.min(16383, Math.round(Number.isFinite(bend) ? bend : 8192))),
         channel,
       });
+      continue;
+    }
+    if (["programChange", "channelPressure", "polyPressure"].includes(rawEvent?.type)) {
+      const value = Number(rawEvent.value), note = Number(rawEvent.note);
+      events.push({ timestamp, type: rawEvent.type,
+        value: Math.max(0, Math.min(127, Math.round(Number.isFinite(value) ? value : 0))), channel,
+        ...(rawEvent.type === "polyPressure" ? { note: Math.max(0, Math.min(127, Math.round(Number.isFinite(note) ? note : 60))) } : {}) });
     }
   }
 
@@ -273,11 +202,11 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
 
     removeClip: (trackId, clipId) => {
       set((state) => ({
-        tracks: state.tracks.map((t) =>
+        tracks: reconcileCrossfadeTracks(state.tracks.map((t) =>
           t.id === trackId
             ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) }
             : t,
-        ),
+        )),
       }));
     },
 
@@ -311,14 +240,23 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         importStatus: "probing",
         waveformStatus: request.waveformStatus || "preview",
       };
-      const createdTrack = createdTrackId
+      let createdTrack = createdTrackId
         ? createDefaultTrack(createdTrackId, clipName, trackColor, "audio", get().tracks)
         : null;
       const requestedInsertIndex = request.insertIndex;
+      const syncCreatedTrackLayout = async () => {
+        if (!createdTrack) return;
+        await nativeBridge.setTrackInputChannels(createdTrack.id, createdTrack.inputStartChannel, createdTrack.inputChannelCount);
+        await nativeBridge.setTrackChannelCount(createdTrack.id, createdTrack.trackChannelCount);
+        const index = get().tracks.findIndex(track => track.id === createdTrack.id);
+        if (index >= 0) await nativeBridge.reorderTrack(createdTrack.id, index);
+      };
 
       let replayClip = provisionalClip;
       let nativeTrackReady = Promise.resolve(true);
       let generation = 0;
+      let inspectedMediaInfo = null;
+      const importPolicy = get().projectAudioImportPolicy;
       const command = {
         type: "IMPORT_EXTERNAL_MEDIA",
         description: `Import "${clipName}"`,
@@ -331,7 +269,11 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
               const newTracks = [...tracks];
               newTracks.splice(clampInsertIndex(requestedInsertIndex, newTracks.length), 0, createdTrack);
               tracks = newTracks;
-              nativeTrackReady = nativeBridge.addTrack(createdTrack.id, "audio").catch(() => false);
+              nativeTrackReady = nativeBridge.addTrack(createdTrack.id, "audio").then(async ready => {
+                if (!ready) return false;
+                await syncCreatedTrackLayout();
+                return true;
+              }).catch(() => false);
             }
 
             return {
@@ -346,17 +288,17 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
               selectedClipIds: [clipId],
             };
           });
-          if (replayClip.importStatus === "ready") {
-            void nativeTrackReady.then(async (ready) => {
-              if (!ready) throw new Error("The audio engine could not restore the track.");
-              if (generation !== run || getProjectEpoch() !== projectEpoch || !clipStillExists()) return;
-              await nativeBridge.addPlaybackClip(trackId, replayClip.filePath, replayClip.startTime, replayClip.duration,
-                replayClip.offset, replayClip.volumeDB, replayClip.fadeIn, replayClip.fadeOut, replayClip.id);
-            }).catch((error) => console.error("[DAWStore] Import redo failed:", error));
+          if (replayClip.importStatus === "ready" && inspectedMediaInfo) {
+            const info = replayClip.originalFilePath ? { ...inspectedMediaInfo, filePath: replayClip.filePath,
+              sampleRate: replayClip.sampleRate, originalFilePath: replayClip.originalFilePath } : inspectedMediaInfo;
+            void prepareAndPublish(run, info).catch(error => {
+              if (error?.name !== "AbortError") console.error("[DAWStore] Import redo failed:", error);
+            });
           }
         },
         undo: () => {
           ++generation;
+          get().cancelProjectRateCopy(clipId);
           const current = get().tracks
             .flatMap((track) => track.clips.map((clip) => ({ trackId: track.id, clip })))
             .find((entry) => entry.clip.id === clipId);
@@ -390,7 +332,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         if (getProjectEpoch() !== projectEpoch) return;
         set((state) => ({
           tracks: state.tracks.map((track) =>
-            track.id === trackId
+            track.clips.some(clip => clip.id === clipId)
               ? {
                   ...track,
                   clips: track.clips.map((clip) =>
@@ -402,7 +344,38 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         }));
       };
       const clipStillExists = () =>
-        getProjectEpoch() === projectEpoch && get().tracks.some((track) => track.id === trackId && track.clips.some((clip) => clip.id === clipId));
+        getProjectEpoch() === projectEpoch && get().tracks.some((track) => track.clips.some((clip) => clip.id === clipId));
+
+      const prepareAndPublish = async (run, originalInfo) => {
+        const stillValid = () => generation === run && clipStillExists()
+          && get().tracks.some(track => track.clips.some(clip => clip.id === clipId && clip.filePath === originalInfo.filePath));
+        if (!stillValid()) return;
+        const mediaInfo = importPolicy === "project-rate-copy" && originalInfo.sampleRate !== get().projectSampleRate
+          ? await prepareImportedProjectRateCopy(set, get, trackId, clipId, originalInfo, stillValid)
+          : originalInfo;
+        if (!stillValid()) return;
+        updateClip({ filePath: mediaInfo.filePath, sampleRate: mediaInfo.sampleRate,
+          sourceLength: mediaInfo.duration, originalFilePath: mediaInfo.originalFilePath,
+          importStatus: "preparingPlayback" });
+        replayClip = { ...replayClip, importStatus: "ready", waveformStatus: "building" };
+        const ready = await nativeTrackReady;
+        if (generation !== run || !clipStillExists()) return;
+        if (!ready) throw new Error("The audio engine could not create the track.");
+        await syncCreatedTrackLayout();
+        if (generation !== run || !clipStillExists()) return;
+        const entry = get().tracks.flatMap(track => track.clips.map(clip => ({ trackId: track.id, clip })))
+          .find(item => item.clip.id === clipId && item.clip.filePath === mediaInfo.filePath);
+        if (!entry) return;
+        const live = entry.clip;
+        const accepted = await nativeBridge.addPlaybackClip(entry.trackId, mediaInfo.filePath,
+          live.startTime, live.duration, live.offset, live.volumeDB, live.fadeIn, live.fadeOut, clipId,
+          live.pitchCorrectionSourceFilePath, live.pitchCorrectionSourceOffset, live.fadeInShape ?? 0, live.fadeOutShape ?? 0);
+        if (generation !== run || !clipStillExists()) return;
+        if (!accepted) throw new Error("The audio engine could not prepare the imported clip.");
+        const envelope = getClipPlaybackGainEnvelope(live);
+        if (envelope.length) await nativeBridge.setClipGainEnvelope(entry.trackId, clipId, envelope);
+        if (generation === run && clipStillExists()) updateClip({ importStatus: "ready", waveformStatus: "building" });
+      };
 
       try {
         const mediaInfo = await nativeBridge.probeMediaFile(sourcePath);
@@ -410,6 +383,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           updateClip({ importStatus: "failed" });
           throw new Error("Unsupported file format or failed to read: " + sourcePath);
         }
+        inspectedMediaInfo = mediaInfo;
         updateClip({
           filePath: mediaInfo.filePath,
           duration: mediaInfo.duration,
@@ -417,25 +391,19 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           sourceLength: mediaInfo.duration,
           importStatus: "preparingPlayback",
         });
+        if (createdTrack) {
+          const channels = Math.max(1, Math.min(8, Math.round(mediaInfo.numChannels || 2)));
+          createdTrack = { ...createdTrack, inputType: channels === 1 ? "mono" : "stereo",
+            inputChannelCount: channels === 1 ? 1 : 2, trackChannelCount: channels };
+          if (clipStillExists()) set(state => ({ tracks: state.tracks.map(track =>
+            track.id === createdTrack.id ? { ...track, inputType: createdTrack.inputType,
+              inputChannelCount: createdTrack.inputChannelCount, trackChannelCount: createdTrack.trackChannelCount } : track) }));
+        }
 
         // Retain decoded metadata even if Undo happened during the probe.
         // Redo can then restore the finished import without leaving a placeholder.
         replayClip = { ...replayClip, importStatus: "ready", waveformStatus: "building" };
-        if (!await nativeTrackReady) throw new Error("The audio engine could not create the track.");
-        if (!clipStillExists()) return;
-        const accepted = await nativeBridge.addPlaybackClip(
-          trackId,
-          mediaInfo.filePath,
-          provisionalClip.startTime,
-          mediaInfo.duration,
-          0,
-          0,
-          0,
-          0,
-          clipId,
-        );
-
-        if (!accepted) throw new Error("The audio engine could not prepare the imported clip.");
+        await prepareAndPublish(generation, mediaInfo);
         if (clipStillExists()) {
           updateClip({ importStatus: "ready", waveformStatus: "building" });
           console.log("[audio.import] external import ready", {
@@ -444,6 +412,10 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           });
         }
       } catch (error) {
+        if (error?.name === "AbortError") {
+          if (clipStillExists()) updateClip({ importStatus: "ready" });
+          return;
+        }
         updateClip({ importStatus: "failed" });
         console.error("[DAWStore] Failed to import external media:", error);
         throw error;
@@ -457,7 +429,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       const shouldUsePreviewTracks = Array.isArray(request.parsedTracks) && request.parsedTracks.length > 0;
 
       const importResult = shouldUsePreviewTracks
-        ? { success: true, tracks: request.parsedTracks }
+        ? { success: true, tracks: request.parsedTracks, sourceTempoInfo: request.sourceTempoInfo }
         : await nativeBridge.importMIDIFile(sourcePath);
       const normalizedTracks = (importResult.tracks || [])
         .map((track, index) => normalizeMIDIImportTrack(track, index, importResult.tracks?.length === 1 ? baseName : `${baseName} ${index + 1}`))
@@ -513,6 +485,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           loopLength: mergedSource.duration,
           events: mergedSource.events,
           ccEvents: mergedSource.ccEvents,
+          sourceTempoInfo: importResult.sourceTempoInfo,
           color,
         },
       });
@@ -617,7 +590,9 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
             const volumeDB = clip.volumeDB || 0;
             const fadeIn = clip.fadeIn || 0;
             const fadeOut = clip.fadeOut || 0;
-            const key = makeClipKey(track.id, clip.id, clip.filePath, clip.startTime, clip.duration, offset, volumeDB, fadeIn, fadeOut);
+            const fadeInCurve = clip.fadeInShape ?? 0;
+            const fadeOutCurve = clip.fadeOutShape ?? 0;
+            const key = makeClipKey(track.id, clip.id, clip.filePath, clip.startTime, clip.duration, offset, volumeDB, fadeIn, fadeOut, fadeInCurve, fadeOutCurve);
             currentClips.set(key, {
               trackId: track.id,
               filePath: clip.filePath,
@@ -627,6 +602,8 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
               volumeDB,
               fadeIn,
               fadeOut,
+              fadeInCurve,
+              fadeOutCurve,
               clipId: clip.id,
               pitchCorrectionSourceFilePath: clip.pitchCorrectionSourceFilePath,
               pitchCorrectionSourceOffset: clip.pitchCorrectionSourceOffset,
@@ -639,19 +616,19 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
 
       // Diff: find clips to remove (in old set but not in new)
       const toRemove: string[] = [];
-      for (const key of _lastSyncedClips.keys()) {
+      for (const key of clipSyncCache.clips.keys()) {
         if (!currentKeys.has(key)) toRemove.push(key);
       }
 
       // Diff: find clips to add (in new set but not in old)
       const toAdd: string[] = [];
       for (const key of currentKeys) {
-        if (!_lastSyncedClips.has(key)) toAdd.push(key);
+        if (!clipSyncCache.clips.has(key)) toAdd.push(key);
       }
 
       // If more than 60% changed, just do a full clear+rebuild (cheaper than many removes)
       const t1 = performance.now();
-      const totalOld = _lastSyncedClips.size;
+      const totalOld = clipSyncCache.clips.size;
       const fullRebuild = totalOld === 0 || toRemove.length > totalOld * 0.6;
       console.log(`${AUDIO_PLAYBACK_LOG_PREFIX} syncClipsWithBackend:diff`, {
         cachedKeys: totalOld,
@@ -679,6 +656,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           await nativeBridge.clearPlaybackClips(),
           "clearPlaybackClips",
         );
+        clipSyncCache.envelopes.clear();
         const allClips = Array.from(currentClips.values());
         if (allClips.length > 0) {
           requireClipBridgeSuccess(
@@ -691,7 +669,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         if (toRemove.length > 0) {
           const removalResults = await Promise.all(
             toRemove.map((key) => {
-              const clip = _lastSyncedClips.get(key)!;
+              const clip = clipSyncCache.clips.get(key)!;
               return nativeBridge.removePlaybackClipById(clip.trackId, clip.clipId);
             }),
           );
@@ -702,6 +680,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         }
         if (toAdd.length > 0) {
           const clipsToAdd = toAdd.map((key) => currentClips.get(key)!);
+          for (const clip of clipsToAdd) clipSyncCache.envelopes.delete(`${clip.trackId}::${clip.clipId}`);
           requireClipBridgeSuccess(
             await nativeBridge.addPlaybackClipsBatch(clipsToAdd),
             "addPlaybackClipsBatch",
@@ -711,7 +690,7 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
       const t2 = performance.now();
 
       // Update cache
-      _lastSyncedClips = new Map(currentClips);
+      clipSyncCache.clips = new Map(currentClips);
 
       // Collect all fire-and-forget sync promises to run in parallel
       const syncPromises: Promise<any>[] = [];
@@ -728,14 +707,24 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
         );
       }
 
-      // Sync gain envelopes to backend for all clips that have them
+      // Manual gain and independent crossfades compose at publication time.
+      // Empty updates clear a removed layer on Undo without removing the clip.
+      const nextEnvelopeKeys = new Set<string>();
       for (const track of tracks) {
         for (const clip of track.clips) {
-          if (clip.gainEnvelope && clip.gainEnvelope.length > 0) {
-            syncPromises.push(nativeBridge.setClipGainEnvelope(track.id, clip.id, clip.gainEnvelope).catch(logBridgeError("sync")));
-          }
+          if (clip.muted || !clip.filePath) continue;
+          const key = `${track.id}::${clip.id}`;
+          const envelope = getClipPlaybackGainEnvelope(clip);
+          const signature = JSON.stringify(envelope);
+          nextEnvelopeKeys.add(key);
+          if (clipSyncCache.envelopes.get(key) === signature || (!envelope.length && !clipSyncCache.envelopes.has(key))) continue;
+          syncPromises.push(nativeBridge.setClipGainEnvelope(track.id, clip.id, envelope).then(success => {
+            requireClipBridgeSuccess(success, "setClipGainEnvelope");
+            clipSyncCache.envelopes.set(key, signature);
+          }));
         }
       }
+      for (const key of clipSyncCache.envelopes.keys()) if (!nextEnvelopeKeys.has(key)) clipSyncCache.envelopes.delete(key);
 
       // Sync automation lanes to backend (all lanes, even empty ones, to sync modes)
       for (const track of tracks) {
@@ -806,6 +795,8 @@ export const clipActions = (set: SetFn, get: GetFn) => ({
           newClip.id,
           newClip.pitchCorrectionSourceFilePath,
           newClip.pitchCorrectionSourceOffset,
+          newClip.fadeInShape ?? 0,
+          newClip.fadeOutShape ?? 0,
         );
 
         console.log(

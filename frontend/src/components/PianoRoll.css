@@ -9,6 +9,11 @@
   color: #d6dbe3;
 }
 
+.piano-roll-note-hover {
+  left: var(--note-hover-x, 4px);
+  top: var(--note-hover-y, 4px);
+}
+
 .piano-roll-key-strip {
   position: relative;
   display: flex;
@@ -415,6 +420,7 @@
 }
 
 .piano-roll-stage-wrap {
+  position: relative;
   min-width: 0;
   min-height: 0;
 }

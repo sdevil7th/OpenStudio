@@ -64,7 +64,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
         )
         cls.jobs = cls.workflow["jobs"]
 
-    def job_runs(self, name, results=None, enabled="true", ref="refs/tags/v0.1.04", cancelled=False):
+    def job_runs(self, name, results=None, enabled="true", ref="refs/tags/v0.1.04", cancelled=False, snap_enabled="false"):
         job = self.jobs[name]
         needs = job.get("needs", [])
         if isinstance(needs, str):
@@ -78,6 +78,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
                 return False
         values = {
             "vars.OPENSTUDIO_STORE_ENABLED": enabled,
+            "vars.OPENSTUDIO_SNAP_ENABLED": snap_enabled,
             "github.ref": ref,
             **{f"needs.{name}.result": status for name, status in statuses.items()},
         }
@@ -112,7 +113,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
 
     def test_store_readiness_waits_for_validated_notes_and_windows_package(self):
         self.assertCountEqual(self.jobs["preflight-store"]["needs"], [
-            "build-windows", "validate-release-notes",
+            "build-windows", "certify-store-package", "validate-release-notes",
         ])
         for dependency in self.jobs["preflight-store"]["needs"]:
             for status in ("failure", "cancelled", "skipped"):
@@ -137,9 +138,11 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(enabled=enabled):
                 self.assertEqual(evaluate_condition(guard["if"], {
                     "vars.OPENSTUDIO_STORE_ENABLED": enabled,
+                    "vars.OPENSTUDIO_SNAP_ENABLED": "false",
                 }), expected)
         for name in ("build-windows", "build-macos", "build-linux"):
-            self.assertEqual(self.jobs[name]["needs"], "validate-release-notes")
+            needs = self.jobs[name]["needs"]
+            self.assertIn("validate-release-notes", [needs] if isinstance(needs, str) else needs)
 
         if os.name == "nt":
             git = shutil.which("git")
@@ -195,7 +198,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(len(uploads), 1)
         self.assertIn("dist/store/*.msix", uploads[0]["with"]["path"].splitlines())
         self.assertEqual(uploads[0]["with"]["if-no-files-found"], "error")
-        for name in ("preflight-store", "submit-store"):
+        for name in ("certify-store-package", "preflight-store", "submit-store"):
             with self.subTest(job=name):
                 downloads = [step["with"] for step in self.jobs[name]["steps"]
                              if "actions/download-artifact@" in step.get("uses", "")]
@@ -230,9 +233,10 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
     def test_preflights_and_submission_share_the_reviewed_publishing_policy(self):
         config_path = "packaging/msix/release-publishing.json"
         policy = json.loads((ROOT / config_path).read_text(encoding="utf-8"))
-        self.assertEqual(policy, {
-            "appId": "9N3MQ442VXGW", "releaseTag": "v0.1.05", "targetPublishMode": "Immediate",
-        })
+        self.assertEqual(policy, [
+            {"appId": "9N3MQ442VXGW", "releaseTag": tag, "targetPublishMode": "Immediate"}
+            for tag in ("v0.1.05", "v0.1.09")
+        ])
         commands = [step["run"] for name in ("preflight-store", "submit-store")
                     for step in self.jobs[name]["steps"]
                     if "submit_store_release.py" in step.get("run", "")]

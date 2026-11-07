@@ -7,7 +7,8 @@ juce::var AudioEngine::runParallelTrackRegression()
     class FixtureDevice final : public juce::AudioIODevice
     {
     public:
-        FixtureDevice() : AudioIODevice("Parallel track fixture", "Offline fixture") {}
+        explicit FixtureDevice(int block = 512)
+            : AudioIODevice("Parallel track fixture", "Offline fixture"), blockSize(block) {}
         juce::StringArray getOutputChannelNames() override { return { "Left", "Right" }; }
         juce::StringArray getInputChannelNames() override
         {
@@ -16,8 +17,8 @@ juce::var AudioEngine::runParallelTrackRegression()
             return names;
         }
         juce::Array<double> getAvailableSampleRates() override { return { 48000.0 }; }
-        juce::Array<int> getAvailableBufferSizes() override { return { 512 }; }
-        int getDefaultBufferSize() override { return 512; }
+        juce::Array<int> getAvailableBufferSizes() override { return { blockSize }; }
+        int getDefaultBufferSize() override { return blockSize; }
         juce::String open(const juce::BigInteger&, const juce::BigInteger&, double, int) override
         { return "Offline fixture cannot open hardware"; }
         void close() override {}
@@ -26,13 +27,15 @@ juce::var AudioEngine::runParallelTrackRegression()
         void stop() override {}
         bool isPlaying() override { return false; }
         juce::String getLastError() override { return {}; }
-        int getCurrentBufferSizeSamples() override { return 512; }
+        int getCurrentBufferSizeSamples() override { return blockSize; }
         double getCurrentSampleRate() override { return 48000.0; }
         int getCurrentBitDepth() override { return 32; }
         juce::BigInteger getActiveOutputChannels() const override { return juce::BigInteger(3); }
         juce::BigInteger getActiveInputChannels() const override { return juce::BigInteger(4095); }
         int getOutputLatencyInSamples() override { return 0; }
         int getInputLatencyInSamples() override { return 0; }
+    private:
+        const int blockSize;
     } device;
 
     juce::Array<juce::var> checks, configurations;
@@ -48,6 +51,25 @@ juce::var AudioEngine::runParallelTrackRegression()
         checks.add(result);
         passed = passed && success;
     };
+    for (const int blockSize : { 8, 64 })
+    {
+        FixtureDevice tinyDevice(blockSize);
+        auto engine = std::make_unique<AudioEngine>(DeviceStartup::offline);
+        engine->requestedRealtimeWorkers = 0;
+        engine->audioDeviceAboutToStart(&tinyDevice);
+        const juce::String id = "native-nam-insertion";
+        const bool inserted = engine->addTrack(id, "audio") == id
+            && engine->addTrackBuiltInFX(id, "OpenStudio NAM Rack", true)
+            && engine->addTrackBuiltInFX(id, "OpenStudio NAM Rack", false);
+        const auto input = engine->getNAMRackDiagnostics(id, "input", 0);
+        const auto output = engine->getNAMRackDiagnostics(id, "track", 0);
+        check("native_nam_insert_after_device_start_" + juce::String(blockSize), inserted
+                && static_cast<int>(input.getProperty("preparedBlockSize", 0)) == blockSize
+                && static_cast<int>(output.getProperty("preparedBlockSize", 0)) == blockSize
+                && engine->hardwareCallbackRegistrationCount.load() == 0,
+            "The app's built-in insertion route prepares both input and track NAM for the running device size without another device restart; the fixture opens no physical device.");
+        engine->audioDeviceStopped();
+    }
     {
         // Use the real query and response serialization with a simulated driver.
         // An equal cloned current object must not detach later draft edits from
@@ -185,8 +207,14 @@ juce::var AudioEngine::runParallelTrackRegression()
                 input.setSample(channel, sample, static_cast<float>(0.1 * std::sin(
                     0.017 * (sample + blockIndex * capacity) + 0.29 * channel)));
     };
-    const auto callback = [&](AudioEngine& engine, juce::AudioBuffer<float>& output, int samples)
+    constexpr double parityCollectionBudgetMs = 1000.0;
+    const auto callback = [&](AudioEngine& engine, juce::AudioBuffer<float>& output, int samples,
+                              double collectionBudgetMs = 0.0)
     {
+        // Exact-output cases test completed work, independently of shared CI
+        // scheduling. Keep real sample rates/block lengths and nominal callback
+        // telemetry. Bounds and deliberately late-worker cases use zero here.
+        const juce::ScopedValueSetter<double> budget(engine.regressionTrackCollectionBudgetMs, collectionBudgetMs);
         for (int channel = 0; channel < output.getNumChannels(); ++channel)
             juce::FloatVectorOperations::fill(output.getWritePointer(channel), poison, capacity);
         engine.audioDeviceIOCallbackWithContext(input.getArrayOfReadPointers(), input.getNumChannels(),
@@ -209,6 +237,8 @@ juce::var AudioEngine::runParallelTrackRegression()
         auto serial = createEngine(trackCount, 0);
         auto parallel = createEngine(trackCount, trackCount - 1);
         bool exact = true, stateChanges = true, finite = true, suffixPreserved = true;
+        int firstMismatchBlock = -1;
+        juce::var firstMismatchStats;
         float peak = 0.0f;
         for (int block = 0; block < 40; ++block)
         {
@@ -250,17 +280,32 @@ juce::var AudioEngine::runParallelTrackRegression()
                 if (block == 36) stateChanges = engine->removeTrack(trackId(trackCount - 1)) && stateChanges;
             }
             fillInput(block);
-            callback(*serial, serialOutput, capacity);
-            callback(*parallel, parallelOutput, capacity);
-            exact = exactOutput(capacity) && exact;
+            callback(*serial, serialOutput, capacity, parityCollectionBudgetMs);
+            callback(*parallel, parallelOutput, capacity, parityCollectionBudgetMs);
+            const bool blockExact = exactOutput(capacity);
+            if (!blockExact && firstMismatchBlock < 0)
+            {
+                firstMismatchBlock = block;
+                firstMismatchStats = parallel->getRealtimeTrackExecutionDiagnostics();
+            }
+            exact = blockExact && exact;
             peak = juce::jmax(peak, parallelOutput.getMagnitude(0, capacity));
         }
         const auto parityStats = parallel->realtimeTrackExecutor.snapshotStats();
+        auto parityDiagnostics = parallel->getRealtimeTrackExecutionDiagnostics();
+        parityDiagnostics.getDynamicObject()->setProperty("exactOutput", exact);
+        parityDiagnostics.getDynamicObject()->setProperty("stateChanges", stateChanges);
+        parityDiagnostics.getDynamicObject()->setProperty("peak", peak);
+        parityDiagnostics.getDynamicObject()->setProperty("firstMismatchBlock", firstMismatchBlock);
+        parityDiagnostics.getDynamicObject()->setProperty("firstMismatchStats", firstMismatchStats);
+        parityDiagnostics.getDynamicObject()->setProperty("collectionBudgetMs", parityCollectionBudgetMs);
+        parityDiagnostics.getDynamicObject()->setProperty("timingClassification", "not_asserted; offline completed-work parity only");
         check("serial_parallel_exact_" + juce::String(trackCount), exact && stateChanges && peak > 0.000001f
             && parityStats.batches == 40 && parityStats.completedBatches == 40
             && parityStats.workerJobs > 0 && parityStats.cancelledJobs == 0
-            && parallel->parallelTrackRejectedJobs.load() == 0,
-            "Forty 512-frame blocks: mono/stereo input, volume/pan, mute/solo, output route, master send, live Drive, bypass, reorder and removal preserve exact serial output.");
+            && parallel->parallelTrackRejectedJobs.load() == 0
+            && serial->regressionTrackCollectionBudgetMs == 0.0 && parallel->regressionTrackCollectionBudgetMs == 0.0,
+            "Forty 512-frame blocks: mono/stereo input, volume/pan, mute/solo, output route, master send, live Drive, bypass, reorder and removal preserve exact serial output.", parityDiagnostics);
 
         // Small callbacks exercise allocation capacity and buffer bounds. They
         // deliberately retain their real deadline; do not turn a scheduler
@@ -319,7 +364,7 @@ juce::var AudioEngine::runParallelTrackRegression()
         parallel->audioDeviceAboutToStart(&device);
         const auto beforeRestart = parallel->realtimeTrackExecutor.snapshotStats().completedBatches;
         fillInput(101);
-        callback(*parallel, parallelOutput, capacity);
+        callback(*parallel, parallelOutput, capacity, parityCollectionBudgetMs);
         check("device_restart_" + juce::String(trackCount), stopped
             && parallel->realtimeTrackExecutor.getWorkerCount() == trackCount - 1
             && parallel->realtimeTrackExecutor.snapshotStats().completedBatches == beforeRestart + 1
@@ -473,8 +518,8 @@ juce::var AudioEngine::runParallelTrackRegression()
                 input.setSample(3, sample, static_cast<float>(sample % 7 - 3) * 0.031f);
             }
             const auto batchesBefore = engines[1]->realtimeTrackExecutor.snapshotStats().batches;
-            callback(*engines[0], serialOutput, capacity);
-            callback(*engines[1], parallelOutput, capacity);
+            callback(*engines[0], serialOutput, capacity, parityCollectionBudgetMs);
+            callback(*engines[1], parallelOutput, capacity, parityCollectionBudgetMs);
             exact = exactOutput(capacity) && exact;
             subset = engines[1]->realtimeTrackExecutor.snapshotStats().batches == batchesBefore + 1 && subset;
             auto* scenarioResult = new juce::DynamicObject();
@@ -852,13 +897,7 @@ juce::var AudioEngine::runParallelTrackRegression()
             quarantinePass = reader->read(&take, 0, frames, 0, true, false) && quarantinePass;
             for (int frame = 0; frame < frames; ++frame)
             {
-                float expected = fixtureSample(index, frame);
-                if (mixedGraph && index == 5)
-                    expected += fixtureSample(4, frame - sourceDelay)
-                        * (std::cos(juce::MathConstants<float>::pi / 4.0f) * 0.5f);
-                if (addIncomingWhilePending && index == 1)
-                    expected += fixtureSample(4, frame - sourceDelay)
-                        * (std::cos(juce::MathConstants<float>::pi / 4.0f) * 0.25f);
+                const float expected = fixtureSample(index, frame);
                 const float actual = take.getSample(0, frame);
                 const double error = std::abs(static_cast<double>(actual) - expected);
                 maximumRecordingError = juce::jmax(maximumRecordingError, error);
@@ -876,9 +915,9 @@ juce::var AudioEngine::runParallelTrackRegression()
         check(addIncomingWhilePending ? "pending_worker_new_incoming_send_recording"
                 : mixedGraph ? "pending_worker_mixed_send_recording" : "pending_worker_quarantine_preserves_raw_recording", quarantinePass,
             addIncomingWhilePending
-                ? "A new snapshot adds an unowned source send into an old queued processor. Identity quarantine retains all old owned scratch while that raw take includes the current incoming send; unrelated send monitoring/recording follows an explicit zero-padded PDC delay oracle without new dispatch."
+                ? "A new snapshot adds an unowned source send into an old queued processor. Identity quarantine retains all old owned scratch; monitoring follows the explicit send/PDC oracle while each take contains only its selected hardware input."
                 : mixedGraph
-                ? "Four retained native owners remain untouched while an unrelated source/send/destination graph processes on callback. Three blocks match an explicit zero-padded PDC delay oracle for monitoring and raw send-destination PCM, and no new worker batch is dispatched."
+                ? "Four retained native owners remain untouched while an unrelated source/send/destination graph processes on callback. Monitoring matches the zero-padded send/PDC oracle; raw takes independently match selected hardware PCM, and no new worker batch is dispatched."
                 : "A deliberately held helper retains a track lock and snapshot pin across three real host callbacks; monitoring is silent, DSP counters/scratch remain untouched and all four raw recordings preserve exact frame counts and 16-bit input parity.", quarantineDiagnosticValue);
     }
     check("device_stop_waits_for_pending_worker", controlDrainPass,

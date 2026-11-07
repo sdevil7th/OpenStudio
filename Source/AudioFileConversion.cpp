@@ -41,7 +41,11 @@ juce::Result AudioFileConversion::convert(const juce::File& source, const juce::
     if (expectedLength < 1) return juce::Result::fail("Source is shorter than one output sample");
     reader.reset(); // Allow explicit in-place conversion, but only publish after success.
 
-    juce::TemporaryFile staged(destination, juce::TemporaryFile::useHiddenFile);
+    // Keep staging names independent of the destination basename. A hashed
+    // project-cache target can already be near Windows' path limit; inherited
+    // nested _temp suffixes could make a valid destination unreadable/leaked.
+    juce::TemporaryFile staged(destination, destination.getParentDirectory().getNonexistentChildFile(
+        ".os-convert-" + juce::Uuid().toString().removeCharacters("-"), "." + options.format));
     juce::String codec;
     if (options.format == "flac") codec = "flac";
     else if (options.format == "wav") codec = bits == 32 ? "pcm_f32le" : "pcm_s" + juce::String(bits) + "le";

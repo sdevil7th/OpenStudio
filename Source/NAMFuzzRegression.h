@@ -415,7 +415,7 @@ private:
                 input.setSample(0,position,value);input.setSample(1,position,value);
             }
         struct GateRun {juce::AudioBuffer<float> audio;std::array<NAMFuzz::GateDiagnostics,5> snapshots;};
-        const auto process=[&input,&lengths,sampleRate] (int blockSize,float excitationGain)
+        const auto process=[&input,&lengths,sampleRate=sampleRate] (int blockSize,float excitationGain)
         {
             GateRun run;run.audio.makeCopyOf(input);NAMFuzz processor;NAMFuzz::Parameters controls;
             controls.enabled=true;controls.bass=true;controls.voice=2;controls.drive=0.5f;processor.prepare(sampleRate,controls);

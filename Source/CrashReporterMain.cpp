@@ -37,9 +37,9 @@ DWORD WINAPI boundFinalQuit(void* argument)
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc != 6) return 2;
-    HANDLE handles[5] {};
-    for (int index = 0; index < 5; ++index)
+    if (argc != 7) return 2;
+    HANDLE handles[6] {};
+    for (int index = 0; index < 6; ++index)
     {
         wchar_t* end = nullptr;
         const auto value = _wcstoui64(argv[index + 1], &end, 10);
@@ -52,15 +52,16 @@ int wmain(int argc, wchar_t** argv)
         || state->protocolVersion != CrashReporterProtocol::version
         || GetProcessId(handles[4]) != state->processId) return 3;
     QuitWatchdog watchdog { state, handles[4], CreateEventW(nullptr, TRUE, FALSE, nullptr) };
-    HANDLE watchdogThread = watchdog.stop ? CreateThread(nullptr, 0, boundFinalQuit, &watchdog, 0, nullptr) : nullptr;
-    if (!watchdogThread) return 6;
+    if (!watchdog.stop) return 6;
+    HANDLE watchdogThread = nullptr; // Created only when diagnostics or final Quit explicitly arm monitoring.
     SetEvent(handles[3]); // Parent installs the external path only after readiness.
-    const HANDLE waitHandles[] = { handles[1], handles[4] };
+    const HANDLE waitHandles[] = { handles[1], handles[4], handles[5] };
     int result = 0;
     auto lastWakeTicks = GetTickCount64();
     for (;;)
     {
-        const DWORD wake = WaitForMultipleObjects(2, waitHandles, FALSE, 1000);
+        const bool monitor = InterlockedCompareExchange(&state->watchdogArmed, 0, 0) != 0;
+        const DWORD wake = WaitForMultipleObjects(3, waitHandles, FALSE, monitor ? 1000 : INFINITE);
         if (wake == WAIT_OBJECT_0)
         {
             result = CrashReporterProtocol::writeReport(*state, handles[4]) ? 0 : 4;
@@ -68,6 +69,18 @@ int wmain(int argc, wchar_t** argv)
             break;
         }
         if (wake == WAIT_OBJECT_0 + 1) break;
+        if (wake == WAIT_OBJECT_0 + 2)
+        {
+            // In a diagnostic build, keep the Quit bound available even if a
+            // preceding hang dump later blocks inside the OS dump writer.
+            if (!watchdogThread)
+            {
+                watchdogThread = CreateThread(nullptr, 0, boundFinalQuit, &watchdog, 0, nullptr);
+                if (!watchdogThread) { result = 6; break; }
+            }
+            lastWakeTicks = GetTickCount64();
+            continue;
+        }
         if (wake != WAIT_TIMEOUT) { result = 5; break; }
         const auto nowTicks = GetTickCount64();
         const auto wakeGap = nowTicks - lastWakeTicks;
@@ -87,8 +100,11 @@ int wmain(int argc, wchar_t** argv)
         InterlockedExchange(&state->hangReportState, captured ? 2 : 3);
     }
     SetEvent(watchdog.stop);
-    WaitForSingleObject(watchdogThread, INFINITE);
-    CloseHandle(watchdogThread);
+    if (watchdogThread)
+    {
+        WaitForSingleObject(watchdogThread, INFINITE);
+        CloseHandle(watchdogThread);
+    }
     CloseHandle(watchdog.stop);
     UnmapViewOfFile(state);
     for (const auto handle : handles) CloseHandle(handle);

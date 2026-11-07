@@ -62,6 +62,8 @@ public:
     bool isRunning() const;
     // Called on the host control thread before another AI engine needs memory.
     bool releaseIdleWorker();
+    bool hasIdleWorker() const;
+    bool hasUnretiredWorker() const;
     // Background/control thread only. Reads hardware and checkpoint headers without loading weights.
     juce::var getGenerationPreflight(const juce::String& modelId, const juce::String& workflowId,
                                     const juce::String& paramsJson,
@@ -69,6 +71,9 @@ public:
 
 private:
     friend class RuntimeSafetyRegression;
+    friend class AIQualificationHarness;
+    juce::File qualificationDataRoot;
+    juce::NamedValueSet qualificationModelRoots, qualificationPythonPaths;
     juce::File getUserDataRoot() const;
     juce::File getUserRuntimeRoot() const;
     juce::File getStableAudioRuntimeRoot() const;
@@ -76,11 +81,13 @@ private:
     juce::File getStableAudioModelRoot(const juce::String& modelId) const;
     juce::File findPython() const;
     juce::File findStableAudioPython() const;
+    juce::File findCompilerPython() const;
     juce::File findMiniMaxPython() const;
     static juce::File qualifiedMiniMaxPython(const juce::File& candidateRoot);
     juce::File findScript() const;
     juce::File findStableAudioScript() const;
-    bool ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId);
+    bool ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId,
+                               const juce::String& optimization);
     bool sendGenerateRequest(const juce::String& modelId,
                              const juce::String& workflowId,
                              const juce::String& paramsJson,
@@ -122,6 +129,7 @@ private:
     juce::String workerScriptVersion_;
     juce::String workerScriptPath_;
     juce::String workerModelId_;
+    juce::String workerOptimization_;
     juce::File workerPython_;
     bool generationActive_ = false;
     bool expectedProcessExit_ = false;

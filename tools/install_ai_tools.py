@@ -87,6 +87,8 @@ ACE15_MANAGED_LM_CONFIG_OVERRIDES: dict[str, dict[str, Any]] = {}
 ACE15_MANAGED_LM_SHARED_FILES: tuple[str, ...] = ()
 WINDOWS_REUSED_RUNTIME_REPAIR_PACKAGES = (
     "audio-separator==0.41.1",
+    "librosa==0.11.0",
+    "audioread==3.1.0",
     "requests>=2",
     "certifi>=2023.5.7",
     "charset_normalizer<4,>=2",
@@ -271,10 +273,20 @@ def _rocm_gpu_pool_memory_mb(output: str) -> int:
     return largest_kb // 1024
 
 
+def _rocm_gpu_architecture(output: str) -> str:
+    agents = []
+    for agent in re.split(r"(?m)^\s*Agent \d+\s*$", output):
+        if re.search(r"(?m)^\s*Device Type:\s*GPU\s*$", agent):
+            match = re.search(r"(?m)^\s*Name:\s*(gfx[0-9a-f]+)\s*$", agent)
+            agents.append(match[1] if match else "")
+    return agents[0] if len(agents) == 1 else ""
+
+
 def _probe_rocm_gpu() -> dict[str, Any] | None:
     if platform.system() != "Linux":
         return None
     best_memory_mb = 0
+    architecture = ""
     for command in (["rocminfo"], ["rocm-smi", "--showmeminfo", "vram"]):
         try:
             result = subprocess.run(command, capture_output=True, text=True,
@@ -285,6 +297,7 @@ def _probe_rocm_gpu() -> dict[str, Any] | None:
             continue
         if command[0] == "rocminfo":
             best_memory_mb = _rocm_gpu_pool_memory_mb(result.stdout or "")
+            architecture = _rocm_gpu_architecture(result.stdout or "")
         else:
             for value in re.findall(r"VRAM Total Memory \(B\):\s*(\d+)", result.stdout or ""):
                 best_memory_mb = max(best_memory_mb, int(value) // (1024 * 1024))
@@ -295,6 +308,7 @@ def _probe_rocm_gpu() -> dict[str, Any] | None:
     return {
         "gpuBackend": "rocm",
         "gpuName": "AMD ROCm GPU",
+        "gpuArchitecture": architecture,
         "gpuMemoryMb": best_memory_mb,
         "gpuMemoryDetected": True,
     }
@@ -311,6 +325,7 @@ def probe_hardware_requirements() -> dict[str, Any]:
         "systemRamGb": round(system_ram_mb / 1024, 2) if system_ram_mb > 0 else 0,
         "gpuBackend": gpu.get("gpuBackend", "none"),
         "gpuName": gpu.get("gpuName", ""),
+        "gpuArchitecture": gpu.get("gpuArchitecture", ""),
         "gpuMemoryMb": int(gpu.get("gpuMemoryMb", 0) or 0),
         "gpuMemoryGb": round(int(gpu.get("gpuMemoryMb", 0) or 0) / 1024, 2),
         "gpuMemoryDetected": bool(gpu.get("gpuMemoryDetected", False)),
@@ -961,6 +976,7 @@ def get_requirement_specifiers(*, python_version: tuple[int, int, int] | None) -
         )
         return [
             windows_audio_separator_variant,
+            "librosa==0.11.0", "audioread==3.1.0",
             "hf_xet>=1.4.2",
             "huggingface_hub>=0.34,<1.0",
         ]
@@ -969,17 +985,20 @@ def get_requirement_specifiers(*, python_version: tuple[int, int, int] | None) -
         if backend == "cuda":
             return [
                 "audio-separator[gpu]==0.41.1",
+                "librosa==0.11.0", "audioread==3.1.0",
                 "hf_xet>=1.4.2",
                 "huggingface_hub>=0.34,<1.0",
             ]
         # ROCm and CPU both start from the CPU base; the backend plan swaps torch wheels
         return [
             "audio-separator[cpu]==0.41.1",
+            "librosa==0.11.0", "audioread==3.1.0",
             "hf_xet>=1.4.2",
             "huggingface_hub>=0.34,<1.0",
         ]
     return [
         "audio-separator[cpu]==0.41.1",
+        "librosa==0.11.0", "audioread==3.1.0",
         "hf_xet>=1.4.2",
         "huggingface_hub>=0.34,<1.0",
     ]
@@ -2551,6 +2570,34 @@ def apply_backend_install_plan(
     python_detected: bool,
     build_runtime_mode: str,
 ) -> None:
+    # A downloaded catalog can contain an older feature-gated Torch recipe.
+    # The app's reviewed CUDA contract owns the overlay, including repairs of
+    # existing runtimes. Never let selecting only stems skip CUDA PyTorch.
+    system = platform.system()
+    if ((system == "Windows" and backend_requested in {"cuda", "directml"})
+            or (system == "Linux" and backend_requested in {"cuda", "rocm"})):
+        local_plan = Path(__file__).with_name(
+            f"ai-runtime-install-plan-{system.lower()}-{backend_requested}.json")
+        install_plan = load_backend_install_plan(local_plan)
+        if system == "Windows" and backend_requested == "cuda":
+            # ORT provider distributions share the same import directory.
+            # Remove all providers when repairing a DirectML/CPU installation,
+            # then let audio-separator[gpu] restore the CUDA provider's files.
+            try:
+                result = subprocess.run([str(runtime_python), "-c",
+                    "import importlib.metadata as m,json; print(json.dumps([d.metadata['Name'].lower() for d in m.distributions()]))"],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=True)
+                installed = set(json.loads(result.stdout))
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                raise InstallerStepError(f"Could not inspect runtime packages before CUDA repair: {exc}",
+                    error_code="cuda_runtime_inspection_failed", progress=0.74) from exc
+            if installed.intersection({"torch-directml", "onnxruntime-directml", "onnxruntime"}):
+                install_plan["steps"].insert(0, {
+                    "type": "pip_uninstall", "features": list(ALL_INSTALL_FEATURES),
+                    "description": "Removing conflicting DirectML and CPU providers before CUDA repair",
+                    "packages": ["torch-directml", "onnxruntime-directml", "onnxruntime", "onnxruntime-gpu"],
+                })
     install_plan = select_rocm_architecture_plan(install_plan, backend_requested)
     plan_id = str(install_plan.get("id", "")).strip()
     package_source = str(install_plan.get("packageSource", "")).strip()
@@ -3044,7 +3091,10 @@ def probe_runtime(
     return report
 
 
-def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested: str) -> tuple[str, dict[str, Any]] | None:
+def resolve_fallback_backend_install_plan(runtime_root: Path, backend_requested: str,
+                                         *, required_backend: str = "") -> tuple[str, dict[str, Any]] | None:
+    if required_backend:
+        return None
     normalized_backend = backend_requested.strip().lower()
 
     if platform.system() == "Windows":
@@ -3095,13 +3145,11 @@ def prepare_windows_fallback_runtime(runtime_root: Path, runtime_python: Path) -
 
 
 def activate_windows_runtime(base_runtime_root: Path, selected_runtime_root: Path) -> None:
-    """Publish a verified runtime selection with an atomic, allowlisted marker."""
+    """Publish a verified managed runtime on every platform (legacy API name)."""
     global PENDING_RUNTIME_CANDIDATE
 
-    if platform.system() != "Windows":
-        return
     name = selected_runtime_root.name
-    if name != "stem-runtime" and not re.fullmatch(r"stem-runtime-directml-[0-9a-f]{32}", name):
+    if name != "stem-runtime" and not re.fullmatch(r"stem-runtime-(?:directml|candidate)-[0-9a-f]{32}", name):
         return
     if selected_runtime_root.parent != base_runtime_root.parent:
         raise InstallerStepError(
@@ -3496,7 +3544,7 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_featu
     )
 
     if (
-        FEATURE_AUDIO_GENERATION in selected_features
+        (FEATURE_AUDIO_GENERATION in selected_features or FEATURE_STEM_SEPARATION in selected_features)
         and platform.system() == "Windows"
         and is_music_generation_python_compatible(runtime_python_version)
         and is_windows_nvidia_machine()
@@ -3512,8 +3560,8 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_featu
         emit(
             "installing",
             0.57,
-            message="Preparing CUDA acceleration for ACE-Step music generation",
-            stepLabel="Preparing CUDA acceleration for ACE-Step music generation",
+            message="Preparing CUDA acceleration for AI audio processing",
+            stepLabel="Preparing CUDA acceleration for AI audio processing",
             activityLines=[
                 "NVIDIA hardware detected on this Windows machine.",
                 "Installing CUDA-capable PyTorch wheels for the ACE-Step runtime.",
@@ -3523,6 +3571,12 @@ def bootstrap_runtime(runtime_root: Path, bootstrap_python: Path, selected_featu
             pythonDetected=python_detected,
             buildRuntimeMode=build_runtime_mode,
         )
+        if FEATURE_AUDIO_GENERATION not in selected_features:
+            apply_windows_cuda_pytorch_overlay(
+                runtime_python, runtime_root, install_source=install_source,
+                requires_external_python=requires_external_python, python_detected=python_detected,
+                build_runtime_mode=build_runtime_mode,
+            )
     music_generation_setup_error: InstallerStepError | None = None
     music_generation_requirements = (
         get_music_generation_runtime_requirements(python_version=runtime_python_version)
@@ -4123,6 +4177,29 @@ def download_music_gen_model(
     )
 
 
+def required_backend_validation_command(report: dict, backend: str, runtime_python: Path) -> list[str]:
+    """A maintenance candidate must prove the intended backend before activation.
+
+    Importability or a CUDA-labelled wheel alone does not prove GPU execution.
+    The child performs a real allocation, kernel and synchronized result read.
+    """
+    if not report.get("runtimeReady") or report.get("selectedBackend") != backend:
+        raise InstallerStepError(
+            f"The updated runtime could not use the required {backend.upper()} backend. "
+            "The previous runtime remains active. Check the GPU driver and AI Tools details.",
+            error_code="required_backend_unavailable", progress=.99)
+    code = "import torch; "
+    if backend in {"cuda", "rocm"}:
+        code += ("assert torch.cuda.is_available(); "
+            + ("assert torch.version.hip is None; " if backend == "cuda" else "assert torch.version.hip; ")
+            + "x=torch.full((64,),2.0,device='cuda:0'); assert x.is_cuda; "
+            "y=(x*x).sum(); torch.cuda.synchronize(); assert y.item()==256.0; ")
+    else:
+        code += "x=torch.full((64,),2.0,device='cpu'); assert (x*x).sum().item()==256.0; "
+    code += "print('Required backend execution verified')"
+    return [str(runtime_python), "-I", "-c", code]
+
+
 def main() -> None:
     global LOG_PATH, SESSION_ID, RUNTIME_CANDIDATE, FALLBACK_ATTEMPTED
     global START_TIME_MONOTONIC
@@ -4144,6 +4221,10 @@ def main() -> None:
     parser.add_argument("--runtime-candidate", default="", help="Selected runtime candidate identity")
     parser.add_argument("--fallback-attempted", action="store_true", help="True when this install is using a fallback runtime candidate")
     parser.add_argument("--backend-requested", default="", help="Requested backend overlay identity for Windows base runtimes")
+    parser.add_argument("--required-backend", choices=["cuda", "rocm", "cpu"], default="",
+                        help="Require actual execution on this backend before activating a maintenance candidate")
+    parser.add_argument("--skip-generation-checkpoints", action="store_true",
+                        help="Maintain installed generation libraries without downloading new model checkpoints")
     parser.add_argument("--backend-install-plan", default="", help="Path to a JSON backend install plan")
     parser.add_argument("--features", default=",".join(DEFAULT_INSTALL_FEATURES), help="Comma-separated AI feature ids to install")
     args = parser.parse_args()
@@ -4300,7 +4381,8 @@ def main() -> None:
                     raise_on_error=True,
                 )
             except InstallerStepError as primary_exc:
-                fallback_plan = resolve_fallback_backend_install_plan(runtime_root, effective_backend_requested)
+                fallback_plan = resolve_fallback_backend_install_plan(runtime_root, effective_backend_requested,
+                                                                      required_backend=args.required_backend)
                 if fallback_plan is None or FALLBACK_ATTEMPTED:
                     fail(
                         primary_exc.message,
@@ -4505,7 +4587,7 @@ def main() -> None:
             buildRuntimeMode=build_runtime_mode,
         )
 
-    if FEATURE_AUDIO_GENERATION in install_features:
+    if FEATURE_AUDIO_GENERATION in install_features and not args.skip_generation_checkpoints:
         download_music_gen_model(
             runtime_python,
             args.music_gen_model,
@@ -4519,7 +4601,9 @@ def main() -> None:
         emit(
             "downloading_model",
             0.95,
-            message="Audio Generation was not selected or is incompatible; skipping ACE-Step model downloads.",
+            message=("Keeping existing generation checkpoints during the runtime update."
+                     if args.skip_generation_checkpoints else
+                     "Audio Generation was not selected or is incompatible; skipping ACE-Step model downloads."),
             stepLabel="Skipping Audio Generation model downloads",
             selectedFeatures=install_features,
             requestedFeatures=requested_features,
@@ -4554,6 +4638,17 @@ def main() -> None:
         python_detected=python_detected,
         build_runtime_mode=build_runtime_mode,
     )
+
+    if args.required_backend:
+        try:
+            command = required_backend_validation_command(runtime_probe, args.required_backend, runtime_python)
+        except InstallerStepError as exc:
+            fail(exc.message, progress=exc.progress, error_code=exc.error_code)
+        run_step(command, state="verifying_runtime", progress=.99,
+                 description=f"Verifying real {args.required_backend.upper()} execution before activation",
+                 install_source=install_source, requires_external_python=requires_external_python,
+                 python_detected=python_detected, build_runtime_mode=build_runtime_mode,
+                 error_code="required_backend_execution_failed")
 
     music_generation_ready = bool(runtime_probe.get("musicGenerationReady", False))
     music_generation_layout_valid = bool(runtime_probe.get("musicGenerationLayoutValid", False))

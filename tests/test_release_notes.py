@@ -63,7 +63,7 @@ class DirectPackagingNotesTests(unittest.TestCase):
         self.path.parent.mkdir(parents=True)
         self.valid = (ROOT / "docs/releases/0.1.01.md").read_text(encoding="utf-8")
         self.source = self.root / "input"
-        for name in ("OpenStudio.exe", "OpenStudioCrashReporter.exe", "ffmpeg.exe", "onnxruntime.dll",
+        for name in ("OpenStudio.exe", "OpenStudioCrashReporter.exe", "OpenStudioSupport.exe", "ffmpeg.exe", "onnxruntime.dll",
                      "OpenStudio.version", "webui/index.html", "LICENSE", "THIRD_PARTY_LICENSES.md"):
             file = self.source / name
             file.parent.mkdir(parents=True, exist_ok=True)

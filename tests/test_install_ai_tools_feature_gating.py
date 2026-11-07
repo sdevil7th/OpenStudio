@@ -55,6 +55,13 @@ Allocatable: FALSE
         with patch.object(installer.platform, "system", return_value="Linux"), patch.object(installer.subprocess, "run", return_value=Mock(returncode=1, stdout=output)):
             self.assertIsNone(installer._probe_rocm_gpu())
 
+    def test_rocm_architecture_tracks_the_single_gpu_agent(self):
+        cpu = "Agent 1\nName: gfx000\nDevice Type: CPU\n"
+        gpu = "Agent 2\nName: gfx1151\nDevice Type: GPU\n"
+        self.assertEqual(installer._rocm_gpu_architecture(cpu+gpu), "gfx1151")
+        self.assertEqual(installer._rocm_gpu_architecture(cpu), "")
+        self.assertEqual(installer._rocm_gpu_architecture(gpu+"Agent 3\nName: gfx1100\nDevice Type: GPU\n"), "")
+
     def test_rocm_probe_preserves_native_generation_eligibility_and_memory_gate(self):
         for memory_mb, expected in ((8192, True), (2048, False)):
             with (

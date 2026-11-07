@@ -12,6 +12,7 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
   const [availableInputDevices, setAvailableInputDevices] = useState<string[]>([]);
   const [availableOutputDevices, setAvailableOutputDevices] = useState<string[]>([]);
   const [openDevices, setOpenDevices] = useState<string[]>([]);
+  const [deviceListState, setDeviceListState] = useState<"checking" | "ready" | "unverified">("checking");
   const { track, setTrackMIDIOutput } = useDAWStore(
     useShallow((state) => ({
       track: state.tracks.find((t) => t.id === trackId),
@@ -25,14 +26,21 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
   }, []);
 
   const loadDevices = async () => {
+    setDeviceListState("checking");
     try {
       const devices = await nativeBridge.getMIDIInputDevices();
       const outputs = await nativeBridge.getMIDIOutputDevices();
       const open = await nativeBridge.getOpenMIDIDevices();
+      if (!Array.isArray(devices) || !devices.every((device) => typeof device === "string")
+          || !Array.isArray(outputs) || !outputs.every((device) => typeof device === "string")) {
+        throw new Error("MIDI device lists are unavailable");
+      }
       setAvailableInputDevices(Array.isArray(devices) ? devices : []);
       setAvailableOutputDevices(Array.isArray(outputs) ? outputs : []);
       setOpenDevices(Array.isArray(open) ? open : []);
+      setDeviceListState("ready");
     } catch (error) {
+      setDeviceListState("unverified");
       console.error("Failed to load MIDI devices:", error);
     }
   };
@@ -126,13 +134,26 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
 
   // Empty input is DAW-style omni input. The record path opens all available
   // MIDI inputs for armed tracks in this mode.
+  // These bridge lists and saved routes both use the backend's device names,
+  // including legacy saved names. Retain an absent name as an option so the
+  // native select cannot visually fall back to All Inputs/No Out and imply a
+  // route change. Only successful enumeration establishes unavailability.
+  const inputName = track.midiInputDevice || "";
+  const outputName = track.midiOutputDevice || "";
+  const missingInput = inputName !== "" && !availableInputDevices.includes(inputName);
+  const missingOutput = outputName !== "" && !availableOutputDevices.includes(outputName);
+  const missingStatus = deviceListState === "ready" ? "unavailable" : deviceListState;
+  const inputLabel = missingInput ? `${inputName} (${missingStatus})` : inputName;
+  const outputLabel = missingOutput ? `${outputName} (${missingStatus})` : outputName;
   const deviceOptions = [
     { value: "", label: "All Inputs" },
     ...availableInputDevices.map((device) => ({ value: device, label: device })),
+    ...(missingInput ? [{ value: inputName, label: inputLabel, disabled: true }] : []),
   ];
   const outputOptions = [
     { value: "", label: "No Out" },
     ...availableOutputDevices.map((device) => ({ value: device, label: device })),
+    ...(missingOutput ? [{ value: outputName, label: outputLabel, disabled: true }] : []),
   ];
 
   // Build channel options: 0 = "All", 1-16 = "Ch 1" through "Ch 16"
@@ -153,7 +174,7 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
         options={deviceOptions}
         value={track.midiInputDevice || ""}
         onChange={(val) => handleDeviceChange(String(val))}
-        title={track.midiInputDevice || "All MIDI inputs"}
+        title={inputLabel || "All MIDI inputs"}
         className="w-[122px] max-w-[122px] truncate"
       />
 
@@ -174,7 +195,7 @@ export function MIDIDeviceSelector({ trackId }: MIDIDeviceSelectorProps) {
         options={outputOptions}
         value={track.midiOutputDevice || ""}
         onChange={(val) => handleOutputChange(String(val))}
-        title={track.midiOutputDevice ? `MIDI out: ${track.midiOutputDevice}` : "No MIDI output"}
+        title={outputLabel ? `MIDI out: ${outputLabel}` : "No MIDI output"}
         className="w-[104px] max-w-[104px] truncate"
       />
     </div>
