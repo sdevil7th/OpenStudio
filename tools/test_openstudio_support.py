@@ -8,11 +8,12 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).parent))
 from openstudio_support.common import Redactor, require_closed, save_report
-from openstudio_support.collection import collect, bundle, LOG_LIMIT
+from openstudio_support.collection import collect, bundle, default_directories, linux_xdg_directory, LOG_LIMIT
 from openstudio_support.audio import inspect_audio
 from openstudio_support.midi import inspect_midi, parse_midi, compare_expected, prepare_project
 from openstudio_support.cli import parser, run
@@ -143,6 +144,150 @@ class CollectionTests(TemporaryTest):
         self.assertNotIn("Private", json.dumps(value))
         self.assertNotIn("alice", json.dumps(value))
         self.assertEqual(value["token"], "<redacted>")
+
+
+    def test_plugin_failure_reasons_survive_collection_and_reviewed_bundle(self):
+        paths = [r'C:\Users\Private\FX - Personal Name\Private - Synth.vst3',
+                 '/home/private/FX - Personal Name/Private - Synth.clap',
+                 '/opt/private/Private - Synth.so.1', r'\\server\private\Private Synth.dll']
+        reason = 'probe exited with code 3221225477 - dependent library unavailable'
+        log = self.root / 'plugin_scan_debug.txt'
+        lines = [f'PluginManager: {stage}: {path} - {reason}'
+                 for stage in ('Failed', 'Skipped blacklisted candidate') for path in paths]
+        lines.append('PluginManager: Failed: /home/private/Secret.lv2 - token=PRIVATE_TOKEN')
+        log.write_text('\n'.join(lines), encoding='utf-8')
+        result, files, redactor = collect([self.root])
+        evidence = next(iter(files.values())).decode()
+        self.assertEqual(evidence.count(reason), 8)
+        for private in ('Private', 'Personal', 'private', 'server', 'PRIVATE_TOKEN'):
+            self.assertNotIn(private, evidence)
+        save_report(self.root / 'review', result, files, redactor)
+        bundle(self.root / 'review', self.root / 'review.zip', True)
+        with zipfile.ZipFile(self.root / 'review.zip') as archive:
+            self.assertEqual(archive.read('evidence-01.txt'), next(iter(files.values())))
+
+
+class LinuxDiscoveryTests(TemporaryTest):
+    def test_localized_documents_and_juce_settings_are_collected(self):
+        config = self.root / '.config'
+        config.mkdir()
+        documents = self.root / 'Dokumente mit Leerzeichen'
+        documents.mkdir()
+        settings = self.root / 'App Settings'
+        settings.mkdir()
+        (config / 'user-dirs.dirs').write_text(
+            'XDG_DOCUMENTS_DIR="$HOME/Dokumente mit Leerzeichen"\nXDG_CONFIG_HOME="$HOME/App Settings"\n')
+        for directory, name, text in ((documents, 'debug_log.txt', 'FX failure'),
+                                      (settings, 'audio_device_settings.xml', '<DEVICESETUP audioDeviceRate="48000"/>')):
+            (directory / 'OpenStudio').mkdir()
+            (directory / 'OpenStudio' / name).write_text(text)
+        override = self.root / 'xdg-override'
+        override.mkdir()
+        redirected = self.root / 'Relocated'
+        redirected.mkdir()
+        (override / 'user-dirs.dirs').write_text(f'XDG_DOCUMENTS_DIR="{redirected.as_posix()}"\n')
+        with patch('openstudio_support.collection.os', SimpleNamespace(name='posix', environ={'XDG_CONFIG_HOME': str(override)})), \
+                patch('sys.platform', 'linux'), patch('pathlib.Path.home', return_value=self.root):
+            directories = default_directories()
+            self.assertIn(documents / 'OpenStudio', directories)
+            self.assertIn(settings / 'OpenStudio', directories)
+            self.assertIn(redirected / 'OpenStudio', directories)
+            result, files, _ = collect(directories)
+        self.assertEqual(len(files), 2, result)
+
+    def test_missing_invalid_and_oversized_config_fall_back_without_execution(self):
+        config = self.root / '.config'
+        config.mkdir()
+        path = config / 'user-dirs.dirs'
+        fallback = self.root / 'Documents'
+        self.assertEqual(linux_xdg_directory(self.root, config, 'XDG_DOCUMENTS_DIR', fallback), fallback)
+        for text in ('XDG_DOCUMENTS_DIR="$(touch unwanted)"', 'XDG_DOCUMENTS_DIR="relative"',
+                     'XDG_DOCUMENTS_DIR="$UNRELATED/private"', 'XDG_DOCUMENTS_DIR="/does-not-exist/fixture"',
+                     '#' * (64 * 1024 + 1)):
+            path.write_text(text)
+            self.assertEqual(linux_xdg_directory(self.root, config, 'XDG_DOCUMENTS_DIR', fallback), fallback)
+        self.assertFalse((self.root / 'unwanted').exists())
+
+
+class RecordingEvidenceTests(TemporaryTest):
+    def journal(self, number=1, **fields):
+        session, job = 'a' * 32, f'{number:032x}'
+        path = self.root / 'WorkRecovery' / session / job / 'job.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        value = {'id': f'{session}/{job}', 'kind': 'recording', 'version': 1,
+                 'status': 'recording', 'writeFault': 1, 'writtenSamples': 128,
+                 'sampleRate': 48000, 'channels': 1, 'bitDepth': 16,
+                 'path': '/data/private/Secret take.wav', 'trackId': 'Private guitar',
+                 'projectNotes': 'PRIVATE_NOTES', 'pluginState': 'PRIVATE_STATE', **fields}
+        path.write_text(json.dumps(value), encoding='utf-8')
+        return path
+
+    def test_write_flush_seek_failures_survive_clean_shutdown_and_bundle(self):
+        for fault in (1, 2, 3):
+            path = self.journal(fault, writeFault=fault, status='finalized' if fault == 3 else 'recording')
+        (path.parent.parent / 'clean').write_text('Normal recording shutdown')
+        self.journal(4, writeFault=0, droppedSamples=64)
+        self.journal(5, writeFault=0, droppedSamples=0)  # healthy record not misreported
+        self.journal(6, kind='ai', prompt='PRIVATE_PROMPT')
+        media = path.parent / 'take.wav'
+        media.write_bytes(b'PRIVATE_AUDIO')
+        result, files, redactor = collect([self.root])
+        snapshot = json.loads(files['evidence-01.json'])
+        self.assertEqual(len(snapshot['entries']), 4)
+        self.assertEqual({item['writeFailure'] for item in snapshot['entries']},
+                         {'write_failed', 'flush_failed', 'seek_failed', 'none'})
+        self.assertEqual(sum(item['droppedSamples'] for item in snapshot['entries']), 64)
+        self.assertNotIn('PRIVATE', json.dumps(snapshot))
+        self.assertNotIn('Private', json.dumps(snapshot))
+        self.assertNotIn('/data/private', json.dumps(snapshot))
+        self.assertEqual(status(result, 'recording_recovery'), 'diagnostic_only')
+        save_report(self.root / 'review', result, files, redactor)
+        bundle(self.root / 'review', self.root / 'review.zip', True)
+        with zipfile.ZipFile(self.root / 'review.zip') as archive:
+            self.assertNotIn(b'PRIVATE', b''.join(archive.read(name) for name in archive.namelist()))
+        self.assertEqual(media.read_bytes(), b'PRIVATE_AUDIO')
+
+    def test_unknown_fields_malformed_identity_and_oversize_fail_closed(self):
+        self.journal(1, writeFault=99)
+        self.journal(2, id='unrelated/id')
+        self.journal(3, writeFault=False)
+        self.journal(4, droppedSamples=-1)
+        self.journal(5).write_text('{bad json')
+        self.journal(6).write_bytes(b' ' * (2 * 1024 * 1024 + 1))
+        result, files, _ = collect([self.root])
+        self.assertFalse(files)
+        self.assertEqual(len([item for item in result['checks'] if item['id'] == 'recording_recovery_unavailable']), 6)
+        self.assertEqual(status(result, 'recording_recovery'), 'not_asserted')
+
+    def test_recovery_scan_limits_are_disclosed(self):
+        for index in range(1, 5):
+            self.journal(index)
+        for bound in ('MAX_NODES', 'MAX_JOBS', 'MAX_BYTES'):
+            with self.subTest(bound=bound), patch('openstudio_support.recovery.' + bound, 1):
+                result, files, _ = collect([self.root])
+                self.assertEqual(status(result, 'recording_recovery_limit'), 'not_asserted')
+                if files:
+                    self.assertLessEqual(len(json.loads(next(iter(files.values())))['entries']), 1)
+
+    def test_symlinked_recovery_directories_and_files_are_rejected(self):
+        path = self.journal()
+        outside = self.root / 'outside.json'
+        outside.write_bytes(path.read_bytes())
+        path.unlink()
+        try:
+            path.symlink_to(outside)
+        except OSError:
+            self.skipTest('Creating symbolic links is not permitted on this host')
+        result, files, _ = collect([self.root])
+        self.assertFalse(files)
+        self.assertEqual(status(result, 'recording_recovery_unavailable'), 'not_asserted')
+        path.unlink()
+        target = self.root / 'outside'
+        path.parent.rename(target)
+        path.parent.symlink_to(target, target_is_directory=True)
+        result, files, _ = collect([self.root])
+        self.assertFalse(files)
+        self.assertEqual(status(result, 'recording_recovery_unavailable'), 'not_asserted')
 
 
 class GuardTests(TemporaryTest):

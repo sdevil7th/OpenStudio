@@ -3118,7 +3118,11 @@ from the DMG), or Linux application menu/companion AppImage. Collect existing ev
 an audio/MIDI export, and use **Open output folder** to review the report. Choose
 **Create reviewed ZIP** to prepare an attachment for support. No Python or terminal
 is needed in packaged builds. Nothing is uploaded automatically.
-Collection includes plugin scan logs and filtered plugin/audio settings. Optional
+Collection preserves plugin scan failure reasons while hiding private paths.
+On Linux it finds localized and relocated diagnostic folders. If the recorder
+saved a recovery record, Support can show the type of write, flush or seek
+failure and the number of dropped samples. These records are read after the DAW
+closes. Historical CPU or RAM pressure can still be unknown. Optional
 fields accept the app executable, an existing OS crash report, and a developer's
 matching symbol archive. Incident debug IDs remain separate from the currently
 installed build; later settings cannot establish conditions at an earlier glitch.

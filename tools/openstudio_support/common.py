@@ -113,6 +113,15 @@ class Redactor:
         return self.aliases[key]
 
     def text(self, value):
+        # These native scan messages put an unquoted path before the reason.
+        # Parse the known plugin-file boundary before the conservative free-text
+        # path filter, which otherwise consumes both the path and the reason.
+        # Spaces and " - " inside plugin names must stay private too.
+        value = re.sub(
+            r"(?im)(PluginManager: (?:Failed|Skipped blacklisted candidate): )"
+            r"((?:[A-Z]:[\\/]|\\\\|/)[^\r\n]+\.(?:vst3|vst|clap|lv2|component|dll|so(?:\.\d+)*|jsfx))"
+            r"( - )(?=[^\r\n])",
+            lambda match: match[1] + self.alias(match[2]) + match[3], value)
         value = re.sub(r"(?i)\b(?:https?|file)://[^\s<>\"']+", "<url>", value)
         value = re.sub(r"(?i)\bBearer\s+[^\s,;\"']+", "Bearer <secret>", value)
         value = re.sub(r"(?im)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization|cookie)[\"']?\s*[:=]\s*)([^\r\n]+)", r"\1<secret>", value)

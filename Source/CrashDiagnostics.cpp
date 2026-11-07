@@ -22,7 +22,6 @@ struct Breadcrumb { std::array<char, 1024> text {}; size_t bytes = 0; };
 std::array<Breadcrumb, 64> breadcrumbs;
 size_t nextBreadcrumb = 0;
 std::array<std::atomic<uint32_t>, static_cast<size_t>(OpenStudioCrashDiagnostics::RealtimeFault::count)> realtimeFaults {};
-double lastFaultFlushMs = -10000.0;
 juce::File selfTestDirectory;
 bool selfTestReporterUnavailable = false;
 
@@ -178,9 +177,8 @@ void recordRealtimeFault(RealtimeFault fault) noexcept
 
 void flushRealtimeFaults()
 {
-    const auto now = juce::Time::getMillisecondCounterHiRes();
-    if (now - lastFaultFlushMs < 5000.0)
-        return;
+    // Production calls only at stop/shutdown. Every explicit drain must retain
+    // pending faults, including a second short take immediately before Quit.
     constexpr std::array<const char*, realtimeFaults.size()> names {
         "recordingLockMisses", "recordingOverflows", "namSafetyTrips",
         "trackBufferContract", "pluginBufferContract", "recordingBufferContract",
@@ -195,7 +193,6 @@ void flushRealtimeFaults()
     }
     if (detail.isEmpty())
         return;
-    lastFaultFlushMs = now;
     recordBreadcrumb("realtime_fault", detail);
 }
 
@@ -302,6 +299,15 @@ int runSelfTest(const juce::File& isolatedDirectory, bool simulateCrash, bool si
     const auto evidence = getBreadcrumbLogFile().loadFileAsString();
     if (evidence.contains("sequence=0;") || ! evidence.contains("sequence=127;")
         || ! evidence.contains("recordingOverflows=1")) return 5;
+    // No timer or sleep between drains: the former five-second throttle lost
+    // this second incident when stop and Quit followed it immediately.
+    recordRealtimeFault(RealtimeFault::recordingLockMiss);
+    if (getBreadcrumbLogFile().loadFileAsString() != evidence) return 13;
+    flushRealtimeFaults();
+    const auto secondEvidence = getBreadcrumbLogFile().loadFileAsString();
+    if (!secondEvidence.contains("recordingLockMisses=1")) return 14;
+    flushRealtimeFaults();
+    if (getBreadcrumbLogFile().loadFileAsString() != secondEvidence) return 15;
    #if JUCE_WINDOWS
     if (simulateShutdownHang)
     {

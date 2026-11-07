@@ -86,9 +86,13 @@ Automatic discovery checks the platform's existing OpenStudio diagnostic locatio
 On Windows this includes the actual Documents known folder, including relocation,
 and `%APPDATA%/OpenStudio/logs`. Use `--log-dir "path"` (repeatable) to replace the
 default locations, for example when collecting a startup log beside an executable.
+Linux discovery includes the app's XDG Documents/config locations, including
+localized or relocated folders, as well as the legacy defaults. Configuration is
+read as text; no shell configuration is executed.
 Only exact known startup/debug/crash/hang/plugin-scan filenames and allowlisted
 settings files are read, without recursion. The added `plugin_scan_debug.txt`
-preserves scanner failures. Structured snapshots of `PluginList.xml`,
+preserves scanner failure reasons separately from redacted plugin paths (including
+paths containing spaces or hyphens). Structured snapshots of `PluginList.xml`,
 `PluginSearchPaths.xml`, `PluginBlacklist.txt`, `PluginScanDeadMansPedal.txt` and
 `PluginHosting.json` retain plugin inventory, versions, paths after redaction,
 blacklist/unfinished-scan entries and isolation choices. Only selected device-type,
@@ -97,6 +101,17 @@ Plugin state, arbitrary XML fields and device names are excluded. No plugin is l
 scanned or executed. Settings describe collection time, not the original incident.
 Use `--route-report "mix_render_route_report.json"` to select existing render reports
 and `--description "What happened and what I expected"` to supply context.
+
+Existing recording recovery records are inspected only by the explicitly opened
+companion, in the fixed `WorkRecovery/<session>/<job>/job.json` layout beneath
+application-data directories. A filtered snapshot retains recorded write, flush
+and seek failures, dropped/written sample counts, format and recorded timestamps,
+even after normal shutdown. Paths and track references are anonymized. Audio and
+project files are never opened; AI records and non-allowlisted fields are excluded
+from the snapshot. This uses metadata
+the recorder already persists; no recording-time polling or logging is added.
+These records identify a writer failure, not its underlying hardware/resource
+cause. Missing records never establish a fault-free recording.
 
 The output contains `summary.txt`, `report.json`, explicitly selected evidence and
 `manifest.json` with checksums. Current OS/CPU-count information is labelled
@@ -127,14 +142,19 @@ match, not a diagnosis or a trustworthy signature.
 
 Privacy and bounds:
 
-- Original audio, MIDI and project files are not bundled. No recursive directory
-  collection, environment dump, process list, serial number or hostname is saved.
+- Original audio, MIDI and project files are not bundled. No arbitrary recursive
+  directory collection, environment dump, process list, serial number or hostname
+  is saved. Recovery inspection follows only the fixed two-level journal layout.
 - Text filters replace known paths, names in structured fields, URLs, email
   addresses and common credential fields. **Redaction is best effort.** Free-form
   text can still contain private information. Read every file before sharing.
 - Only the latest 512 KiB of each log is retained, with truncation disclosed.
 - Settings and OS report identity parsing are bounded to 2 MiB; at most 90 evidence
   files are copied. XML entities/DTDs, symbolic-link files and special files are rejected.
+- Recording recovery inspection is limited to 4,096 directory entries, 128 job
+  records and 16 MiB read (2 MiB per record). Hitting a limit is disclosed as
+  `not_asserted`; linked/junction recovery directories are rejected. Only fault
+  records are summarized, without modifying journals or following media paths.
 - Dumps are excluded unless `--include-dumps` is explicitly selected. Included
   dumps are **unredacted memory** and can contain credentials or audio fragments.
   Each dump is limited to 32 MiB; the collection is limited to 128 MiB. Oversized
@@ -284,7 +304,8 @@ version later is not a substitute. No release workflow was invoked for this work
 
 Ordinary builds also omit message-thread heartbeat/fault polling. Existing
 failure-only recording/processor protection remains; pending fault counts are
-flushed from control-side stop/shutdown paths. Explicit diagnostic builds can opt
+flushed from control-side stop/shutdown paths, without suppressing successive
+drains within five seconds. An empty drain writes nothing. Explicit diagnostic builds can opt
 into timing and ARA logs with `OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS=ON`, and incur
 overhead. Release packaging rejects those builds. The removed normal UI-hang
 watchdog means a freeze during a running session no longer automatically produces

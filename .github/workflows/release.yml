@@ -1206,6 +1206,9 @@ jobs:
             "dist/windows/OpenStudio-Setup-x64.exe",
             "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip",
             "dist/macos/OpenStudio-macOS.dmg",
+            "dist/linux/OpenStudio-$env:VERSION-linux-x86_64.AppImage",
+            "dist/linux/OpenStudioSupport-$env:VERSION-linux-x86_64.AppImage",
+            "dist/linux/OpenStudio-$env:VERSION-linux-x86_64-with-support.tar.gz",
             "dist/ai-runtime/OpenStudio-AI-Runtime-windows-base-x64.zip",
             "dist/ai-runtime/OpenStudio-AI-Runtime-macos-arm64.zip",
             "dist/ai-runtime/OpenStudio-AI-Runtime-linux-cpu-x64.zip"
@@ -1298,18 +1301,21 @@ jobs:
             -MetadataDir "dist/release-metadata" `
             -OutputDir "dist/release-publish-assets"
 
-      - name: Add FFmpeg source archive to release checksums
+      - name: Add Linux Support downloads, DEB and FFmpeg source to release checksums
         shell: pwsh
         run: |
-          $sourcePath = "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
           $checksumsPath = "dist/release-publish-assets/OpenStudio-checksums.txt"
-          Get-ChildItem -Path "dist/linux/*.deb" | ForEach-Object {
-            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)" | Add-Content -LiteralPath $checksumsPath -Encoding utf8
+          $debs = @(Get-ChildItem -File -Path "dist/linux/OpenStudio-$env:VERSION-*-ubuntu-22.04-amd64.deb")
+          if ($debs.Count -ne 1) { throw 'Expected exactly one version-matched Ubuntu DEB.' }
+          $extraAssets = @(Get-Item -ErrorAction Stop -LiteralPath @(
+            "dist/linux/OpenStudioSupport-$env:VERSION-linux-x86_64.AppImage",
+            "dist/linux/OpenStudio-$env:VERSION-linux-x86_64-with-support.tar.gz",
+            "dist/windows/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip"
+          )) + $debs
+          foreach ($asset in $extraAssets) {
+            $hash = (Get-FileHash -LiteralPath $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($asset.Name)" | Add-Content -LiteralPath $checksumsPath -Encoding utf8
           }
-          $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sourceHash  OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip" |
-            Add-Content -LiteralPath $checksumsPath -Encoding utf8
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

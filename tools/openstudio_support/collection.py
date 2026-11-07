@@ -23,6 +23,28 @@ DUMP_LIMIT = 32 * 1024 * 1024
 TOTAL_LIMIT = 128 * 1024 * 1024
 
 
+def linux_xdg_directory(home, config, key, fallback):
+    """Read only a literal XDG assignment; never source shell configuration.
+
+    The pinned JUCE reads ~/.config/user-dirs.dirs even when XDG_CONFIG_HOME
+    differs. Discovery includes that location as well as the XDG override.
+    """
+    path = config / 'user-dirs.dirs'
+    try:
+        if regular_file(path).st_size > 64 * 1024:
+            return fallback
+        for line in path.read_text(encoding='utf-8').splitlines():
+            match = re.fullmatch(r'\s*' + re.escape(key) + r'\s*=\s*"([^"\r\n]*)"\s*', line)
+            if match:
+                value = match[1].replace('$HOME', str(home))
+                candidate = Path(value)
+                if '$' not in value and '`' not in value and candidate.is_absolute() and candidate.is_dir():
+                    return candidate
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return fallback
+
+
 def default_directories():
     home = Path.home()
     if os.name == "nt":
@@ -38,8 +60,16 @@ def default_directories():
     if sys.platform == "darwin":
         return [home / "Library/Logs/OpenStudio", home / "Library/OpenStudio/logs",
                 home / "Library/Application Support/OpenStudio/Plugins", home / "Library/OpenStudio"]
-    settings = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / "OpenStudio"
-    return [home / "Documents/OpenStudio", settings / "logs", settings]
+    juce_config = home / '.config'
+    configured = Path(os.environ.get('XDG_CONFIG_HOME', juce_config))
+    if not configured.is_absolute():
+        configured = juce_config
+    documents = [linux_xdg_directory(home, config, 'XDG_DOCUMENTS_DIR', home / 'Documents')
+                 for config in dict.fromkeys((juce_config, configured))]
+    app_data = [linux_xdg_directory(home, juce_config, 'XDG_CONFIG_HOME', juce_config), configured]
+    return list(dict.fromkeys([*(path / 'OpenStudio' for path in documents), home / 'Documents/OpenStudio',
+                               *(path / 'OpenStudio/logs' for path in app_data),
+                               *(path / 'OpenStudio' for path in app_data)]))
 
 
 def collect(directories, route_reports=(), include_dumps=False, description="", *, app=None, symbols=None, crash_reports=()):
@@ -135,6 +165,17 @@ def collect(directories, route_reports=(), include_dumps=False, description="", 
                                         "unredactedDump": dump})
         except (OSError, ValueError, UnicodeError) as exc:
             check(result, "evidence_not_collected", "not_asserted", str(exc), source=str(path))
+    from .recovery import recording_recovery
+    recovery = recording_recovery(directories, redactor, result)
+    if recovery['entries']:
+        data = json.dumps(recovery, indent=2, allow_nan=False).encode('utf-8')
+        if len(artifacts) >= 90 or total + len(data) > TOTAL_LIMIT:
+            check(result, 'recording_recovery_not_collected', 'not_asserted', 'Evidence count/size limit reached')
+        else:
+            name = f'evidence-{len(artifacts) + 1:02d}.json'
+            artifacts[name] = data
+            result['artifacts'].append({'file': name, 'sourceKind': 'recording_recovery_snapshot',
+                                        'unredactedDump': False})
     check(result, "existing_evidence", "pass" if artifacts else "not_asserted",
           f"Collected {len(artifacts)} existing evidence files; original files were not modified.")
     if include_dumps:
