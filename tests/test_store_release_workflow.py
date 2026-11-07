@@ -113,7 +113,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
 
     def test_store_readiness_waits_for_validated_notes_and_windows_package(self):
         self.assertCountEqual(self.jobs["preflight-store"]["needs"], [
-            "build-windows", "validate-release-notes",
+            "build-windows", "certify-store-package", "validate-release-notes",
         ])
         for dependency in self.jobs["preflight-store"]["needs"]:
             for status in ("failure", "cancelled", "skipped"):
@@ -198,7 +198,7 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(len(uploads), 1)
         self.assertIn("dist/store/*.msix", uploads[0]["with"]["path"].splitlines())
         self.assertEqual(uploads[0]["with"]["if-no-files-found"], "error")
-        for name in ("preflight-store", "submit-store"):
+        for name in ("certify-store-package", "preflight-store", "submit-store"):
             with self.subTest(job=name):
                 downloads = [step["with"] for step in self.jobs[name]["steps"]
                              if "actions/download-artifact@" in step.get("uses", "")]

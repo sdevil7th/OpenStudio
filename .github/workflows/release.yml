@@ -1109,9 +1109,36 @@ jobs:
             dist/linux/OpenStudio-*-ubuntu-22.04-amd64.deb
           if-no-files-found: error
 
+  certify-store-package:
+    name: Certify the tag-built Microsoft Store package
+    if: vars.OPENSTUDIO_STORE_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: microsoft-store-package
+          path: dist/store
+      - name: Check the exact MSIX with the Windows App Certification Kit
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath dist/store -Filter '*.msix' -File)
+          if ($packages.Count -ne 1) { throw 'Expected one release MSIX.' }
+          $expected = (Get-Content dist/store/package-report.json -Raw | ConvertFrom-Json).sha256
+          if ((Get-FileHash $packages[0].FullName -Algorithm SHA256).Hash -ine $expected) { throw 'Release MSIX hash mismatch.' }
+          ./tools/run-windows-certification.ps1 -PackagePath $packages[0].FullName -OutputDirectory "$env:RUNNER_TEMP/tag-wack"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: tag-windows-certification-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tag-wack/
+          if-no-files-found: error
+
   preflight-store:
     name: Check Store readiness before publication
-    needs: [build-windows, validate-release-notes]
+    needs: [build-windows, certify-store-package, validate-release-notes]
     if: vars.OPENSTUDIO_STORE_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
