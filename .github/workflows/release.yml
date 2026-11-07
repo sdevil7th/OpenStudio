@@ -52,7 +52,7 @@ jobs:
         run: python3 tools/submit_snap_release.py --directory candidate --version "$APP_VERSION" --tag "$GITHUB_REF_NAME" --approval-url "$APPROVAL_URL" --report output/snap-preflight.json --preflight
       - name: Check access to the registered listing and its reviewed assets
         env:
-          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_LISTING_CREDENTIALS }}
           APP_VERSION: ${{ needs.validate-release-notes.outputs.app_version }}
         run: /snap/snapcraft/current/bin/python3 tools/sync_snap_listing.py --directory candidate --version "$APP_VERSION" --tag "$GITHUB_REF_NAME" --report output/snap-listing-preflight.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -113,7 +113,7 @@ jobs:
       - run: sudo snap install snapcraft --classic --channel=8.x/stable
       - name: Match stable revision, synchronize metadata and read it back
         env:
-          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_LISTING_CREDENTIALS }}
           APP_VERSION: ${{ needs.validate-release-notes.outputs.app_version }}
           CRAFT_STORE_RETRIES: '0'
         run: /snap/snapcraft/current/bin/python3 tools/sync_snap_listing.py --directory candidate --version "$APP_VERSION" --tag "$GITHUB_REF_NAME" --report output/snap-listing.json --apply

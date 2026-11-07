@@ -120,6 +120,13 @@ class SnapReleaseTests(unittest.TestCase):
         self.assertFalse(workflow.job_runs('submit-snap', {'publish': 'failure'}, snap_enabled='true'))
         self.assertFalse(workflow.job_runs('submit-snap', ref='refs/heads/main', snap_enabled='true'))
         self.assertFalse(workflow.job_runs('submit-snap', snap_enabled='false'))
+        for job in ('preflight-snap', 'submit-snap', 'sync-snap-listing'):
+            for step in workflow.jobs[job]['steps']:
+                command = step.get('run', '')
+                if 'tools/sync_snap_listing.py' in command:
+                    self.assertEqual(step['env']['SNAPCRAFT_STORE_CREDENTIALS'], '${{ secrets.SNAPCRAFT_LISTING_CREDENTIALS }}')
+                if 'tools/submit_snap_release.py' in command:
+                    self.assertEqual(step['env']['SNAPCRAFT_STORE_CREDENTIALS'], '${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}')
         recipe = yaml.safe_load((ROOT / 'packaging/snap/snapcraft.yaml').read_text())
         self.assertEqual(set(recipe['apps']), {'openstudio', 'support'})
         for app in recipe['apps'].values():

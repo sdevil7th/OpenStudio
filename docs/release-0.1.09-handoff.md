@@ -9,6 +9,10 @@ The application release branch is `main`. [App PR #37](https://github.com/sdevil
 3. **Website merge.** Review [website PR #32](https://github.com/sdevil7th/OpenStudioWebsite/pull/32), merge it into the website's `develop`, then promote the reviewed website commit through a PR to its default `main` branch. The release dispatch uses the website default branch. Keep the download version and feeds on the published GitHub version until the app release actually exists.
 4. **Version and inputs.** Review the exact `v0.1.08` to merged-SHA changes and validate `docs/releases/0.1.09.md` with `python tools/validate-release-notes.py --version 0.1.09`. Review the plain-text Store summary including its full-notes link. Confirm the runtime release variables still select the reviewed Windows/macOS `ai-runtime-v0.0.16` and Linux `ai-runtime-linux-v0.0.14` assets. Keep the update signing seed and website dispatch credential available. Both Store environments are restricted to `v*` tags. The protected tag-time Microsoft preflight must confirm account access, the published baseline, the package and absence of an unrelated draft.
 
+The Snap tag preflight exercises both credentials in the protected environment.
+`SNAPCRAFT_STORE_CREDENTIALS` can upload to stable.
+`SNAPCRAFT_LISTING_CREDENTIALS` can update the listing and has no release permission.
+
 ## When the release owner elects to ship
 
 5. **Tag the verified commit once.** Confirm `v0.1.09` is unused on the remote. Create the annotated tag at the recorded merged SHA and push that tag alone. The normal release command sequence is `git tag -a v0.1.09 <verified-main-sha> -m "OpenStudio 0.1.09"`, then `git push origin refs/tags/v0.1.09`. Do not move an existing tag to correct a failed release.

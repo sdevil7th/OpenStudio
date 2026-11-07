@@ -67,7 +67,7 @@ async function ready(page: Page) {
     { timeout: 15_000 }).toBe("boot-ready");
   await expect(page.locator("#openstudio-boot-overlay")).toBeHidden();
   await expect(page.locator('[data-qa="app-startup-loading"]')).toBeHidden();
-  const source = await (await page.request.get("/src/App.tsx")).text();
+  const source = await (await page.request.get("/src/App.tsx", { maxRetries: 1, failOnStatusCode: true })).text();
   const storeUrl = source.match(/from "([^"]*useDAWStore\.ts[^"]*)"/)?.[1];
   if (!storeUrl) throw new Error("Store module missing");
   await page.addScriptTag({ type: "module", content: `

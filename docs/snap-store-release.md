@@ -101,10 +101,13 @@ after the desktop investigation. The full installed Snap and recovery checks
 subsequently passed on the 0.1.09 PR. [Installed-candidate verification](https://github.com/sdevil7th/OpenStudio/actions/runs/42383293691)
 
 For future credential exports, set `TZ=UTC` for the export command only and
-verify the resulting credential's actual expiry before using it. A short-lived
-listing credential has access/push/update permissions and no release permission;
-it must not replace the release credential in GitHub. Never print exported
-credentials or include them in reports.
+verify the resulting credential's actual expiry before using it. The tag
+workflow reads and writes the listing with a separate environment secret,
+`SNAPCRAFT_LISTING_CREDENTIALS`. Scope it to `openstudio` with
+`package_access,package_push,package_update` and omit `package_release`.
+Use `SNAPCRAFT_STORE_CREDENTIALS` only for the stable package preflight and
+upload. Never print exported credentials or include them in reports.
+[Canonical's permission reference](https://dashboard.snapcraft.io/docs/reference/v1/macaroon.html)
 
 ## Remaining owner setup
 
@@ -118,9 +121,9 @@ credentials or include them in reports.
    has, or promise that a DAW will receive classic approval. Any strict-package
    alternative needs separate plugin, device and performance qualification.
    Record the reviewed decision URL in `OPENSTUDIO_SNAP_CLASSIC_APPROVAL_URL`.
-2. Keep `SNAPCRAFT_STORE_CREDENTIALS` in the GitHub `snap-store` environment
-   current. Renew the scoped credential before its expiry; never send it in chat
-   or commit it. Account authentication remains an owner-operated step.
+2. Keep both scoped credentials in the tag-only GitHub `snap-store` environment
+   current. Renew them before expiry. Account authentication remains an
+   owner-operated step.
 3. Review the installed candidate results. Physical audio/MIDI devices, native
    plugin compatibility, desktop integration, and refresh while an older version
    is running need hardware/desktop testing. Automated checks do not establish
@@ -137,7 +140,7 @@ existing Release workflow. If Snap delivery is enabled, its dependencies are:
 `build-linux -> qualify-snap -> preflight-snap -> publish -> submit-snap -> sync-snap-listing`.
 
 The Microsoft Store chain remains
-`build-windows -> preflight-store -> publish -> submit-store`.
+`build-windows -> certify-store-package -> preflight-store -> publish -> submit-store`.
 
 Both enabled Store preflights must succeed before GitHub publication. A missing
 credential, approval record, artifact identity, or prerequisite stops the chain.
