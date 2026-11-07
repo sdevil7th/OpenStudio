@@ -2478,10 +2478,10 @@
       "coverage": []
     },
     {
-      "id": "feature:39a0405fab0a726a",
+      "id": "feature:d3b16296b05b5e16",
       "kind": "feature",
       "section": "AI / Assisted Audio",
-      "description": "Explicit pre-session repair for installed stem runtimes with accelerator validation, retained models and CPU-only setup preservation",
+      "description": "Optional repair before opening the DAW after Windows/Linux updates, with accelerator validation, retained stem models and CPU-only setup preservation",
       "source": "docs/implemented_features.md",
       "coverage": []
     },

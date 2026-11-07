@@ -15,6 +15,8 @@
 #include "AITrackEngine.h"
 #include "AIManagedRuntime.h"
 #include "AIRuntimeMaintenance.h"
+#include "AIRuntimeMaintenanceWindow.h"
+#include "ApplicationLaunchState.h"
 #include "AIStemWorkspace.h"
 #include "AIResourceCoordinator.h"
 #include "RecordingWriterSafety.h"
@@ -232,6 +234,39 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         check("runtime_update_repairs_broken_imports", AIRuntimeMaintenance::evaluate(context, probe, plan, {}).getProperty("state", "").toString() == "needed");
         using Lease = AIRuntimeMaintenance::SessionLease;
         const auto sessionRoot = directory.getChildFile("runtime-sessions");
+        const auto offerRoot = directory.getChildFile("runtime-update-offer");
+        check("runtime_offer_only_on_ordinary_launcher_and_project_opens",
+              OpenStudioLaunchState::isOrdinaryLaunch("")
+              && OpenStudioLaunchState::isOrdinaryLaunch("\"project with spaces.osproj\"")
+              && !OpenStudioLaunchState::isOrdinaryLaunch("--ui-safe-mode")
+              && !OpenStudioLaunchState::isOrdinaryLaunch("--qualify-project-headless test.osproj")
+              && !OpenStudioLaunchState::isOrdinaryLaunch("first.osproj --ui-safe-mode last.osproj"));
+        const auto installFixture = [] (const juce::File& root)
+        {
+            const auto models = root.getChildFile("models");
+            return root.getChildFile("stem-runtime").createDirectory().wasOk() && models.createDirectory().wasOk()
+                && models.getChildFile("BS-Roformer-SW.ckpt").replaceWithText("fixture")
+                && models.getChildFile("BS-Roformer-SW.yaml").replaceWithText("fixture");
+        };
+        check("runtime_offer_skips_a_fresh_install_and_first_time_setup_on_the_same_version",
+              !AIRuntimeMaintenance::claimUpdateOffer(offerRoot, "0.1.08")
+              && installFixture(offerRoot) && !AIRuntimeMaintenance::claimUpdateOffer(offerRoot, "0.1.08"));
+        check("runtime_offer_once_per_upgrade_including_padded_versions_and_downgrades",
+              AIRuntimeMaintenance::claimUpdateOffer(offerRoot, "0.1.09")
+              && !AIRuntimeMaintenance::claimUpdateOffer(offerRoot, "0.1.9")
+              && !AIRuntimeMaintenance::claimUpdateOffer(offerRoot, "0.1.08")
+              && !AIRuntimeMaintenance::claimUpdateOffer(offerRoot, "0.1.09")
+              && AIRuntimeMaintenance::claimUpdateOffer(offerRoot, "0.1.10"));
+        const auto legacy = directory.getChildFile("legacy-installed-stems");
+        check("runtime_offer_recognises_preexisting_installs_without_starting_or_queuing_repair",
+              installFixture(legacy) && AIRuntimeMaintenance::claimUpdateOffer(legacy, "0.1.09")
+              && !AIRuntimeMaintenance::requestFile(legacy).exists()
+              && !legacy.getChildFile("ai-runtime-maintenance.json").exists()
+              && !legacy.getChildFile(".ai-runtime-session.lock").exists());
+        const auto missingModel = directory.getChildFile("partial-installed-stems");
+        check("runtime_offer_requires_the_model_and_managed_runtime",
+              missingModel.getChildFile("stem-runtime").createDirectory().wasOk()
+              && !AIRuntimeMaintenance::claimUpdateOffer(missingModel, "0.1.09"));
         check("runtime_update_scheduling_coalesces_requests_and_preserves_the_original_kind",
               AIRuntimeMaintenance::requestOnNextLaunch(sessionRoot, false).wasOk()
               && AIRuntimeMaintenance::requestOnNextLaunch(sessionRoot, false).wasOk()

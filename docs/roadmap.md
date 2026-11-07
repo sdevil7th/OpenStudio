@@ -80,8 +80,9 @@ lives in [Testing](testing.md) and the
   Stable Audio optional compiler setup now stages a separate runtime and validates
   real compiled forwards before activation; its paired preview passed audition.
   Broader hardware coverage remains open.
-    Installed managed stem runtimes can be repaired in an explicitly requested
-    pre-session maintenance window. The updater validates the replacement on
+    Windows and Linux offer to check installed stem runtimes before opening the
+    DAW after an update. Users can also request maintenance in AI Tools Setup.
+    Maintenance validates the replacement on
     the expected accelerator and keeps downloaded models and CPU-only choices.
     Qualification covers recording-session exclusion and runtime migration.
     Hardware coverage is documented in the qualification report.

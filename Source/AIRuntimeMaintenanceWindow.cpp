@@ -1,5 +1,7 @@
 #include "AIRuntimeMaintenanceWindow.h"
+#include "AIManagedRuntime.h"
 #include "StemSeparator.h"
+#include "UpdateManifest.h"
 
 namespace AIRuntimeMaintenance
 {
@@ -59,37 +61,83 @@ private:
 };
 }
 
-void runRequestedMaintenance(const juce::File& root)
+bool claimUpdateOffer(const juce::File& root, const juce::String& version)
+{
+    if (!UpdateManifest::numericVersion(version)) return false;
+    const auto stamp = root.getChildFile("ai-maintenance-offer-version.txt");
+    const auto newer = [&]
+    {
+        if (stamp.isSymbolicLink() || stamp.getSize() > 128) return false;
+        const auto seen = stamp.loadFileAsString().trim();
+        return !UpdateManifest::numericVersion(seen) || UpdateManifest::compareVersions(version, seen) > 0;
+    };
+    if (!newer()) return false;
+    const auto path = stamp.getFullPathName();
+    juce::InterProcessLock gate("OpenStudio-AI-offer-" + juce::SHA256(path.toRawUTF8(), path.getNumBytesAsUTF8()).toHexString());
+    if (!gate.enter(0)) return false;
+    struct Release { juce::InterProcessLock& lock; ~Release() { lock.exit(); } } release { gate };
+    if (!newer() || root.createDirectory().failed()) return false;
+    juce::TemporaryFile temporary(stamp);
+    if (!temporary.getFile().replaceWithText(version) || !temporary.overwriteTargetFileWithTemporary()) return false;
+    return AIManagedRuntime::getActiveStemRuntimeRoot(root).isDirectory()
+        && StemSeparator::hasRequiredModel(root.getChildFile("models"));
+}
+
+void runStartupMaintenance(const juce::File& root, const juce::String& version)
 {
     const auto request = requestFile(root);
-    if (!request.existsAsFile()) return;
+    const bool requested = request.existsAsFile();
+    if (!requested)
+    {
+       #if JUCE_WINDOWS || JUCE_LINUX
+        if (!claimUpdateOffer(root, version)) return;
+        juce::AlertWindow offer("AI Runtime Maintenance",
+            "OpenStudio " + version + " can check your installed stem tools and repair them if needed. "
+            "You can also open the DAW now and request repair later in AI Tools Setup.",
+            juce::MessageBoxIconType::QuestionIcon);
+        offer.addButton("Open DAW", 0, juce::KeyPress(juce::KeyPress::returnKey), juce::KeyPress(juce::KeyPress::escapeKey));
+        offer.addButton("Check and repair", 1);
+        if (offer.runModalLoop() != 1) return;
+       #else
+        return; // No reviewed stem repair plan is shipped for this platform.
+       #endif
+    }
+    // A passive offer holds no runtime lease. Take exclusive access only after
+    // consent (or for maintenance explicitly requested from AI Tools Setup).
     SessionLease guard;
     const auto admission = guard.acquire(root, SessionLease::Mode::maintenance);
     if (admission.failed())
     {
-        if (!request.existsAsFile()) return;
+        const auto saved = requested ? juce::Result::ok() : requestOnNextLaunch(root, false);
+        if (requested && !request.existsAsFile()) return;
         juce::AlertWindow::showMessageBox(juce::MessageBoxIconType::InfoIcon, "AI Runtime Maintenance",
-            admission.getErrorMessage() + " The request is saved for a later launch.");
+            admission.getErrorMessage() + (saved.wasOk() ? " The request is saved for a later launch." : " " + saved.getErrorMessage()));
         return;
     }
-    if (!request.existsAsFile()) return;
-    const auto kind = request.loadFileAsString().trim();
-    if (!request.deleteFile())
+    bool compiler = false;
+    int choice = 1;
+    if (requested)
     {
-        juce::AlertWindow::showMessageBox(juce::MessageBoxIconType::WarningIcon, "AI Runtime Maintenance",
-                                         "Could not consume the saved repair request.");
-        return;
+        if (!request.existsAsFile()) return;
+        const auto kind = request.loadFileAsString().trim();
+        if (!request.deleteFile())
+        {
+            juce::AlertWindow::showMessageBox(juce::MessageBoxIconType::WarningIcon, "AI Runtime Maintenance",
+                                             "Could not consume the saved repair request.");
+            return;
+        }
+        if (kind != "stems" && kind != "compiler") return;
+        compiler = kind == "compiler";
+        if (!compiler) (void) claimUpdateOffer(root, version);
+        choice = compiler
+            ? (juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "AI Runtime Maintenance",
+                "Rebuild and validate the optional compiler runtime before opening the DAW?", "Rebuild", "Open DAW") ? 1 : 0)
+            : juce::AlertWindow::showYesNoCancelBox(juce::MessageBoxIconType::QuestionIcon, "AI Runtime Maintenance",
+                "Check and repair incompatible stem tools, or rebuild them even if a previous check passed or failed. "
+                "Your downloaded models are kept. The DAW will open after maintenance finishes.",
+                "Check and repair", "Rebuild", "Open DAW");
+        if (choice == 0) return;
     }
-    if (kind != "stems" && kind != "compiler") return;
-    const bool compiler = kind == "compiler";
-    const int choice = compiler
-        ? (juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "AI Runtime Maintenance",
-            "Rebuild and validate the optional compiler runtime before opening the DAW?", "Rebuild", "Open DAW") ? 1 : 0)
-        : juce::AlertWindow::showYesNoCancelBox(juce::MessageBoxIconType::QuestionIcon, "AI Runtime Maintenance",
-            "Check and repair incompatible stem tools, or rebuild them even if a previous check passed or failed. "
-            "Your downloaded models are kept. The DAW will open after maintenance finishes.",
-            "Check and repair", "Rebuild", "Open DAW");
-    if (choice == 0) return;
     RepairTask task(std::move(guard), compiler, choice == 2);
     const bool completed = task.runThread();
     juce::AlertWindow::showMessageBox(juce::MessageBoxIconType::InfoIcon, "AI Runtime Maintenance",

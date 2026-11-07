@@ -694,7 +694,7 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
     return capabilities;
 }
 
-bool StemSeparator::hasRequiredModel(const juce::File& modelsDir) const
+bool StemSeparator::hasRequiredModel(const juce::File& modelsDir)
 {
     const auto checkpoint = modelsDir.getChildFile(kStemModelName);
     const auto configuration = modelsDir.getChildFile(kStemModelConfigName);

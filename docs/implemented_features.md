@@ -200,7 +200,7 @@ See [built-in plugin contracts and limits](free-plugins.md); implemented feature
 | Feature | Impact | Complexity |
 |---|---:|---:|
 | AI tools runtime status, install, cancel, reset flow | H | H |
-| Explicit pre-session repair for installed stem runtimes with accelerator validation, retained models and CPU-only setup preservation | H | H |
+| Optional repair before opening the DAW after Windows/Linux updates, with accelerator validation, retained stem models and CPU-only setup preservation | H | H |
 | Feature-selective AI setup with hardware/model readiness and background progress | H | H |
 | Stem separation with selectable stems, CPU-only processing, rolling buffers, optional 30-second sections and qualified Linux gfx1151 FP16 acceleration | H | H |
 | Stem separation result import into new tracks/clips | H | H |

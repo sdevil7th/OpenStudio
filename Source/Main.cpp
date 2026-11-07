@@ -1836,8 +1836,8 @@ public:
             && (juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_FUZZ_ONLY", {}) == "1"
                 || juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_TWO_RACK_CPU_ONLY", {}) == "1");
         const auto runtimeRoot = AIRuntimeMaintenance::dataRoot();
-        if (commandLine.trim().isEmpty())
-            AIRuntimeMaintenance::runRequestedMaintenance(runtimeRoot);
+        if (OpenStudioLaunchState::isOrdinaryLaunch(commandLine))
+            AIRuntimeMaintenance::runStartupMaintenance(runtimeRoot, getApplicationVersion());
         const auto session = workstationLease.acquire(runtimeRoot, AIRuntimeMaintenance::SessionLease::Mode::workstation);
         if (session.failed())
         {

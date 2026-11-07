@@ -167,6 +167,9 @@ public:
     /** Is a separation currently running? */
     bool isRunning() const;
 
+    /** Return true if the preferred stem model and its configuration are installed. */
+    static bool hasRequiredModel(const juce::File& modelsDir);
+
     /** Serialize stem file results to juce::var for the bridge. */
     static juce::var resultToJSON (const juce::StringPairArray& stemFiles, bool success,
                                    const juce::String& errorMsg = {});
@@ -343,9 +346,6 @@ private:
                                                   const juce::File& modelsDir,
                                                   const juce::String& modelName,
                                                   const juce::String& accelerationMode = "auto") const;
-
-    /** Return true if the preferred stem model is available. */
-    bool hasRequiredModel (const juce::File& modelsDir) const;
 
     /** Return missing required files for a Stable Audio 3 Medium snapshot. */
     juce::StringArray getMissingStableAudioFiles (const juce::File& modelRoot, const juce::String& modelId = "stable-audio-3-medium") const;
