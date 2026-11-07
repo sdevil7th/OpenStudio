@@ -5,6 +5,8 @@ is packaged separately for Windows, macOS and Linux. It adds no collectors, time
 threads, buffers, callbacks, uploads, or logging to the running DAW. Ordinary
 0.1.09 candidate builds also compile out callback timing profiling, trace storage,
 ARA callback timing/log formatting and per-block ARA debug-state updates.
+Streaming playback also compiles out diagnostic read-window and source-binding
+counters in ordinary builds. Its report marks those streaming counts unavailable.
 Essential engine scheduling, meters and existing fault handling remain; this is
 not a claim that those engine operations cost zero. Missing timing is reported as
 unavailable, never as zero failures. See [candidate qualification](certification-0.1.09.md).

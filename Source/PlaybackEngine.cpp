@@ -986,7 +986,10 @@ void PlaybackEngine::preloadReader(const juce::File& file,
 
     StreamingContinuityState preparedContinuity;
     preparedContinuity.readWindow = std::make_unique<RealtimeSourceReadWindow>(
-        static_cast<int>(bufferedReader->numChannels), &streamingWindowCounters);
+        static_cast<int>(bufferedReader->numChannels));
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    preparedContinuity.readWindow->collectInto(streamingWindowCounters);
+#endif
 
     std::shared_ptr<juce::BufferingAudioReader> concurrentlyPublishedReader;
     {
@@ -1095,7 +1098,9 @@ const PlaybackEngine::PreparedSourceBinding& PlaybackEngine::resolvePreparedSour
     if (binding.generation == sourceBindingGeneration)
         return binding;
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     sourceBindingResolutionCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     binding.decoded = getFullyDecodedSource(readerKey);
     binding.reader = binding.decoded == nullptr ? getCachedReader(readerKey) : nullptr;
     binding.continuity = nullptr;

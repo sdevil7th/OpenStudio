@@ -186,14 +186,18 @@ void runPlaybackTinyBlockRegression(const juce::File& directory,
         PlaybackEngine probe; probe.setOfflineSourceReads(offline);
         probe.addClip(fixture, 0, frames / rate, "binding", 0, 0, 0, 0, "binding-clip");
         steadyBindings &= matches(probe, "binding", 31.0 / rate, pcm);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         const auto warmResolutions = probe.getSourceBindingResolutionCount();
+#endif
         for (int block = 0; block < 128; ++block)
         {
             const int frame = 64 + block * 8;
             steadyBindings &= matches(probe, "binding", frame / rate,
                 [frame](int channel, int sample) { return value(channel, frame + sample); });
         }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         steadyBindings &= warmResolutions > 0 && warmResolutions == probe.getSourceBindingResolutionCount();
+#endif
         const auto replacedPCM = [](int channel, int sample) { return -0.25f * value(channel, 31 + sample); };
         probe.replaceClipAudioFile("binding-clip", replacement);
         replacementParity &= matches(probe, "binding", 31.0 / rate, replacedPCM);
@@ -218,7 +222,11 @@ void runPlaybackTinyBlockRegression(const juce::File& directory,
         probe.clearClipRenderedPreviewSegments("binding-clip");
         reloadParity &= matches(probe, "binding", 31.0 / rate, pcm);
     }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     check("prepared_source_steady_tiny_blocks_reuse_resolved_readers", steadyBindings);
+#else
+    check("prepared_source_steady_tiny_blocks_return_exact_pcm", steadyBindings);
+#endif
     check("prepared_source_replacement_and_cached_key_restore_exact_pcm", replacementParity);
     check("prepared_source_preview_uses_its_own_binding", previewParity);
     check("prepared_source_surviving_preview_rebinds_after_project_reload", reloadParity);

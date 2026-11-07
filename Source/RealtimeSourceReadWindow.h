@@ -1,4 +1,5 @@
 #pragma once
+#include "RealtimeDiagnosticsConfig.h"
 #include <JuceHeader.h>
 #include <atomic>
 
@@ -7,12 +8,14 @@
 class RealtimeSourceReadWindow final
 {
 public:
+    static constexpr int capacity = 512;
+    explicit RealtimeSourceReadWindow(int channels) : samples(channels, capacity) {}
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     struct Counters {
         std::atomic<juce::uint64> hits { 0 }, reads { 0 }, fallbacks { 0 };
     };
-    static constexpr int capacity = 512;
-    explicit RealtimeSourceReadWindow(int channels, Counters* aggregate = nullptr)
-        : samples(channels, capacity), counters(aggregate != nullptr ? aggregate : &ownCounters) {}
+    void collectInto(Counters& aggregate) { counters = &aggregate; } // Before reader publication.
+#endif
 
     bool read(juce::AudioFormatReader& reader, juce::AudioBuffer<float>& destination,
               int count, juce::int64 start)
@@ -25,14 +28,18 @@ public:
             if (start >= cachedStart && cachedSamples >= count
                 && start - cachedStart <= cachedSamples - count)
             {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
                 counters->hits.fetch_add(1, std::memory_order_relaxed);
+#endif
                 copy(destination, channels, count, static_cast<int>(start - cachedStart));
                 return true;
             }
             const int ahead = static_cast<int>(juce::jlimit<juce::int64>(0, capacity, reader.lengthInSamples - start));
             if (ahead >= count)
             {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
                 counters->reads.fetch_add(1, std::memory_order_relaxed);
+#endif
                 if (reader.read(&samples, 0, ahead, start, true, true))
                 {
                     cachedStart = start; cachedSamples = ahead;
@@ -44,13 +51,11 @@ public:
         }
         // A missing lookahead frame must never conceal audible frames which
         // are already available. Preserve the exact original read contract.
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         counters->fallbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
         return reader.read(&destination, 0, count, start, true, true);
     }
-
-    juce::uint64 getHits() const { return counters->hits.load(std::memory_order_relaxed); }
-    juce::uint64 getReads() const { return counters->reads.load(std::memory_order_relaxed); }
-    juce::uint64 getFallbacks() const { return counters->fallbacks.load(std::memory_order_relaxed); }
 
 private:
     void copy(juce::AudioBuffer<float>& destination, int channels, int count, int offset) const
@@ -61,6 +66,8 @@ private:
     juce::AudioBuffer<float> samples;
     juce::int64 cachedStart = -1;
     int cachedSamples = 0;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     Counters ownCounters;
-    Counters* counters;
+    Counters* counters = &ownCounters;
+#endif
 };

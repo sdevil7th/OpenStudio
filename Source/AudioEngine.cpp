@@ -73648,9 +73648,16 @@ juce::var AudioEngine::getAudioDebugSnapshot() const
     root->setProperty("playbackAudioDataCacheMissCount", playbackEngine.getAudioDataCacheMissCount());
     root->setProperty("playbackAudioDataCachedFileCount", playbackEngine.getAudioDataCachedFileCount());
     root->setProperty("playbackReadAheadUnderrunCount", playbackEngine.getAudioDataCacheMissCount());
+    root->setProperty("playbackStreamingWindowCountersAvailable", OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS != 0);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     root->setProperty("playbackStreamingWindowHits", static_cast<juce::int64>(playbackEngine.getStreamingWindowHits()));
     root->setProperty("playbackStreamingWindowReads", static_cast<juce::int64>(playbackEngine.getStreamingWindowReads()));
     root->setProperty("playbackStreamingWindowFallbacks", static_cast<juce::int64>(playbackEngine.getStreamingWindowFallbacks()));
+#else
+    root->setProperty("playbackStreamingWindowHits", juce::var());
+    root->setProperty("playbackStreamingWindowReads", juce::var());
+    root->setProperty("playbackStreamingWindowFallbacks", juce::var());
+#endif
     root->setProperty("playbackStreamingReaderCount", playbackEngine.getAudioDataCachedFileCount());
     root->setProperty("playbackStreamingReadAheadCapacityBytes",
                       playbackEngine.getStreamingReadAheadCapacityBytes());

@@ -296,9 +296,11 @@ public:
     int getAudioDataCacheMissCount() const { return audioDataCacheMissCount.load(std::memory_order_relaxed); }
     int getAudioDataCachedFileCount() const { return cachedReaderCount.load(std::memory_order_acquire); }
     juce::int64 getStreamingReadAheadCapacityBytes() const;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     juce::uint64 getStreamingWindowHits() const { return streamingWindowCounters.hits.load(std::memory_order_relaxed); }
     juce::uint64 getStreamingWindowReads() const { return streamingWindowCounters.reads.load(std::memory_order_relaxed); }
     juce::uint64 getStreamingWindowFallbacks() const { return streamingWindowCounters.fallbacks.load(std::memory_order_relaxed); }
+#endif
     int getStreamingReaderEvictionCount() const { return streamingReaderEvictionCount.load(std::memory_order_relaxed); }
     int getStreamingReaderBudgetOvercommitCount() const { return streamingReaderBudgetOvercommitCount.load(std::memory_order_relaxed); }
     int getFullyDecodedSourceCount() const { return fullyDecodedSourceCount.load(std::memory_order_acquire); }
@@ -366,8 +368,10 @@ public:
         offlineSourceReads = enabled;
     }
     bool hasOfflineSourceReadFailure() const noexcept { return offlineSourceReadFailure.load(); }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     juce::uint64 getSourceBindingResolutionCount() const noexcept
     { return sourceBindingResolutionCount.load(std::memory_order_relaxed); }
+#endif
 
     // Each streaming reader holds two 32768-frame blocks and source readers are
     // capped to two channels. The normal cache target is therefore 128 MiB.
@@ -393,7 +397,9 @@ private:
         juce::int64 decodedBytes = 0;
     };
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     RealtimeSourceReadWindow::Counters streamingWindowCounters;
+#endif
     struct StreamingContinuityState
     {
         std::unique_ptr<RealtimeSourceReadWindow> readWindow;
@@ -485,7 +491,9 @@ private:
         const juce::String& readerKey, PreparedSourceBinding& binding);
     // Protected by lock (or exclusively owned by an offline worker).
     juce::uint64 sourceBindingGeneration = 1;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     std::atomic<juce::uint64> sourceBindingResolutionCount { 0 };
+#endif
     void invalidatePreparedSources() noexcept { ++sourceBindingGeneration; }
 
     // Pre-load reader on message thread so it's ready for audio thread

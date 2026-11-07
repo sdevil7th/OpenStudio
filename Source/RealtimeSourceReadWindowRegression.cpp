@@ -12,6 +12,7 @@ public:
     bool readSamples(int* const* destinations, int channels, int offset, juce::int64 start, int count) override
     {
         ++calls;
+        if (count <= 32) ++shortReads;
         if (failAll || (onlyShortReads && count > 32)) return false;
         for (int channel = 0; channel < channels; ++channel)
             if (destinations[channel] != nullptr)
@@ -19,7 +20,7 @@ public:
                     reinterpret_cast<float*>(destinations[channel])[offset + index] = value(channel, start + index);
         return true;
     }
-    int calls = 0;
+    int calls = 0, shortReads = 0;
     bool onlyShortReads = false, failAll = false;
 };
 bool matches(const juce::AudioBuffer<float>& data, int count, juce::int64 start)
@@ -38,11 +39,19 @@ void runRealtimeSourceReadWindowRegression(const std::function<void(const char*,
     {
         FixtureReader reader(channels, rate);
         RealtimeSourceReadWindow window(channels);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+        RealtimeSourceReadWindow::Counters counts;
+        window.collectInto(counts);
+#endif
         juce::AudioBuffer<float> block(channels, 1024);
         for (int position = 0; position < 9600; position += 8)
             exact &= window.read(reader, block, 12, position) && matches(block, 12, position);
-        // 1200 tiny reads require fewer than25 bounded reader acquisitions.
-        bounded &= reader.calls < 25 && window.getHits() > 1175 && window.getFallbacks() == 0;
+        // Count at the fixture reader: ordinary builds incur no bookkeeping.
+        bounded &= reader.calls > 0 && reader.calls < 25 && reader.shortReads == 0;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+        bounded &= counts.hits.load() == static_cast<juce::uint64>(1200 - reader.calls)
+            && counts.reads.load() == static_cast<juce::uint64>(reader.calls) && counts.fallbacks.load() == 0;
+#endif
         for (const auto position : { 8300, 2, 701, 9900, 10001, 17 })
         {
             const int count = juce::jmin(12, static_cast<int>(reader.lengthInSamples) - position);
@@ -56,12 +65,12 @@ void runRealtimeSourceReadWindowRegression(const std::function<void(const char*,
     RealtimeSourceReadWindow shortWindow(2); juce::AudioBuffer<float> block(2, 32);
     check("stream_window_missing_lookahead_retains_ready_audible_frames",
         shortWindow.read(shortReader, block, 12, 113) && matches(block, 12, 113)
-        && shortReader.calls == 2 && shortWindow.getFallbacks() == 1);
+        && shortReader.calls == 2 && shortReader.shortReads == 1);
     shortReader.failAll = true;
     check("stream_window_preserves_real_read_failure", !shortWindow.read(shortReader, block, 12, 777));
     FixtureReader replacement(2, 48000);
     RealtimeSourceReadWindow replacementWindow(2);
     check("stream_window_replacement_starts_with_empty_identity_cache",
         replacementWindow.read(replacement, block, 12, 99) && matches(block, 12, 99)
-        && replacement.calls == 1 && replacementWindow.getHits() == 0);
+        && replacement.calls == 1 && replacement.shortReads == 0);
 }
