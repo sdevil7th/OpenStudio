@@ -166,6 +166,27 @@ class CollectionTests(TemporaryTest):
         with zipfile.ZipFile(self.root / 'review.zip') as archive:
             self.assertEqual(archive.read('evidence-01.txt'), next(iter(files.values())))
 
+    def test_relocated_paths_stay_private_in_saved_reports_and_error_messages(self):
+        private = '/srv/customer-name/Recording Sessions/failed/job.json'
+        result = report('fixture')
+        result['artifacts'] = [{'source': private}, {'audioFile': private}]
+        result['checks'].append({'id': 'unreadable', 'status': 'not_asserted',
+                                 'detail': f"Permission denied: '{private}'"})
+        save_report(self.root / 'review', result)
+        bundle(self.root / 'review', self.root / 'review.zip', True)
+        with zipfile.ZipFile(self.root / 'review.zip') as archive:
+            self.assertNotIn(b'customer-name', b''.join(archive.read(name) for name in archive.namelist()))
+            saved = json.loads(archive.read('report.json'))
+            alias = saved['artifacts'][0]['source']
+            self.assertEqual(saved['artifacts'][1]['audioFile'], alias)
+            self.assertIn(alias, saved['checks'][0]['detail'])
+
+    def test_large_log_token_and_email_complete_within_bounded_time(self):
+        code = ("import sys;sys.path.insert(0,sys.argv[1]);from openstudio_support.common import Redactor;"
+                "line='x!'*65536;assert Redactor().text(line+' user@example.test') == line+' <email>'")
+        subprocess.run([sys.executable, '-c', code, str(Path(__file__).resolve().parent)],
+                       timeout=10, check=True, capture_output=True)
+
 
 class LinuxDiscoveryTests(TemporaryTest):
     def test_localized_documents_and_juce_settings_are_collected(self):

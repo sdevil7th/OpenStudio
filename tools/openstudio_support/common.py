@@ -125,7 +125,17 @@ class Redactor:
         value = re.sub(r"(?i)\b(?:https?|file)://[^\s<>\"']+", "<url>", value)
         value = re.sub(r"(?i)\bBearer\s+[^\s,;\"']+", "Bearer <secret>", value)
         value = re.sub(r"(?im)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization|cookie)[\"']?\s*[:=]\s*)([^\r\n]+)", r"\1<secret>", value)
-        value = re.sub(r"\b[^\s@]+@[^\s@]+\.[^\s@]+", "<email>", value)
+        # Inspect each whitespace-delimited token once. Retrying a missing '@'
+        # at every word boundary made long paths and encoded log lines quadratic.
+        if "@" in value:
+            def hide_email(match):
+                token = match[0]
+                local, _, domain = token.partition("@")
+                host, dot, suffix = domain.rpartition(".")
+                return "<email>" if local and host and dot and suffix else token
+            value = re.sub(r"\S+", hide_email, value)
+        # Exceptions quote paths, including privately named Linux mountpoints.
+        value = re.sub(r"\"/[^\"\r\n]*\"|'/[^'\r\n]*'", lambda m: m[0][0] + self.alias(m[0][1:-1]) + m[0][-1], value)
         value = re.sub(r"(?i)(?:[A-Z]:[\\/]|\\\\)[^\r\n\"'<>|]*", lambda m: self.alias(m[0].rstrip()), value)
         value = re.sub(r"(?<![\w<])/(?:Users|home|tmp|var|Volumes|mnt|media|opt|Applications|usr)/[^\r\n\"'<>|]*", lambda m: self.alias(m[0].rstrip()), value)
         value = re.sub(r"[A-Za-z0-9+/=_-]{128,}", "<long-data>", value)
@@ -141,6 +151,9 @@ class Redactor:
         if isinstance(value, str):
             if key.lower() in {"name", "trackname", "projectname", "clipname"}:
                 return self.alias(value, "name")
+            path_field = key.lower() in {"source", "project", "render"} or key.lower().endswith(("file", "path"))
+            if path_field and (value.startswith("/") or re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", value)):
+                return self.alias(value)
             return self.text(value)
         return value
 
