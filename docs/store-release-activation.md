@@ -1,5 +1,15 @@
 # Microsoft Store activation plan
 
+## 0.1.09 preparation
+
+The current [release handoff](release-0.1.09-handoff.md) covers both Stores.
+On 7 November the US Microsoft catalog served `SouravDas.OpenStudio_0.1.8.0_x64__sqr0dv9eeh28p`,
+the OpenStudio 0.1.08 notes and 16 listing images for product `9N3MQ442VXGW`.
+The candidate MSIX validated as `0.1.9.0`. For `v0.1.09` the submission uses
+the reviewed **What's new** summary from the release notes and requests immediate
+delivery after certification. The original `v0.1.05` policy remains available
+for its recovery flow. Other tags retain the saved Store mode.
+
 Status reviewed: October 24, 2026. Historical checkpoints below retain their
 original scope.
 

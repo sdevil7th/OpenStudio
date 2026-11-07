@@ -233,9 +233,10 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
     def test_preflights_and_submission_share_the_reviewed_publishing_policy(self):
         config_path = "packaging/msix/release-publishing.json"
         policy = json.loads((ROOT / config_path).read_text(encoding="utf-8"))
-        self.assertEqual(policy, {
-            "appId": "9N3MQ442VXGW", "releaseTag": "v0.1.05", "targetPublishMode": "Immediate",
-        })
+        self.assertEqual(policy, [
+            {"appId": "9N3MQ442VXGW", "releaseTag": tag, "targetPublishMode": "Immediate"}
+            for tag in ("v0.1.05", "v0.1.09")
+        ])
         commands = [step["run"] for name in ("preflight-store", "submit-store")
                     for step in self.jobs[name]["steps"]
                     if "submit_store_release.py" in step.get("run", "")]

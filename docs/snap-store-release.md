@@ -47,9 +47,13 @@ revision before exposing its listing editor. The text API currently rejects
 nonempty summary and description fields as blank, including Canonical's own
 Dashboard PUT format. The owner chose to revisit text after package qualification;
 title, description, keywords, category, license and public links remain staged.
-Do not record text as Store-applied until readback proves it. Preserve other
-media and listing settings. Real Linux candidate screenshots remain required for the gallery;
-do not use captures of another platform as Linux screenshots.
+On 7 November the publisher saved and verified both screenshots alongside the
+existing icon. The two 2560×1600 images in `packaging/snap/gallery/` show the
+installed x2 diagnostic Snap on Ubuntu 26.04, using synthesized demo audio and
+MIDI. Their SHA-256 values match the private Store gallery. No revision was
+uploaded and no channel changed. The text API still rejected both nonempty text
+fields as blank. The title, summary, description, license, category, keywords
+and links still need readback. [Canonical listing request](https://forum.snapcraft.io/t/initialize-listing-metadata-for-registered-openstudio-snap-without-a-release/54089)
 
 ## Desktop diagnostic hold
 
@@ -80,7 +84,8 @@ copy passes metadata validation for all 605 ELF files after note-reference repai
 These are diagnostic results,
 not installed-package qualification or hardware GPU/audio qualification. Resume
 automatic window checks for this concrete packaging correction; full installed
-main/popout/recovery/export/Support/updater checks are still required.
+main/popout/recovery/export/Support/updater checks were still required at that
+diagnostic checkpoint. See the subsequent installed-candidate result below.
 
 Installed export, explicitly opened Support and updater checks run independently.
 A diagnostic Snap is retained even when qualification fails. If the pause is
@@ -92,7 +97,8 @@ Snap from `candidate-linux-x64` in that selected prior Verify run. This avoids
 rebuilding unchanged application code for packaging diagnosis. The package stays
 unqualified even if its diagnostic checks succeed. Release does not set this
 input and always uses its own build artifacts. Resume automatic window checks
-after the desktop investigation; complete qualification is still required.
+after the desktop investigation. The full installed Snap and recovery checks
+subsequently passed on the 0.1.09 PR. [Installed-candidate verification](https://github.com/sdevil7th/OpenStudio/actions/runs/42383293691)
 
 For future credential exports, set `TZ=UTC` for the export command only and
 verify the resulting credential's actual expiry before using it. A short-lived
@@ -128,7 +134,7 @@ credentials or include them in reports.
 After the release PR is merged, an owner-authorized `v0.1.09` tag triggers the
 existing Release workflow. If Snap delivery is enabled, its dependencies are:
 
-`build-linux -> qualify-snap -> preflight-snap -> publish -> submit-snap`.
+`build-linux -> qualify-snap -> preflight-snap -> publish -> submit-snap -> sync-snap-listing`.
 
 The Microsoft Store chain remains
 `build-windows -> preflight-store -> publish -> submit-store`.
@@ -138,7 +144,12 @@ credential, approval record, artifact identity, or prerequisite stops the chain.
 Snap preflight only authenticates and reads status. Submission revalidates the
 qualified bytes, then calls `snapcraft upload --release=stable` once. No automatic
 retry follows an ambiguous upload; inspect Store revisions first. CLI success
-does not prove final availability or installed update delivery.
+does not prove final availability or installed update delivery. The separate
+listing job first matches Canonical's stable amd64 revision and SHA3-384 to
+the qualified bytes. It applies the tagged text and gallery using the Store's
+conflict-checked metadata APIs, preserves unrelated media and links, then reads
+back the result. Retry a failed listing job independently of package submission.
+The public App Center page can take longer to update.
 
 Do not create a release tag or dispatch Release during preparation. Nothing in
 this document authorizes upload, publication or a confinement-review message.

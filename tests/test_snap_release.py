@@ -14,6 +14,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 from submit_snap_release import SNAP_ID, run
+import sync_snap_listing as listing_sync
 from snap_elf import audit_notes, repair_notes
 from tests import test_store_release_workflow as store_workflow
 
@@ -64,7 +65,9 @@ class SnapReleaseTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, 'private account response', '')
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'SNAPCRAFT_STORE_CREDENTIALS': 'fixture'}):
             path = Path(directory); self.fixture(path)
-            options = dict(approval_url='https://forum.snapcraft.io/t/review/123', command=command)
+            remote = {'snap': {'id': SNAP_ID, 'name': 'openstudio'}, 'channel-map': [], 'revisions': [], '_links': {}}
+            options = dict(approval_url='https://forum.snapcraft.io/t/review/123/4', command=command,
+                           request=lambda *args, **kwargs: remote)
             result = run(path, '0.1.09', 'v0.1.09', preflight=True, **options)
             self.assertEqual(result['status'], 'preflight_passed')
             self.assertFalse(result['mutationsPerformed'])
@@ -73,12 +76,23 @@ class SnapReleaseTests(unittest.TestCase):
             self.assertEqual(sum('upload' in args for args in calls), 1)
             self.assertEqual(result['published'], 'not_asserted')
             self.assertNotIn('private account response', json.dumps(result))
+            remote['revisions'] = [{'revision': 3, 'version': '0.1.09', 'architectures': ['amd64'],
+                                    'sha3-384': hashlib.sha3_384((path / 'openstudio.snap').read_bytes()).hexdigest()}]
+            with self.assertRaisesRegex(ValueError, 'already has a Store revision'):
+                run(path, '0.1.09', 'v0.1.09', submit=True, **options)
+            remote['channel-map'] = [{'revision': 3, 'architecture': 'amd64', 'channel': 'latest/stable'}]
+            self.assertEqual(run(path, '0.1.09', 'v0.1.09', submit=True, **options)['status'], 'already_released')
+            remote['revisions'][0]['version'] = '0.1.10'
+            with self.assertRaisesRegex(ValueError, 'newer'):
+                run(path, '0.1.09', 'v0.1.09', submit=True, **options)
+            self.assertEqual(sum('upload' in args for args in calls), 1)
 
     def test_hash_identity_tag_and_approval_fail_before_network(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'SNAPCRAFT_STORE_CREDENTIALS': 'fixture'}):
             path = Path(directory); report = self.fixture(path)
             def forbidden(*args, **kwargs): self.fail('Unexpected Store command')
-            for tag, approval in [('v0.1.08', 'https://forum.snapcraft.io/t/review/123'), ('v0.1.09', '')]:
+            for tag, approval in [('v0.1.08', 'https://forum.snapcraft.io/t/review/123/4'),
+                                  ('v0.1.09', 'https://forum.snapcraft.io/t/review/123'), ('v0.1.09', '')]:
                 with self.assertRaises(ValueError):
                     run(path, '0.1.09', tag, preflight=True, approval_url=approval, command=forbidden)
             for key, value in [('version', '0.1.08'), ('snapId', 'wrong'), ('supportLaunch', 'service'),
@@ -99,6 +113,9 @@ class SnapReleaseTests(unittest.TestCase):
             self.assertTrue(workflow.job_runs(job, ref='refs/tags/v0.1.09', snap_enabled='true'), job)
         for status in ('failure', 'skipped', 'cancelled'):
             self.assertFalse(workflow.job_runs('publish', {'preflight-snap': status}, snap_enabled='true'))
+            self.assertFalse(workflow.job_runs('sync-snap-listing', {'submit-snap': status}, snap_enabled='true'))
+        self.assertTrue(workflow.job_runs('sync-snap-listing', ref='refs/tags/v0.1.09', snap_enabled='true'))
+        self.assertFalse(workflow.job_runs('sync-snap-listing', ref='refs/heads/main', snap_enabled='true'))
         self.assertTrue(workflow.job_runs('publish', {'preflight-snap': 'skipped'}, snap_enabled='false'))
         self.assertFalse(workflow.job_runs('submit-snap', {'publish': 'failure'}, snap_enabled='true'))
         self.assertFalse(workflow.job_runs('submit-snap', ref='refs/heads/main', snap_enabled='true'))
@@ -114,6 +131,54 @@ class SnapReleaseTests(unittest.TestCase):
         runtime = recipe['parts']['runtime']
         self.assertEqual(runtime['build-attributes'], ['no-patchelf'])
         self.assertIn('"$CRAFT_PROJECT_DIR/snap_elf.py" "$CRAFT_PRIME"', runtime['override-prime'])
+
+    def test_listing_preflight_and_retry_preserve_media_and_check_stable_bytes(self):
+        listing, media = listing_sync.listing_assets()
+        metadata = {'links': {'donation': ['https://example.org/fund']},
+                    'categories': {'items': [{'name': 'utilities'}]}}
+        existing = [{'type': 'banner', 'hash': 'other', 'filename': 'old.png'}]
+        posts = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            self.fixture(path)
+            revision = dict(revision=3, version='0.1.09', **{'sha3-384': hashlib.sha3_384((path / 'openstudio.snap').read_bytes()).hexdigest()})
+            channels = {'snap': {'name': 'openstudio', 'id': SNAP_ID},
+                        'channel-map': [{'architecture': 'amd64', 'channel': 'latest/stable', 'revision': 3}],
+                        'revisions': [revision]}
+            def request(method, url, **kwargs):
+                if method == 'GET':
+                    if url == listing_sync.CHANNELS:
+                        return channels
+                    return existing if url.endswith('/binary-metadata') else metadata
+                self.assertEqual(method, 'POST')
+                posts.append(url)
+                if url.endswith('/binary-metadata'):
+                    rows = json.loads(kwargs['data']['info'])
+                    self.assertTrue(all(item in rows for item in existing))
+                    existing[:] = [{key: row[key] for key in ('type', 'hash', 'filename')} for row in rows]
+                else:
+                    update = kwargs['json'].copy()
+                    update['categories'] = {'items': [{'name': name} for name in update['categories']]}
+                    metadata.update(update)
+            def synchronize(apply):
+                return listing_sync.run(path, '0.1.09', 'v0.1.09', apply=apply, request=request)
+            self.assertFalse(synchronize(False)['listingVerified'])
+            self.assertFalse(posts)
+            revision['version'] = '0.1.08'
+            with self.assertRaises(ValueError):
+                synchronize(True)
+            self.assertFalse(posts)
+            revision['version'] = '0.1.09'
+            self.assertTrue(synchronize(True)['listingVerified'])
+            self.assertEqual(synchronize(True)['imagesToAdd'], 0)
+            self.assertEqual(len(posts), 2)
+            self.assertEqual(metadata['links']['donation'], ['https://example.org/fund'])
+            self.assertEqual(set(metadata['keywords']), set(listing['keywords']))
+            self.assertEqual(len(existing), len(media) + 1)
+            self.assertEqual({i['name'] for i in metadata['categories']['items']}, {'utilities', 'music-and-audio'})
+            revision['sha3-384'] = 'wrong'
+            with self.assertRaises(ValueError):
+                synchronize(True)
 
     def test_runtime_elf_notes_match_the_native_symbol_identity(self):
         with tempfile.TemporaryDirectory() as directory:

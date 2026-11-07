@@ -548,21 +548,24 @@ class StoreSubmissionTests(unittest.TestCase):
         self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
 
     def test_publishing_config_strict_schema_app_tag_and_mode(self):
-        actual = store.load_publishing_config(store.ROOT / "packaging/msix/release-publishing.json")
-        self.assertEqual(actual, self.publishing_config() | {"releaseTag": "v0.1.05"})
+        path = store.ROOT / "packaging/msix/release-publishing.json"
+        for tag in ("v0.1.05", "v0.1.09"):
+            self.assertEqual(store.load_publishing_config(path, tag), self.publishing_config() | {"releaseTag": tag})
+        self.assertIsNone(store.load_publishing_config(path, "v0.1.10"))
         invalid = [self.publishing_config() | change for change in (
             {"appId": "other"}, {"releaseTag": "0.1.2"}, {"releaseTag": "v0.1.2-beta"},
             {"releaseTag": "v0.1.2.1"}, {"targetPublishMode": "SpecificDate"},
             {"targetPublishMode": "Unknown"}, {"targetPublishMode": 1}, {"extra": "field"})]
-        invalid += [{"appId": store.APP_ID}, [], None]
+        invalid += [{"appId": store.APP_ID}, [], None, [self.publishing_config(), self.publishing_config()]]
         for index, config in enumerate(invalid):
             path = self.directory / "publishing.json"
             path.write_text(json.dumps(config))
             with self.subTest(index=index), self.assertRaises(store.StoreError):
-                store.load_publishing_config(path)
+                store.load_publishing_config(path, "v0.1.2")
 
     def test_cli_publishing_policy_reports_exact_tag_immediate_and_other_tag_manual(self):
         for tag, package_version, notes_file in (
+                ("v0.1.09", "0.1.9.0", "0.1.09.md"),
                 ("v0.1.05", "0.1.5.0", "0.1.05.md"), ("v0.1.04", "0.1.4.0", "0.1.04.md"),
                 ("v0.1.02", "0.1.2.0", "0.1.02.md")):
             for mode in ("--preflight", "--submit"):
@@ -580,7 +583,7 @@ class StoreSubmissionTests(unittest.TestCase):
                             "--report", str(report_path), mode]):
                     self.assertEqual(store.main(), 0)
                 report = json.loads(report_path.read_text())
-                expected_mode = "Immediate" if tag == "v0.1.05" else "Manual"
+                expected_mode = "Immediate" if tag in {"v0.1.05", "v0.1.09"} else "Manual"
                 self.assertEqual(report["targetPublishMode"], expected_mode)
                 self.assertIn(f"Publishing mode: {expected_mode}", summary_path.read_text())
                 self.assertNotIn("SECRET", report_path.read_text() + summary_path.read_text())
@@ -654,6 +657,18 @@ class StoreSubmissionTests(unittest.TestCase):
         self.assertLessEqual(len(result), 1500)
         self.assertTrue(result.endswith("/releases/tag/v0.1.2"))
         self.assertIn("tested improvement.", result)
+
+    def test_reviewed_store_summary_excludes_internal_release_material(self):
+        notes = store.validated_notes("0.1.09", store.ROOT / "docs/releases/0.1.09.md")
+        summary = store.store_notes(notes, "v0.1.09")
+        self.assertIn("Support opens only when you launch it", summary)
+        self.assertIn("Check and repair", summary)
+        self.assertNotIn("candidate", summary)
+        self.assertNotIn("##", summary)
+        self.assertTrue(summary.endswith("/releases/tag/v0.1.09"))
+        for invalid in ("", "🎸" * 725, "first\n## What's new\nsecond"):
+            with self.subTest(length=len(invalid)), self.assertRaises(store.StoreError):
+                store.store_notes("## What's new\n" + invalid + "\n## Fixes\nbody", "v0.1.09")
 
     def create_package(self, *, version="0.1.2.0", **identity):
         attrs = {"Name": store.IDENTITY, "Publisher": store.PUBLISHER, "Version": version, "ProcessorArchitecture": "x64"} | identity

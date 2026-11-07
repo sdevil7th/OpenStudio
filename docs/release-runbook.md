@@ -1,5 +1,8 @@
 # OpenStudio Release Runbook
 
+For the next application release, follow the [0.1.09 handoff](release-0.1.09-handoff.md)
+for the exact merge, tag, Store listing, website and recovery steps.
+
 Ubuntu App Center preparation and its tag-bound Snap qualification/submission
 chain are documented in [Snap Store release preparation](snap-store-release.md).
 The account/name reservation is complete; credentials, Canonical confinement
@@ -712,8 +715,9 @@ and publication. Inspect any failure before another recovery attempt.
 
 The owner requested immediate release and automatic Store submission. After
 the unpublished `v0.1.04` attempt exposed an unattended-uninstall blocker,
-the reviewed follow-up policy applies that publication intent to `v0.1.05`.
-`packaging/msix/release-publishing.json` pins that tag and Store app to API
+the reviewed follow-up policy applies that publication intent to `v0.1.05`
+and the upcoming `v0.1.09`.
+`packaging/msix/release-publishing.json` pins those tags and Store app to API
 `targetPublishMode=Immediate`. Both live preflights and submission use the same
 config. This changes only the matching update's publication timing; pricing,
 audience, artwork and other listing settings stay as saved. Other tags preserve

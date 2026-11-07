@@ -162,7 +162,7 @@ def main(argv=None):
 
     try:
         notes = store.validated_notes(diagnosis.TAG, diagnosis.ROOT / diagnosis.NOTES_PATH)
-        publishing = store.load_publishing_config(diagnosis.ROOT / "packaging/msix/release-publishing.json")
+        publishing = store.load_publishing_config(diagnosis.ROOT / "packaging/msix/release-publishing.json", diagnosis.TAG)
         stage("GitHubAuthentication")
         recover(diagnosis.GitHubReads(allowed_paths=GITHUB_PATHS).get, store.StoreApi,
             args.package_dir, notes, publishing, record, submit=args.submit, stage=stage)

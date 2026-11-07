@@ -81,6 +81,17 @@ def store_notes(notes: str, tag: str) -> str:
     # The complete reviewed notes remain at the immutable release URL. Keep the
     # Store field within 1500 characters without cutting a sentence mid-word.
     link = f"Full release notes: https://github.com/sdevil7th/OpenStudio/releases/tag/{tag}"
+    # Use the reviewed public summary when present. Keep the original text
+    # formatting for retries of historical submissions without this section.
+    headings = list(re.finditer(r"^## What's new[ \t]*$", notes, re.M))
+    if headings:
+        if len(headings) != 1:
+            raise StoreError("Release notes contain multiple What's new sections.")
+        summary = re.split(r"^## ", notes[headings[0].end():], maxsplit=1, flags=re.M)[0].strip()
+        result = f"OpenStudio {tag.removeprefix('v')}\n\n{summary}\n\n{link}"
+        if not summary or len(result.encode('utf-16-le')) // 2 > 1500:
+            raise StoreError("The What's new summary must fit the Microsoft Store listing with its link.")
+        return result
     lines = [re.sub(r"^#{1,6}\s+", "", line) for line in notes.strip().splitlines()]
     text = "\n".join(lines)
     if len(text) + len(link) + 2 <= 1500:
@@ -141,8 +152,7 @@ def load_initial_config(path: Path) -> dict:
     return config
 
 
-def load_publishing_config(path: Path) -> dict:
-    config = json.loads(path.read_text(encoding="utf-8-sig"))
+def validate_publishing_config(config: dict) -> dict:
     if (not isinstance(config, dict) or set(config) != {"appId", "releaseTag", "targetPublishMode"}
             or not all(isinstance(value, str) for value in config.values())
             or config["appId"] != APP_ID or not config["releaseTag"].startswith("v")
@@ -152,6 +162,21 @@ def load_publishing_config(path: Path) -> dict:
         raise StoreError("Invalid release publishing configuration; use an exact stable tag and Immediate or Manual mode.")
     package_version(config["releaseTag"])
     return config
+
+
+def load_publishing_config(path: Path, release_tag: str) -> dict | None:
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    configs = data if isinstance(data, list) else [data]
+    if not configs:
+        raise StoreError("Microsoft Store publishing policy must include a reviewed release tag.")
+    by_tag = {}
+    for entry in configs:
+        config = validate_publishing_config(entry)
+        tag = config["releaseTag"]
+        if tag in by_tag:
+            raise StoreError("Duplicate release tag in Microsoft Store publishing policy.")
+        by_tag[tag] = config
+    return by_tag.get(release_tag)
 
 
 def json_digest(value: dict) -> str:
@@ -554,7 +579,7 @@ def main():
         notes = store_notes(notes, tag)
         record(version=version, sha256=sha256, releaseTag=tag, status="Validated", releaseNotes=notes)
         config = load_initial_config(args.initial_submission_config) if args.initial_submission_config else None
-        publishing = load_publishing_config(args.publishing_config) if args.publishing_config else None
+        publishing = load_publishing_config(args.publishing_config, tag) if args.publishing_config else None
         if args.submit or args.preflight:
             submit(StoreApi(), package, version, sha256, notes, record, initial_config=config,
                    publishing_config=publishing, release_tag=tag, preflight_only=args.preflight)
