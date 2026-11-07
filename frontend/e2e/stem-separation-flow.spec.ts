@@ -1,8 +1,13 @@
-import { expect, test } from "@playwright/test";
+import { expect, test as base } from "@playwright/test";
+import type { AiHardwareStatus } from "../src/services/NativeBridge";
+
+const test = base.extend<{ stemHardware: AiHardwareStatus | null }>({
+  stemHardware: [null, { option: true }],
+});
 
 // Frontend publication/undo boundary. Actual installer, worker, tensor placement
 // and WAV validation are exercised separately by qualify_ai_native.py.
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, stemHardware }) => {
   await page.addInitScript(() => {
     localStorage.setItem("openstudio.inputProfiles.v1", JSON.stringify({ schemaVersion: 1,
       keyboardProfileId: "openstudio", mouseProfileId: "openstudio", onboardingSeen: true }));
@@ -10,7 +15,7 @@ test.beforeEach(async ({ page }) => {
   });
   await page.goto("/");
   await expect(page.getByText("Starting OpenStudio...", { exact: true })).toBeHidden({ timeout: 15000 });
-  await page.evaluate(async () => {
+  await page.evaluate(async (hardware) => {
     const storeUrl = "/src/store/useDAWStore.ts", bridgeUrl = "/src/services/NativeBridge.ts";
     const commandsUrl = "/src/store/commands/index.ts";
     const { useDAWStore, createDefaultTrack } = await import(/* @vite-ignore */ storeUrl);
@@ -46,12 +51,12 @@ test.beforeEach(async ({ page }) => {
     nativeBridge.cancelStemSeparation = async () => { ++qa.cancels; };
     nativeBridge.releaseIdleAIMemory = async () => { ++qa.memoryReleases; return { success: true, released: true }; };
     useDAWStore.setState({ tracks: [track], trackGroups: [], canUndo: false, canRedo: false,
-      aiToolsStatus: { ...useDAWStore.getState().aiToolsStatus, available: true, state: "ready",
+      aiToolsStatus: { ...useDAWStore.getState().aiToolsStatus, ...(hardware ? { hardware } : {}), available: true, state: "ready",
         installInProgress: false, features: { stemSeparation: { ready: true, compatible: true } } } });
     const readyStatus = useDAWStore.getState().aiToolsStatus;
     nativeBridge.installAiTools = async (options: unknown) => { qa.repairs.push(options); return { started: true, status: readyStatus }; };
     useDAWStore.getState().openStemSeparation("source", "source-clip", "Song", 12);
-  });
+  }, stemHardware);
 });
 
 test("publishes six complete stems once, preserves placement and supports one undo/redo", async ({ page }) => {
@@ -160,34 +165,30 @@ test("memory details and idle release remain usable in compact windows", async (
   });
 });
 
-test("macOS offers section processing while rolling buffers are unavailable", async ({ page }) => {
-  await page.evaluate(async () => {
-    const url = "/src/store/useDAWStore.ts";
-    const { useDAWStore } = await import(/* @vite-ignore */ url);
-    useDAWStore.setState({ aiToolsStatus: { ...useDAWStore.getState().aiToolsStatus,
-      hardware: { platform: "macos", gpuBackend: "mps", gpuName: "Apple Silicon" } } });
+test.describe("macOS stem processing", () => {
+  test.use({ stemHardware: { platform: "macos", gpuBackend: "mps", gpuName: "Apple Silicon" } });
+
+  test("macOS offers section processing while rolling buffers are unavailable", async ({ page }) => {
+    await expect(page.getByRole("checkbox", { name: "Use rolling output buffers" })).toBeDisabled();
+    await expect(page.getByRole("checkbox", { name: "Process in 30-second sections to reduce memory use" })).toBeEnabled();
   });
-  await expect(page.getByRole("checkbox", { name: "Use rolling output buffers" })).toBeDisabled();
-  await expect(page.getByRole("checkbox", { name: "Process in 30-second sections to reduce memory use" })).toBeEnabled();
 });
 
-test("rolling buffers and the qualified AMD request reach the worker options", async ({ page }) => {
-  await page.evaluate(async () => {
-    const url = "/src/store/useDAWStore.ts";
-    const { useDAWStore } = await import(/* @vite-ignore */ url);
-    useDAWStore.setState({ aiToolsStatus: { ...useDAWStore.getState().aiToolsStatus,
-      hardware: { platform: "linux", gpuBackend: "rocm", gpuArchitecture: "gfx1151", gpuName: "Radeon 8060S" } } });
+test.describe("Linux AMD stem processing", () => {
+  test.use({ stemHardware: { platform: "linux", gpuBackend: "rocm", gpuArchitecture: "gfx1151", gpuName: "Radeon 8060S" } });
+
+  test("rolling buffers and the qualified AMD request reach the worker options", async ({ page }) => {
+    await page.getByLabel("AMD performance").selectOption("qualified-fast");
+    await page.getByText("Use rolling output buffers", { exact: true }).click();
+    await expect(page.getByRole("checkbox", { name: "Process in 30-second sections to reduce memory use" })).toBeDisabled();
+    await page.getByRole("button", { name: "Separate", exact: true }).click();
+    expect(await page.evaluate(() => (window as any).__stemQA.requests[0][2])).toMatchObject({
+      accelerationMode: "auto", chunkDuration: 0, memoryMode: "streaming-preview", performanceMode: "qualified-fast",
+    });
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByLabel("Processing device").selectOption("cpu-only");
+    await expect(page.getByLabel("AMD performance")).toBeDisabled();
   });
-  await page.getByLabel("AMD performance").selectOption("qualified-fast");
-  await page.getByText("Use rolling output buffers", { exact: true }).click();
-  await expect(page.getByRole("checkbox", { name: "Process in 30-second sections to reduce memory use" })).toBeDisabled();
-  await page.getByRole("button", { name: "Separate", exact: true }).click();
-  expect(await page.evaluate(() => (window as any).__stemQA.requests[0][2])).toMatchObject({
-    accelerationMode: "auto", chunkDuration: 0, memoryMode: "streaming-preview", performanceMode: "qualified-fast",
-  });
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.getByLabel("Processing device").selectOption("cpu-only");
-  await expect(page.getByLabel("AMD performance")).toBeDisabled();
 });
 
 test("generation memory preference reaches native requests without entering project data", async ({ page }) => {
