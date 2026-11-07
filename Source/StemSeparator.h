@@ -1,7 +1,9 @@
 #pragma once
 #include <JuceHeader.h>
 #include <thread>
+#include <string>
 #include "OwnedChildProcess.h"
+#include "AIRuntimeSession.h"
 
 /**
  * StemSeparator — Source separation via Python subprocess (BS-RoFormer).
@@ -20,6 +22,7 @@ class StemSeparator
 {
 public:
     StemSeparator();
+    explicit StemSeparator(AIRuntimeMaintenance::SessionLease&&, bool rebuild);
     ~StemSeparator();
 
     struct AiToolsStatus
@@ -100,6 +103,10 @@ public:
     /** Schedule a background AI tools status refresh and return the current cached status. */
     juce::var refreshAiToolsStatus();
 
+    juce::Result beginRuntimeMaintenance(bool rebuild = false);
+    juce::var pollRuntimeMaintenance();
+    void cancelRuntimeMaintenance();
+
     /** Start installing the optional AI tools into the user's app-data directory after explicit user confirmation. */
     juce::var installAiTools (bool userConfirmedDownload);
 
@@ -127,6 +134,8 @@ public:
         juce::String backend { "cpu" };
         juce::String accelerationMode { "auto" };
         int threadCap = 0;
+        juce::String fallbackReason {};
+        juce::var diagnostics {};
     };
 
     /**
@@ -144,16 +153,22 @@ public:
                           const juce::File& outputDir,
                           const juce::StringArray& stemNames,
                           const juce::String& accelerationMode = "auto",
-                          const juce::String& modelName = "BS-Roformer-SW.ckpt");
+                          const juce::String& modelName = "BS-Roformer-SW.ckpt",
+                          int chunkDuration = 0,
+                          const juce::String& memoryMode = "automatic",
+                          const juce::String& performanceMode = "standard");
 
     /** Poll the child process for progress. Returns current state. */
     SeparationProgress pollProgress();
 
     /** Cancel the running separation (kills child process). */
-    void cancel();
+    bool cancel();
 
     /** Is a separation currently running? */
     bool isRunning() const;
+
+    /** Return true if the preferred stem model and its configuration are installed. */
+    static bool hasRequiredModel(const juce::File& modelsDir);
 
     /** Serialize stem file results to juce::var for the bridge. */
     static juce::var resultToJSON (const juce::StringPairArray& stemFiles, bool success,
@@ -161,6 +176,30 @@ public:
 
 private:
     friend class RuntimeSafetyRegression;
+    friend class AIQualificationHarness;
+    // Destroyed after the installer, its probes, and all background tasks.
+    AIRuntimeMaintenance::SessionLease maintenanceLease;
+    bool rebuildRequested = false;
+    void checkAutomaticRuntimeRepair();
+    juce::var automaticRuntimeRepairOptions() const;
+    juce::File qualificationDataRoot;
+    juce::String qualificationManifestUrl;
+    double qualificationGpuFraction = 0;
+    mutable std::atomic<unsigned int> qualificationHardwareProbeCount { 0 };
+    juce::String separationJobId;
+    unsigned long separationWorkerPid = 0;
+    bool separationOutputPublished = false;
+    void cleanupSeparationWorkspace();
+    struct SeparationRequest
+    {
+        juce::File input, output;
+        juce::StringArray stems;
+        juce::String mode, model, memoryMode, performanceMode;
+        int chunkDuration = 0;
+    };
+    SeparationRequest separationRequest;
+    int separationRecoveryCount = 0;
+    juce::String separationRecoveryReason;
     /** Get the OpenStudio app-data root directory. */
     juce::File getUserDataRoot() const;
 
@@ -229,6 +268,8 @@ private:
 
     struct RuntimeCapabilities
     {
+        juce::var probeReport;
+        juce::String interpreterPath;
         bool baseRuntimeReady = false;
         bool runtimeReady = false;
         bool modelInstalled = false;
@@ -258,6 +299,11 @@ private:
     struct InstallOptions
     {
         bool userConfirmedDownload = false;
+        bool cpuOnly = false;
+        bool repairRuntime = false;
+        bool automaticRepair = false;
+        juce::String requiredBackend;
+        juce::String prepareOptimization;
         juce::StringArray selectedFeatures;
         juce::String requestedFeature;
         juce::String modelId;
@@ -272,6 +318,7 @@ private:
         juce::int64 systemRamMb = 0;
         juce::String gpuBackend { "none" };
         juce::String gpuName;
+        juce::String gpuArchitecture;
         juce::int64 gpuMemoryMb = 0;
         bool gpuMemoryDetected = false;
         bool audioGenerationGpuSupported = false;
@@ -283,6 +330,7 @@ private:
 
     /** Parse feature-aware install options while preserving legacy bool behavior. */
     InstallOptions parseInstallOptions (const juce::String& optionsJson, bool legacyConfirmed) const;
+    static juce::StringArray featuresForRuntimeCandidate(const InstallOptions&, const AiToolsStatus&);
 
     /** Probe local hardware for conservative AI feature gating. */
     HardwareStatus probeHardwareStatus() const;
@@ -298,9 +346,6 @@ private:
                                                   const juce::File& modelsDir,
                                                   const juce::String& modelName,
                                                   const juce::String& accelerationMode = "auto") const;
-
-    /** Return true if the preferred stem model is available. */
-    bool hasRequiredModel (const juce::File& modelsDir) const;
 
     /** Return missing required files for a Stable Audio 3 Medium snapshot. */
     juce::StringArray getMissingStableAudioFiles (const juce::File& modelRoot, const juce::String& modelId = "stable-audio-3-medium") const;
@@ -331,7 +376,9 @@ private:
     /** Schedule a background refresh if one is not already running. */
     void scheduleStatusRefresh();
 
-    void publishStatusRefresh (const AiToolsStatus& status, juce::uint64 revision);
+    void publishStatusRefresh (const AiToolsStatus& status, juce::uint64 revision, const juce::var& maintenance = {});
+    void finishAutomaticRuntimeRepair();
+    juce::var evaluateRuntimeMaintenance(const RuntimeCapabilities&, const HardwareStatus&) const;
     static bool applyDiffusersSetupProgress (const juce::String& line, AiToolsStatus& status);
     friend class RuntimeSafetyRegression;
 
@@ -343,6 +390,8 @@ private:
 
     /** Parse a JSON line from the child process stdout. */
     SeparationProgress parseJsonLine (const juce::String& line) const;
+    void consumeSeparationOutput(const char* bytes, int count);
+    void consumeSeparationLine();
 
     /** Parse a JSON line from the installer child process stdout. */
     AiToolsStatus parseInstallJsonLine (const juce::String& line) const;
@@ -371,7 +420,13 @@ private:
     std::unique_ptr<OwnedChildProcess> childProcess;
     std::shared_ptr<OwnedChildProcess> installProcess;
     std::shared_ptr<OwnedChildProcess> diffusersInstallProcess;
-    juce::String outputBuffer;  // Accumulated stdout from child
+    std::string outputBuffer; // Decode UTF-8 only after assembling a complete line.
+    std::unique_ptr<juce::FileOutputStream> separationLog;
+    juce::File separationLogFile;
+    juce::String separationPhase;
+    juce::int64 separationLogBytes = 0;
+    bool separationLineOverflow = false;
+    bool separationExitHandled = false;
     juce::String installOutputBuffer;
     juce::int64 installLogReadOffset = 0;
     juce::StringArray installDiagnosticLines;
@@ -399,6 +454,12 @@ private:
     mutable bool statusRefreshInFlight = false;
     juce::uint64 aiToolsStatusRevision = 0;
     mutable bool initialStatusPrepared = false;
+    bool automaticRuntimeCheckRequested = false;
+    juce::String automaticRuntimeCheckedRoot;
+    bool automaticRuntimeRepairActive = false;
+    unsigned int automaticRuntimeRepairAttempts = 0;
+    juce::String automaticRuntimeTerminalState;
+    juce::var runtimeMaintenance;
     std::atomic<bool> aiToolsInstallWorkInProgress { false };
     std::atomic<bool> aiToolsCancelRequested { false };
     std::atomic<bool> aiToolsInstallMonitorStopRequested { false };

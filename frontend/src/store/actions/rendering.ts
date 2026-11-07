@@ -26,6 +26,7 @@ import { logBridgeError } from "../../utils/bridgeErrorHandler";
 import { getProjectEpoch } from "../../utils/projectLifetime";
 import { prepareForManualRender } from "../../utils/renderPreparation";
 import { serializeMIDIClipsForBackend } from "../../utils/midiClipSerialization";
+import { midiExportOptions } from "../../utils/midiExportOptions";
 import {
   cloneTimelineClipDeep,
   cloneTracksForTimelineUndo,
@@ -1155,7 +1156,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       }
       const filePath = await nativeBridge.showSaveDialog("OpenStudio Project.mid", "Export Project MIDI", "*.mid;*.midi");
       if (!filePath) return false;
-      const success = await nativeBridge.exportProjectMIDI(filePath, midiTracks);
+      const success = await nativeBridge.exportProjectMIDI(filePath, midiTracks, midiExportOptions(state));
       get().showToast(success ? "Project MIDI exported" : "Failed to export project MIDI", success ? "success" : "error");
       return success;
     },
@@ -1532,7 +1533,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const oldShape = clip.fadeInShape ?? 0;
       const nextShape = Math.max(0, Math.min(4, Math.round(shape)));
       if (oldShape === nextShape) return;
-      const applyShape = (fadeInShape: number) => set((state) => ({
+      const applyShape = (fadeInShape: number) => { set((state) => ({
         tracks: state.tracks.map((track) => ({
           ...track,
           clips: track.clips.map((candidate) => candidate.id === clipId
@@ -1540,7 +1541,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
             : candidate),
         })),
         isModified: true,
-      }));
+      })); void get().syncClipsWithBackend().catch(logBridgeError("fade-in curve")); };
       commandManager.execute({
         type: "SET_CLIP_FADE_IN_SHAPE",
         description: "Set clip fade-in shape",
@@ -1556,7 +1557,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
       const oldShape = clip.fadeOutShape ?? 0;
       const nextShape = Math.max(0, Math.min(4, Math.round(shape)));
       if (oldShape === nextShape) return;
-      const applyShape = (fadeOutShape: number) => set((state) => ({
+      const applyShape = (fadeOutShape: number) => { set((state) => ({
         tracks: state.tracks.map((track) => ({
           ...track,
           clips: track.clips.map((candidate) => candidate.id === clipId
@@ -1564,7 +1565,7 @@ export const renderingActions = (set: SetFn, get: GetFn) => ({
             : candidate),
         })),
         isModified: true,
-      }));
+      })); void get().syncClipsWithBackend().catch(logBridgeError("fade-out curve")); };
       commandManager.execute({
         type: "SET_CLIP_FADE_OUT_SHAPE",
         description: "Set clip fade-out shape",

@@ -61,6 +61,7 @@ bool ARAHostController::OpenStudioAudioAccessController::readAudioSamples (
     auto* sourceEntry = SourceConverter::fromHostRef (readerEntry->sourceHostRef);
     if (! sourceEntry || ! sourceEntry->reader) return false;
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     static int araReadCount = 0;
     if (araReadCount < 5)
     {
@@ -72,6 +73,7 @@ bool ARAHostController::OpenStudioAudioAccessController::readAudioSamples (
         ++araReadCount;
     }
 
+#endif
     if (readerEntry->use64Bit)
         return false;
 
@@ -318,6 +320,7 @@ void ARAHostController::OpenStudioModelUpdateController::notifyAudioSourceAnalys
     owner.debugAnalysisStarted.store(true, std::memory_order_release);
     owner.debugLastAnalysisProgressValue.store(value, std::memory_order_release);
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const int bucket = static_cast<int>(value * 20.0f);
     const int previousBucket = lastLoggedAnalysisBucket.exchange(bucket);
     if (bucket != previousBucket || state == ARA::kARAAnalysisProgressCompleted)
@@ -327,6 +330,7 @@ void ARAHostController::OpenStudioModelUpdateController::notifyAudioSourceAnalys
             + " state=" + juce::String(static_cast<int>(state))
             + " value=" + juce::String(value, 3));
     }
+#endif
 
     if (state == ARA::kARAAnalysisProgressCompleted)
         analysisComplete.store (true);
@@ -335,23 +339,35 @@ void ARAHostController::OpenStudioModelUpdateController::notifyAudioSourceAnalys
 void ARAHostController::OpenStudioModelUpdateController::notifyAudioSourceContentChanged (
     ARA::ARAAudioSourceHostRef audioSourceHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept
 {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     using SrcConverter = ARAHostModel::ConversionFunctions<ARASourceEntry*, ARA::ARAAudioSourceHostRef>;
     auto* entry = SrcConverter::fromHostRef(audioSourceHostRef);
     owner.noteEditDrivenDebugEvent("notifyAudioSourceContentChanged", entry != nullptr ? entry->clipId : juce::String());
+#else
+    juce::ignoreUnused(audioSourceHostRef);
+#endif
 }
 void ARAHostController::OpenStudioModelUpdateController::notifyAudioModificationContentChanged (
     ARA::ARAAudioModificationHostRef audioModificationHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept
 {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     using ModConverter = ARAHostModel::ConversionFunctions<ARASourceEntry*, ARA::ARAAudioModificationHostRef>;
     auto* entry = ModConverter::fromHostRef(audioModificationHostRef);
     owner.noteEditDrivenDebugEvent("notifyAudioModificationContentChanged", entry != nullptr ? entry->clipId : juce::String());
+#else
+    juce::ignoreUnused(audioModificationHostRef);
+#endif
 }
 void ARAHostController::OpenStudioModelUpdateController::notifyPlaybackRegionContentChanged (
     ARA::ARAPlaybackRegionHostRef playbackRegionHostRef, const ARA::ARAContentTimeRange*, ARA::ContentUpdateScopes) noexcept
 {
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     using RegConverter = ARAHostModel::ConversionFunctions<ARASourceEntry*, ARA::ARAPlaybackRegionHostRef>;
     auto* entry = RegConverter::fromHostRef(playbackRegionHostRef);
     owner.noteEditDrivenDebugEvent("notifyPlaybackRegionContentChanged", entry != nullptr ? entry->clipId : juce::String());
+#else
+    juce::ignoreUnused(playbackRegionHostRef);
+#endif
 }
 
 // Playback Controller
@@ -585,7 +601,6 @@ juce::String ARAHostController::addAudioSource (const juce::File& audioFile,
 
     auto& dc = araDocController->getDocumentController();
 
-    auto araLog = [] (const juce::String& msg) { logARADebugLine(msg); };
 
     try
     {
@@ -638,7 +653,7 @@ juce::String ARAHostController::addAudioSource (const juce::File& audioFile,
                 RegConverter::toHostRef (entry.get()), dc,
                 *entry->audioModification, regionProps);
 
-            araLog ("ARA: created source + modification + region inside edit guard");
+            logARADebugLine ("ARA: created source + modification + region inside edit guard");
         }
         // =====================================================================
         // Edit guard released — document is now in a stable state
@@ -652,7 +667,7 @@ juce::String ARAHostController::addAudioSource (const juce::File& audioFile,
         // =====================================================================
         entry->audioSource->enableAudioSourceSamplesAccess (true);
         debugSamplesAccessEnabledCount.fetch_add(1, std::memory_order_acq_rel);
-        araLog ("ARA: enableAudioSourceSamplesAccess(true) for " + clipId);
+        logARADebugLine ("ARA: enableAudioSourceSamplesAccess(true) for " + clipId);
 
         // =====================================================================
         // Step 2: Add region to BOTH renderers
@@ -666,19 +681,23 @@ juce::String ARAHostController::addAudioSource (const juce::File& audioFile,
         if (editorRenderer && editorRenderer->isValid())
             editorRenderer->add (*entry->playbackRegion);
 
-        araLog ("ARA: added region to playbackRenderer + editorRenderer");
+        logARADebugLine ("ARA: added region to playbackRenderer + editorRenderer");
 
         // =====================================================================
         // Step 3: Request analysis OUTSIDE the edit guard, after renderers updated
         // =====================================================================
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         double srcSampleRate = entry->reader->sampleRate;
         int srcChannels = static_cast<int> (entry->reader->numChannels);
         auto srcLength = entry->reader->lengthInSamples;
+#endif
         auto* sourceEntry = entry.get();
         sources[clipId] = std::move (entry);
         debugSourceCount.store(static_cast<int>(sources.size()), std::memory_order_release);
         debugPlaybackRegionCount.store(static_cast<int>(sources.size()), std::memory_order_release);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
         noteDebugOperation("clip_attach", clipId);
+#endif
 
         if (!requestedAnalysisContentTypes.empty())
         {
@@ -696,7 +715,7 @@ juce::String ARAHostController::addAudioSource (const juce::File& audioFile,
                 static_cast<ARA::ARASize> (requestedAnalysisContentTypes.size()),
                 requestedAnalysisContentTypes.data());
 
-            araLog ("ARA: requestAudioSourceContentAnalysis called for " + clipId
+            logARADebugLine ("ARA: requestAudioSourceContentAnalysis called for " + clipId
                 + " contentTypes=" + describeRequestedAnalysisContentTypes());
         }
         else
@@ -710,10 +729,10 @@ juce::String ARAHostController::addAudioSource (const juce::File& audioFile,
                 modelUpdateControllerPtr->analysisComplete.store(false, std::memory_order_release);
                 modelUpdateControllerPtr->lastLoggedAnalysisBucket.store(-1, std::memory_order_release);
             }
-            araLog ("ARA: skipped analysis request for " + clipId + " because plugin exposed no analyzeable content types");
+            logARADebugLine ("ARA: skipped analysis request for " + clipId + " because plugin exposed no analyzeable content types");
         }
 
-        araLog ("ARA: addAudioSource complete — " + clipId
+        logARADebugLine ("ARA: addAudioSource complete — " + clipId
             + " sr=" + juce::String (srcSampleRate)
             + " ch=" + juce::String (srcChannels)
             + " len=" + juce::String (srcLength)
@@ -722,7 +741,7 @@ juce::String ARAHostController::addAudioSource (const juce::File& audioFile,
     }
     catch (const std::exception& e)
     {
-        araLog ("ARA: ERROR in addAudioSource: " + juce::String (e.what()));
+        juce::Logger::writeToLog ("ARA: ERROR in addAudioSource: " + juce::String (e.what()));
         return {};
     }
 }
@@ -761,7 +780,9 @@ void ARAHostController::removeAudioSource (const juce::String& clipId)
     debugPlaybackRegionCount.store(static_cast<int>(sources.size()), std::memory_order_release);
     if (debugSamplesAccessEnabledCount.load(std::memory_order_acquire) > 0)
         debugSamplesAccessEnabledCount.fetch_sub(1, std::memory_order_acq_rel);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     noteDebugOperation("clip_remove", clipId);
+#endif
 }
 
 void ARAHostController::updatePlaybackRegion (const juce::String& clipId,
@@ -789,7 +810,9 @@ void ARAHostController::updatePlaybackRegion (const juce::String& clipId,
     regionProps.color = nullptr;
 
     entry->playbackRegion->update (regionProps);
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     noteEditDrivenDebugEvent("updatePlaybackRegion", clipId);
+#endif
 }
 
 void ARAHostController::processBlock (juce::AudioBuffer<float>& buffer, int numSamples,
@@ -944,6 +967,7 @@ ARAHostController::DebugSnapshot ARAHostController::getDebugSnapshot() const
         && debugSamplesAccessEnabledCount.load(std::memory_order_acquire) >= snapshot.sourceCount;
     snapshot.editorRendererAttached = editorRenderer != nullptr && editorRenderer->isValid();
     snapshot.playbackRendererAttached = playbackRenderer != nullptr && playbackRenderer->isValid();
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     snapshot.transportPlaying = debugTransportPlaying.load(std::memory_order_acquire);
     snapshot.transportPositionSeconds = debugTransportPositionSeconds.load(std::memory_order_acquire);
     snapshot.lastEditTimestampMs = debugLastEditTimestampMs.load(std::memory_order_acquire);
@@ -958,6 +982,7 @@ ARAHostController::DebugSnapshot ARAHostController::getDebugSnapshot() const
     snapshot.lastEditType = debugLastEditType;
     snapshot.lastOperation = debugLastOperation;
     snapshot.lastClipId = debugLastClipId;
+#endif
     return snapshot;
 }
 
@@ -1004,6 +1029,7 @@ void ARAHostController::noteEditDrivenDebugEvent(const juce::String& eventType, 
             debugLastClipId = clipId;
     }
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
     const bool transportPlaying = debugTransportPlaying.load(std::memory_order_acquire);
     const double positionSeconds = debugTransportPositionSeconds.load(std::memory_order_acquire);
     const double lastPlayStartTimestampMs = debugLastPlayStartTimestampMs.load(std::memory_order_acquire);
@@ -1016,6 +1042,7 @@ void ARAHostController::noteEditDrivenDebugEvent(const juce::String& eventType, 
         + " transportPlaying=" + juce::String(transportPlaying ? "true" : "false")
         + " transportPosition=" + juce::String(positionSeconds, 3)
         + " timeSinceLastPlayStartMs=" + juce::String(timeSinceLastPlayStartMs, 2));
+#endif
 }
 
 juce::String ARAHostController::describeRequestedAnalysisContentTypes() const
@@ -1034,7 +1061,7 @@ void ARAHostController::requestStartPlaybackFromPlugin() const
     if (!playbackRequestHandlers.startPlayback)
         return;
 
-    juce::Logger::writeToLog("ARAHostController: Plugin requested start playback");
+    logARADebugLine("ARAHostController: Plugin requested start playback");
     auto handler = playbackRequestHandlers.startPlayback;
     juce::MessageManager::callAsync([handler]() { handler(); });
 }
@@ -1044,7 +1071,7 @@ void ARAHostController::requestStopPlaybackFromPlugin() const
     if (!playbackRequestHandlers.stopPlayback)
         return;
 
-    juce::Logger::writeToLog("ARAHostController: Plugin requested stop playback");
+    logARADebugLine("ARAHostController: Plugin requested stop playback");
     auto handler = playbackRequestHandlers.stopPlayback;
     juce::MessageManager::callAsync([handler]() { handler(); });
 }
@@ -1054,7 +1081,7 @@ void ARAHostController::requestSetPlaybackPositionFromPlugin(double timePosition
     if (!playbackRequestHandlers.setPlaybackPosition)
         return;
 
-    juce::Logger::writeToLog("ARAHostController: Plugin requested playback position " + juce::String(timePosition));
+    logARADebugLine("ARAHostController: Plugin requested playback position " + juce::String(timePosition));
     auto handler = playbackRequestHandlers.setPlaybackPosition;
     juce::MessageManager::callAsync([handler, timePosition]() { handler(timePosition); });
 }
@@ -1064,7 +1091,7 @@ void ARAHostController::requestSetCycleRangeFromPlugin(double startTime, double 
     if (!playbackRequestHandlers.setCycleRange)
         return;
 
-    juce::Logger::writeToLog("ARAHostController: Plugin requested cycle range start="
+    logARADebugLine("ARAHostController: Plugin requested cycle range start="
         + juce::String(startTime) + " duration=" + juce::String(duration));
     auto handler = playbackRequestHandlers.setCycleRange;
     juce::MessageManager::callAsync([handler, startTime, duration]() { handler(startTime, duration); });
@@ -1075,7 +1102,7 @@ void ARAHostController::requestEnableCycleFromPlugin(bool enable) const
     if (!playbackRequestHandlers.enableCycle)
         return;
 
-    juce::Logger::writeToLog("ARAHostController: Plugin requested cycle " + juce::String(enable ? "enable" : "disable"));
+    logARADebugLine("ARAHostController: Plugin requested cycle " + juce::String(enable ? "enable" : "disable"));
     auto handler = playbackRequestHandlers.enableCycle;
     juce::MessageManager::callAsync([handler, enable]() { handler(enable); });
 }

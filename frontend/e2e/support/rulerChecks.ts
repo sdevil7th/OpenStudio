@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import type { DAWState, createDefaultTrack, useDAWStore } from "../../src/store/useDAWStore";
+import type { createDefaultTrack, DAWState, useDAWStore } from "../../src/store/useDAWStore";
 import type { BrowserRegressionReport } from "./interactionFixtureTypes";
 
 type RulerSeedOverrides = Partial<Pick<DAWState, "scrollX" | "projectRange">>;
@@ -15,8 +15,7 @@ interface RulerView {
 }
 declare global {
   interface Window {
-    __rulerGestureQA: { store: typeof useDAWStore };
-    __rulerGestureModules: { store: typeof useDAWStore; createDefaultTrack: typeof createDefaultTrack };
+    __rulerGestureQA: { store: typeof useDAWStore; createDefaultTrack: typeof createDefaultTrack };
   }
 }
 
@@ -47,23 +46,23 @@ export async function runRulerChecks(page: Page): Promise<BrowserRegressionRepor
     });
     await page.goto('/?platform=windows&windowChrome=native');
     await page.getByText('Starting OpenStudio...', { exact: true }).waitFor({ state: 'hidden' });
-    await page.getByRole('contentinfo', { name: 'Transport controls' }).waitFor({ state: 'visible' });
-    // Follow App's exact Vite URL, but let the document own module loading:
-    // Chromium can collect a CDP evaluation's pending dynamic-import Promise.
-    const appResponse = await page.request.get('/src/App.tsx');
-    assert(appResponse.ok(), 'App source must be available for the fixture');
-    const source = await appResponse.text();
+    await page.getByRole('contentinfo', { name: 'Transport controls' }).waitFor();
+    // Follow App's transformed import to retain the real store instance, but
+    // let the document own module loading. Chromium can collect a CDP
+    // evaluation's pending dynamic-import Promise before Vite finishes loading.
+    const response = await page.request.get('/src/App.tsx');
+    if (!response.ok()) throw new Error('App source was not available');
+    const source = await response.text();
     const storeUrl = source.match(/from "([^"]*useDAWStore\.ts[^"]*)"/)?.[1];
-    assert(storeUrl, 'Cannot locate the real App store import');
+    if (!storeUrl) throw new Error('Cannot locate the real App store import');
     await page.addScriptTag({ type: 'module', content: `
       import { useDAWStore as store, createDefaultTrack } from ${JSON.stringify(storeUrl)};
-      window.__rulerGestureModules = { store, createDefaultTrack };
+      window.__rulerGestureQA = { store, createDefaultTrack };
     ` });
-    await page.waitForFunction(() => Boolean(window.__rulerGestureModules));
+    await page.waitForFunction(() => Boolean(window.__rulerGestureQA));
     await page.evaluate(() => {
-      const { store, createDefaultTrack } = window.__rulerGestureModules;
+      const { store, createDefaultTrack } = window.__rulerGestureQA;
       const track = createDefaultTrack('ruler-browser-qa', 'Ruler browser QA', '#4379ee', 'audio', []);
-      window.__rulerGestureQA = { store };
       store.setState({
         tracks: [track], selectedTrackId: track.id, selectedTrackIds: [track.id],
         selectedClipId: null, selectedClipIds: [], recordingClips: [], recordingMIDIPreviews: {},
@@ -83,7 +82,7 @@ export async function runRulerChecks(page: Page): Promise<BrowserRegressionRepor
     assert(await canvas.count() === 1, 'App must mount exactly one visible workspace ruler');
     assert(await page.locator('.workspace-main-row .timeline-container').count() === 1,
       'Real App timeline must remain mounted beside its track controls');
-    assert(await page.locator('.timeline-container .sticky canvas').count() === 0,
+    assert(await page.locator('.timeline-container [data-wheel-subtarget="ruler"] canvas').count() === 0,
       'Regression must exercise the extracted App ruler rather than the hidden Timeline ruler');
 
     const seed = async (options: RulerSeedOverrides = {}) => {

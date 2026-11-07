@@ -472,6 +472,7 @@ def probe_runtime_capabilities(
     acceleration_mode: str = "auto",
     music_checkpoint_root: str = "",
     music_model_id: str = DEFAULT_MUSIC_GEN_MODEL,
+    include_installed_features: bool = False,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     music_layout = get_music_generation_required_paths(
@@ -528,6 +529,15 @@ def probe_runtime_capabilities(
         "backendDecisionTrace": [],
         "probeDurationMs": 0,
     }
+
+    if include_installed_features:
+        # Preserve shared generation dependencies even when a broken Torch
+        # import prevents the ordinary readiness probe from reaching them.
+        report["installedRuntimeFeatures"] = []
+        if _get_dist_version("audio-separator"):
+            report["installedRuntimeFeatures"].append("stemSeparation")
+        if _get_dist_version("diffusers") or _get_dist_version("ace-step"):
+            report["installedRuntimeFeatures"].append("audioGeneration")
 
     if models_dir and model_name:
         model_path = Path(models_dir) / model_name
@@ -806,6 +816,7 @@ def main() -> int:
         default="auto",
         help="Acceleration policy to evaluate",
     )
+    parser.add_argument("--include-installed-features", action="store_true")
     args = parser.parse_args()
 
     report = probe_runtime_capabilities(
@@ -814,6 +825,7 @@ def main() -> int:
         acceleration_mode=args.acceleration_mode,
         music_checkpoint_root=args.music_gen_checkpoint_root,
         music_model_id=args.music_gen_model,
+        include_installed_features=args.include_installed_features,
     )
     print(json.dumps(report), flush=True)
     return 0 if report.get("baseRuntimeReady") else 1

@@ -26,6 +26,13 @@ On Windows the Debug executable is
 `build/OpenStudio_artefacts/Debug/OpenStudio.exe`. Its packaged fallback is the
 copied `webui` directory beside the executable.
 
+The Windows MSVC Debug host uses optimized code with debug symbols, `_DEBUG`,
+the Debug CRT and assertions retained. This keeps shared inline audio helpers
+optimized even when their linked definition comes from a UI or test file.
+Stepping and local-variable inspection can be less direct than in unoptimized
+code. The WebView2 JUCE module retains its `/O1` exception, and Debug links are
+nonincremental so replaced helper definitions are selected afresh.
+
 ## Manual testing handoff
 
 The user-facing command remains `python build.py dev --run`. After frontend or
@@ -37,6 +44,26 @@ processes and do not leave a task-owned process on port 5183.
 A Debug build is evidence for that configuration only. Release and installed
 WebView startup are qualified separately; see the
 [release smoke checklist](docs/release-smoke-checklist.md).
+
+## Offline support
+
+Offline support runs in a separate, manually opened process after the DAW is closed.
+Release packaging includes **OpenStudio Support** with its own runtime and separate
+Windows, macOS and Linux launchers; users need no Python or terminal. Read [offline support](docs/offline-support.md)
+for build commands, qualification, privacy review and platform limits. Source launch
+remains `python tools/openstudio-support.py`. Test with
+`python -m unittest tools.test_openstudio_support -v` and qualify the actual executable
+with `python tools/test-packaged-support.py --bundle <runtime-folder>`. Tool-only
+changes do not change native app/frontend assets or require a DAW rebuild.
+
+Ordinary builds use `OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS=OFF`. For an explicitly
+requested profiling reproduction only, configure a separate build directory with
+`-DOPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS=ON`. This enables measurements that have
+runtime cost; it is not the shipping performance baseline. Packaging validates
+`OpenStudio.build-policy.json` and rejects missing, mismatched or instrumented
+builds. Do not edit that generated policy to bypass the gate. An unavailable
+callback measurement must remain `not_asserted` in qualification reports.
+
 
 ## Frontend checks
 

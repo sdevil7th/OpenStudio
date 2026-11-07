@@ -191,7 +191,7 @@ function auditionNote(midiPitch: number, durationMs = 200) {
   osc.stop(ctx.currentTime + durationMs / 1000 + 0.05);
 }
 
-export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
+export function PitchEditorLowerZone({ height, onCanvasReady }: { height?: number; onCanvasReady?: () => void } = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number>(0);
@@ -551,6 +551,13 @@ export function PitchEditorLowerZone({ height }: { height?: number } = {}) {
     }
     staticCanvasRef.current = offscreen;
   }, [pixelRatio, canvasSize, viewport, notes, contour, selectedNoteIds, hoveredNoteId, currentTime, isPlaying, bpm, timeSignature, scaleNotes, scaleKey, renderCoverage]);
+
+  // A detached view acknowledges its rendered canvas, including a delayed mount
+  // or a hidden window becoming visible. Reuse the existing resize observation;
+  // a fixed number of animation frames can run before React mounts the canvas.
+  useEffect(() => {
+    if (onCanvasReady && canvasRef.current?.getBoundingClientRect().width) onCanvasReady();
+  }, [onCanvasReady, canvasSize]);
 
   // Playhead RAF — during playback, blit cached static canvas + draw playhead only.
   // This avoids a full renderPitchEditor() (grid, notes, contour) at 60fps.

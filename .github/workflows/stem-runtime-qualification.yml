@@ -1,0 +1,87 @@
+name: Real stem runtime qualification
+
+# Hosted runners do not prove NVIDIA execution. Run this gate on each actual
+# hardware class before shipping runtime/installer changes; retain the reports.
+on:
+  workflow_dispatch:
+    inputs:
+      runner_labels:
+        description: 'JSON runner labels for the hardware under test'
+        default: '["self-hosted","Windows","X64","cuda"]'
+        required: true
+      backend:
+        type: choice
+        options: [cuda, rocm, cpu, directml]
+        default: cuda
+      expected_backend:
+        type: choice
+        options: [cuda, rocm, cpu]
+        default: cuda
+      existing_runtime:
+        description: Existing runtime directory on that runner (copied, never modified)
+        required: true
+      fresh_base_runtime:
+        description: Fresh base directory for non-Windows; blank downloads public Windows base
+        default: ''
+      models_dir:
+        description: Stem checkpoint cache on that runner (downloaded if absent)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        origin: [fresh, existing]
+        features: [stemSeparation, 'stemSeparation,audioGeneration']
+    env:
+      QA_ORIGIN: ${{ matrix.origin }}
+      QA_FEATURES: ${{ matrix.features }}
+      QA_BACKEND: ${{ inputs.backend }}
+      QA_EXPECTED: ${{ inputs.expected_backend }}
+      QA_EXISTING: ${{ inputs.existing_runtime }}
+      QA_FRESH: ${{ inputs.fresh_base_runtime }}
+      QA_MODELS: ${{ inputs.models_dir }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Stage the app's pinned Windows FFmpeg runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/setup-ffmpeg.ps1
+      - name: Install through the real CLI, then separate on this hardware
+        shell: python {0}
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / ("stem-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"] + "-" + os.environ["QA_ORIGIN"] + "-" + os.environ["QA_FEATURES"].replace(",", "-"))
+          args = [sys.executable, "tools/qualify_stem_installation.py", "--output-dir", str(root),
+                  "--backend", os.environ["QA_BACKEND"], "--expected-auto-backend", os.environ["QA_EXPECTED"],
+                  "--features", os.environ["QA_FEATURES"], "--models-dir", os.environ["QA_MODELS"],
+                  "--skip-generation-checkpoints"]
+          base = os.environ["QA_EXISTING"] if os.environ["QA_ORIGIN"] == "existing" else os.environ["QA_FRESH"]
+          if base:
+              args += ["--base-runtime", base]
+          if sys.platform in {"win32", "linux"}:
+              args += ["--catalog", "https://openstudio.org.in/releases/ai-runtime/stable/latest.json"]
+          result = subprocess.run(args)
+          with open(os.environ["GITHUB_ENV"], "a") as out:
+              out.write("STEM_QA_OUTPUT=" + str(root) + "\n")
+          sys.exit(result.returncode)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: stem-${{ matrix.origin }}-${{ matrix.features }}
+          path: |
+            ${{ env.STEM_QA_OUTPUT }}/report.json
+            ${{ env.STEM_QA_OUTPUT }}/*.log
+            ${{ env.STEM_QA_OUTPUT }}/separation/report.json
+            ${{ env.STEM_QA_OUTPUT }}/separation/*.log
+            ${{ env.STEM_QA_OUTPUT }}/streaming-separation/report.json
+            ${{ env.STEM_QA_OUTPUT }}/streaming-separation/*.log
+          if-no-files-found: error

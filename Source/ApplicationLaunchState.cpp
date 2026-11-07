@@ -32,6 +32,16 @@ void addCandidate(juce::StringArray& candidates, const juce::String& candidate)
 }
 }
 
+bool OpenStudioLaunchState::isOrdinaryLaunch(const juce::String& commandLine)
+{
+    const auto path = commandLine.trim().unquoted();
+    if (path.isEmpty()) return true;
+    if (!isSupportedProjectPath(path)) return false;
+    for (const auto& token : juce::StringArray::fromTokens(commandLine, true))
+        if (token.unquoted().startsWithChar('-')) return false;
+    return true;
+}
+
 juce::String OpenStudioLaunchState::normalisePendingProjectPath(const juce::String& commandLineOrPath)
 {
     juce::StringArray candidates;

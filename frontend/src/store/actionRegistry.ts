@@ -1,3 +1,4 @@
+import { exportMIDISelection } from "../utils/midiSelectionExport";
 import { importMediaWithDialog } from "../services/mediaImport";
 import { appDialogs } from "../services/appDialogs";
 /**
@@ -8,6 +9,7 @@ import { appDialogs } from "../services/appDialogs";
 import { useAppUpdateStore } from "./appUpdateStore";
 import { nativeBridge } from "../services/NativeBridge";
 import { commandManager } from "./commands";
+import { canEditSelectedCrossfade, canJoinSelectedMIDIClips, selectedCrossfadePairs } from "./actions/timelineEnhancements";
 import {
   getMinimumVisibleTrackHeight,
   useDAWStore,
@@ -36,10 +38,6 @@ import {
 } from "../utils/shortcutProfiles";
 import { resolveCustomShortcutBindings } from "../utils/customShortcutProfiles";
 import { parseMIDINotePairs } from "../utils/midiNotes";
-import {
-  getVisibleMIDIEventsForClip,
-  serializeMIDIClipsForBackend,
-} from "../utils/midiClipSerialization";
 import {
   getActiveShortcutContext,
   shortcutContextKey,
@@ -212,26 +210,25 @@ export function hasActiveScopedActionExecutor(actionId: string): boolean {
   return key !== "application" && ownsAction("application");
 }
 
-export function executeActiveScopedAction(actionId: string): ShortcutHandlerResult {
-  const key = shortcutContextKey(getActiveShortcutContext());
-  const executeRegistrations = (
-    registrations: readonly ScopedActionExecutorRegistration[] | undefined,
-  ): ShortcutHandlerResult => {
-    if (!registrations) return "unmatched";
-    for (let index = registrations.length - 1; index >= 0; index -= 1) {
-      const result = registrations[index].execute(actionId);
-      if (result !== "unmatched") return result;
-    }
-    return "unmatched";
-  };
+function executeScopedAction(context: EditShortcutContext, actionId: string): ShortcutHandlerResult {
+  const registrations = scopedActionExecutors.get(shortcutContextKey(context));
+  if (!registrations) return "unmatched";
+  for (let index = registrations.length - 1; index >= 0; index -= 1) {
+    const result = registrations[index].execute(actionId);
+    if (result !== "unmatched") return result;
+  }
+  return "unmatched";
+}
 
-  const scopedResult = executeRegistrations(scopedActionExecutors.get(key));
-  if (scopedResult !== "unmatched" || key === "application") return scopedResult;
+export function executeActiveScopedAction(actionId: string): ShortcutHandlerResult {
+  const context = getActiveShortcutContext();
+  const scopedResult = executeScopedAction(context, actionId);
+  if (scopedResult !== "unmatched" || context.kind === "application") return scopedResult;
 
   // Always-mounted shell controls (for example, Transport and Main Toolbar
   // popovers) do not own focus. Their application executor remains available
   // after the user has interacted with an editor-specific surface.
-  return executeRegistrations(scopedActionExecutors.get("application"));
+  return executeScopedAction({ kind: "application" }, actionId);
 }
 
 function activeEditorAction(
@@ -1685,7 +1682,7 @@ export function getRegisteredActions(): ActionDef[] {
       shortcut: "Ctrl+Shift+E",
       shortcutScope: "timeline",
       canHandleShortcut: () => hasActiveScopedActionExecutor("view.zoomToSelection") && hasFiniteTimeSelection(),
-      execute: () => { executeActiveScopedAction("view.zoomToSelection"); },
+      execute: () => { executeScopedAction({ kind: "timeline" }, "view.zoomToSelection"); },
     },
     { id: "view.zoomIn", name: "Zoom In", category: "View", shortcut: "+", shortcutAliases: ["=", "Shift++", "NumpadAdd", "Ctrl++", "Ctrl+=", "Ctrl+Shift++"], execute: () => {
       const state = s();
@@ -1710,7 +1707,10 @@ export function getRegisteredActions(): ActionDef[] {
       shortcut: "Ctrl+0",
       shortcutScope: "timeline",
       canHandleShortcut: () => hasActiveScopedActionExecutor("view.zoomToFit") && hasTimelineProjectExtent(),
-      execute: () => { executeActiveScopedAction("view.zoomToFit"); },
+      // Menus temporarily own the modal shortcut scope. The named project
+      // command still targets the Timeline; keyboard availability above keeps
+      // its existing scope instead of borrowing another editor's zoom action.
+      execute: () => { executeScopedAction({ kind: "timeline" }, "view.zoomToFit"); },
     },
     { id: "view.setLoopToSelection", name: "Set Loop to Selection", category: "View", shortcut: "Ctrl+L", canHandleShortcut: () => Boolean(s().timeSelection), execute: () => {
       if (s().timeSelection) s().setLoopToSelection();
@@ -1932,6 +1932,13 @@ export function getRegisteredActions(): ActionDef[] {
         state.openPitchEditor(track.id, clipId, -1);
       }
     }},
+    { id: "clip.detectSelectedTempo", name: "Detect Selected Clip Tempo...", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => selectedTimelineClips().length === 1, execute: () => {
+      const entry = selectedTimelineClips()[0];
+      if (entry) s().openTempoDetection(entry.track.id, entry.clip.id);
+    } },
+    { id: "clip.joinSelectedMidi", name: "Join Selected MIDI Clips", category: "Clip", shortcut: "Ctrl+J", shortcutScope: "timeline", canHandleShortcut: () => canJoinSelectedMIDIClips(s()), execute: () => { s().joinSelectedMIDIClips(); } },
+    { id: "clip.crossfadeSelected", name: "Crossfade Selected Audio Clips", category: "Clip", shortcut: "Shift+X", shortcutScope: "timeline", canHandleShortcut: () => selectedCrossfadePairs(s()).length > 0, execute: () => { s().crossfadeSelectedClips(); } },
+    { id: "clip.editSelectedCrossfade", name: "Edit Selected Crossfade...", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => canEditSelectedCrossfade(s()), execute: () => { s().editSelectedCrossfade(); } },
     { id: "clip.openSelectedInPianoRoll", name: "Open Selected MIDI Clip in Piano Roll", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => selectedTimelineClips().some((entry) => entry.kind === "midi"), execute: () => {
       const entry = selectedTimelineClips().find((candidate) => candidate.kind === "midi");
       if (entry) s().openPianoRoll(entry.track.id, entry.clip.id);
@@ -2071,31 +2078,8 @@ export function getRegisteredActions(): ActionDef[] {
         s().scaleSelectedMIDINoteVelocity(trackId, clipId, 0.9);
       });
     }},
-    { id: "clip.exportSelectedMidi", name: "Export Selected MIDI Clip...", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => selectedTimelineClips().some((entry) => entry.kind === "midi"), execute: () => {
-      const entry = selectedTimelineClips().find((candidate) => candidate.kind === "midi");
-      if (!entry) return;
-      void (async () => {
-        const midiClip = entry.clip;
-        const filePath = await nativeBridge.showSaveDialog(
-          `${midiClip.name || "MIDI Clip"}.mid`,
-          "Export MIDI Clip",
-          "*.mid;*.midi",
-        );
-        if (!filePath) return;
-        const exported = serializeMIDIClipsForBackend(
-          [{ ...midiClip, startTime: 0 }],
-          entry.track.midiEffects || [],
-        )[0];
-        const success = await nativeBridge.exportProjectMIDI(filePath, [{
-          name: entry.track.name || "MIDI Track",
-          clips: [{
-            startTime: 0,
-            duration: exported?.duration ?? midiClip.duration,
-            events: exported?.events ?? getVisibleMIDIEventsForClip(midiClip),
-          }],
-        }]);
-        s().showToast(success ? "MIDI clip exported" : "Failed to export MIDI clip", success ? "success" : "error");
-      })();
+    { id: "clip.exportSelectedMidi", name: "Export Selected MIDI Clips...", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => selectedTimelineClips().some((entry) => entry.kind === "midi"), execute: () => {
+      void exportMIDISelection(s());
     }},
     { id: "clip.renderSelectedInPlace", name: "Render Selected Clip in Place", category: "Clip", shortcutScope: "timeline", canHandleShortcut: () => {
       const state = s();

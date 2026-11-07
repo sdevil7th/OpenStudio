@@ -16,6 +16,7 @@ import {
 
 import { X, Save, Trash2, ExternalLink, ArrowDownToLine, Plus, Power } from "lucide-react";
 import { ChannelStrip } from "./ChannelStrip";
+import { PanelResizeHandle } from "./PanelResizeHandle";
 import { SortableTrack } from "./SortableTrack";
 import { DetachablePanel } from "./DetachablePanel";
 import { useDAWStore, Track, MixerSnapshot } from "../store/useDAWStore";
@@ -35,6 +36,8 @@ import {
 
 interface MixerPanelProps {
   dockedHeight?: number;
+  maxDockedHeight?: number;
+  onResize?: (height: number, persist?: boolean) => void;
   isVisible: boolean;
   isDetached?: boolean;
   renderInOwnWindow?: boolean;
@@ -45,6 +48,8 @@ interface MixerPanelProps {
 
 export function MixerPanel({
   dockedHeight = 340,
+  maxDockedHeight = 1200,
+  onResize,
   isVisible,
   isDetached = false,
   renderInOwnWindow = false,
@@ -52,6 +57,7 @@ export function MixerPanel({
   onAttach,
   onClose,
 }: MixerPanelProps) {
+  const mixerId = useId();
   const {
     tracks,
     masterVolume,
@@ -410,8 +416,16 @@ export function MixerPanel({
 
   const mixerContent = (
     <section
+      id={mixerId}
+      inert={!isVisible}
+      aria-hidden={!isVisible}
       aria-label="Mixer"
-      onPointerDownCapture={(event) => activateMixerContext(event.target)}
+      onPointerDownCapture={(event) => {
+        // Resizing is temporary panel geometry, not a change of editing owner.
+        // Capture runs before the handle can stop bubbling or prevent focus.
+        if ((event.target as Element).closest("[data-panel-resize-handle]")) return;
+        activateMixerContext(event.target);
+      }}
       onContextMenuCapture={(event) => activateMixerContext(event.target)}
       onFocusCapture={(event) => activateMixerContext(event.target)}
       data-shortcut-context="mixer"
@@ -425,12 +439,23 @@ export function MixerPanel({
           }
       }
     >
-      {/* Header */}
-      <div className="h-5 bg-neutral-900 border-b border-neutral-700 flex items-center justify-between px-2 shrink-0">
-        <span className="text-[9px] font-semibold text-neutral-400 uppercase tracking-wider">
+      {/* Keep resize and window actions in one row, with separate hit targets. */}
+      <header className="h-7 bg-neutral-900 border-b border-neutral-700 flex items-center justify-between gap-2 px-2 shrink-0">
+        <span className="shrink-0 text-[9px] font-semibold text-neutral-400 uppercase tracking-wider">
           Mixer
         </span>
-        <div className="flex items-center gap-0.5">
+        {!isDetached && isVisible && onResize && (
+          <PanelResizeHandle
+            label="Resize mixer"
+            controls={mixerId}
+            height={dockedHeight}
+            min={96}
+            max={Math.max(96, maxDockedHeight)}
+            defaultHeight={340}
+            onResize={onResize}
+          />
+        )}
+        <div className="flex shrink-0 items-center gap-0.5">
           {isDetached ? (
             <Button
               variant="ghost"
@@ -464,7 +489,7 @@ export function MixerPanel({
             </Button>
           )}
         </div>
-      </div>
+      </header>
 
       {/* Mixer Snapshots Toolbar */}
       <div className="h-6 bg-neutral-900/60 border-b border-neutral-700/50 flex items-center gap-1 px-2 shrink-0 overflow-x-auto">

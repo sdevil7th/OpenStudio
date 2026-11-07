@@ -30,8 +30,8 @@ def parser():
     value.add_argument("--repeats", type=int, default=3)
     value.add_argument("--device")
     value.add_argument("--attention", choices=["native", "flash", "xformers", "aiter", "sage"], default="native")
-    value.add_argument("--placement", choices=["auto", "resident", "model-offload", "partial-resident", "partial-resident-disk", "group-offload"], default="auto")
-    value.add_argument("--quantization", choices=["none", "int8", "torchao-int8"], default="none")
+    value.add_argument("--placement", choices=["auto", "resident", "model-offload", "partial-resident", "partial-resident-disk", "group-offload", "group-offload-disk"], default="auto")
+    value.add_argument("--quantization", choices=["none", "int8", "torchao-int8", "fp8-storage"], default="none")
     value.add_argument("--int8-reserve-gib", type=float, choices=[1.5, 2, 3], default=3)
     value.add_argument("--compile", action="store_true", help="Qualify repeated-block compilation in this isolated worker.")
     value.add_argument("--minimax-capacity-only", action="store_true",
@@ -220,6 +220,10 @@ def run(args):
                     save(args.output_dir / "progress.json", {"run": index, **event,
                          "memory": event["memory"]})
             output = args.output_dir / f"run-{index}.wav"
+            trace = None
+            if args.compile and index == args.repeats - 1:
+                trace = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU])
+                trace.start()
             if args.model == "ace-step-v15-xl-turbo":
                 from generate_music import build_generation_spec, prepare_source_segment, SOURCE_WORKFLOWS
                 class Reporter:
@@ -230,6 +234,7 @@ def run(args):
                 source_request = prepare_source_segment(raw_params=request["params"], output_path=output,
                     request_id=f"bench-{index}") if request["workflow"] in SOURCE_WORKFLOWS else None
                 spec = build_generation_spec(request["workflow"], request["params"], source_request=source_request)
+                report["normalizedDuration"] = spec.duration
                 if args.compile and index == 0:
                     from ai_execution_policy import compile_components
                     session.configure_memory(spec.duration, Reporter())
@@ -289,6 +294,13 @@ def run(args):
                     raise RuntimeError("Previous GPU waveform is still retained before the next request.")
                 if output_ref is not None:
                     output_lifetime["allocatedAfterRelease"] = torch.cuda.memory_allocated(selected.device)
+            if trace is not None:
+                trace.stop()
+                regions = [event.key for event in trace.key_averages() if "Torch-Compiled Region" in event.key]
+                if not regions:
+                    raise RuntimeError("Model generation executed no observed Torch-Compiled Region")
+                report["compilation"].update(state="pass", observedRegions=regions,
+                                             qualification="local_model_forward", profiledRun=index)
             seconds = time.perf_counter() - start
             valid = bool(data.size and np.isfinite(data).all() and data.ndim == 2 and data.shape[1] == 2)
             if args.minimax_capacity_only:
@@ -296,7 +308,8 @@ def run(args):
                 # requires at least the requested duration, not sample equality.
                 valid = valid and len(data)/rate >= kwargs["duration"] - .05
             report["runs"].append({"index": index, "seconds": seconds, "warm": index > 0,
-                "generatedSeconds": len(data)/rate, "sampleRate": rate, "status": "pass" if valid else "fail",
+                "generatedSeconds": len(data)/rate, "sampleRate": rate, "profiled": trace is not None,
+                "status": "pass" if valid else "fail",
                 "execution": dict(session.execution_details), "events": events})
             if args.minimax_capacity_only:
                 report["runs"][-1]["capacityEvidence"] = capacity_evidence
@@ -308,7 +321,7 @@ def run(args):
             if not valid:
                 report["status"] = "fail"
                 return 1
-        warm = [item["seconds"] for item in report["runs"] if item["warm"]]
+        warm = [item["seconds"] for item in report["runs"] if item["warm"] and not item.get("profiled")]
         if warm:
             report["warmSeconds"] = {"median": statistics.median(warm), "min": min(warm), "max": max(warm)}
         report["status"] = "pass"
@@ -391,8 +404,9 @@ def main():
     if (args.repeats < 1 or args.repeats > 20 or not math.isfinite(args.timeout) or args.timeout <= 0
             or not math.isfinite(args.duration) or args.duration <= 0 or args.min_available_ram_mb < 256):
         raise SystemExit("Use 1-20 repeats, positive finite duration/timeout, and a RAM floor of at least 256 MiB.")
-    if args.compile and (args.placement != "resident" or args.quantization != "none"):
-        raise SystemExit("Compilation evaluation currently requires unquantized resident placement.")
+    if args.compile and (args.quantization != "none" or not (args.placement == "resident" or
+            args.model == "ace-step-v15-xl-turbo" and args.placement == "group-offload-disk")):
+        raise SystemExit("Compilation evaluation requires unquantized resident placement or ACE-Step mapped disk groups.")
     if args.int8_reserve_gib != 3 and (args.model != "minimax-music-3" or args.quantization != "int8" or args.placement != "model-offload"):
         raise SystemExit("Reduced reserves are MiniMax INT8 stage candidates only.")
     if not args.probe and (not args.model or not args.model_root or not args.model_root.is_dir()):

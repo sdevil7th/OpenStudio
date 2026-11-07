@@ -286,6 +286,12 @@ The main implementation lives in:
 - Prepared models and IRs are published atomically and retired after readers
   have left the previous graph.
 - The callback uses preallocated buffers and bounded work.
+- Native NAM input/track FX are prepared for the actual host block capacity,
+  including tiny device buffers and offline-render re-preparation. The host's
+  minimum-512 preparation reserve remains for other processors. This avoids
+  oversized cabinet FFT work without adding convolution latency; master/bus
+  preparation is unchanged. Small-buffer hardware capacity remains a separate
+  qualification requirement.
 - Sample-rate conversion is explicit around NAM models whose expected rate
   differs from the host.
 - Fixed latency is reported to the host, with aligned dry paths during bypass

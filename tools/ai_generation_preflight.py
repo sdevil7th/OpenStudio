@@ -64,11 +64,24 @@ def preflight(model, root, request):
         raise ValueError("Generation parameters must be an object.")
     from ai_model_variants import requested_variant, variant_root, validate_variant, require_int8_device
     variant = requested_variant(params)
+    from ai_compilation import validate_optimization
+    optimization = validate_optimization(params.get("generationOptimization", "standard"), model, variant)
+    compilation_policy = None
+    if optimization == "compile" and model == "stable-audio-3-medium":
+        from ai_compiler_profile import validate_compiler_device
+        compilation_policy = validate_compiler_device(torch, selected.device)
+    if optimization == "fp8-storage":
+        from ai_layerwise_storage import validate_fp8_device
+        validate_fp8_device(torch, selected.device)
     if variant == "int8":
         root = variant_root(model)
         validate_variant(root, model)
         require_int8_device(torch)
     root = resolve_root(root, model)
+    startup_policy = None
+    if optimization == "rocm-fast-startup":
+        from ai_rocm_startup import validate_rocm_startup
+        startup_policy = validate_rocm_startup(torch, selected.device, root)
     duration = request_duration(model, workflow, params)
     gpu = selected.family in {"cuda", "rocm", "xpu"}
     bf16 = selected.family in {"cuda", "rocm"} and torch.cuda.is_bf16_supported()
@@ -77,27 +90,59 @@ def preflight(model, root, request):
     ram = host_available()
     free_gpu = device_budget(torch, selected.device) if gpu else None
     reserve = int((3 + max(0, duration - 30) / 60) * GIB)
+    if startup_policy:
+        from ai_rocm_startup import rocm_startup_reserve
+        reserve = rocm_startup_reserve(duration)
     components = [checkpoint_storage_bytes(child, width) for child in root.iterdir() if child.is_dir()]
     largest = max((value for value in components if value is not None), default=weights or 0)
     from diffusers_audio_pipeline import plan_audio_memory, plan_minimax_memory
     placement = plan_audio_memory(free_gpu, weights or 0, largest, duration,
-        allow_group=model != "stable-audio-3-medium") if gpu else "resident"
+        allow_group=model != "stable-audio-3-medium", reserve_bytes=reserve if startup_policy else None) if gpu else "resident"
     required_gpu = ((weights if placement == "resident" else largest) + reserve
                     if gpu and weights is not None and placement != "group-offload" else None)
-    if model == "minimax-music-3" and selected.family in {"cuda", "rocm"}:
-        placement = plan_minimax_memory(free_vram=free_gpu, available_ram=ram,
-            weights_bytes=weights or 0,
-            language_model_bytes=checkpoint_storage_bytes(root / "language_model", width) or 0,
-            bf16=bf16).mode
-        scale = 1 if bf16 else 2
-        required_gpu = (max(weights or 0, 23 * scale * GIB) + 3 * GIB if placement == "resident"
-                        else 22 * scale * GIB + 3 * GIB if placement == "model-offload" else None)
+    minimax_memory = None
+    if model == "minimax-music-3" and selected.family in {"cuda", "rocm"} and variant != "int8":
+        from ai_execution_policy import minimax_checkpoint_memory, minimax_prompt_tokens
+        import stable_audio3_generate as worker
+        previous_model = worker.MODEL_ID
+        try:
+            worker.MODEL_ID = model
+            normalized, _ = worker.build_generation_request(workflow, params)
+        finally:
+            worker.MODEL_ID = previous_model
+        tokens = minimax_prompt_tokens(root, normalized["prompt"], normalized["lyrics"])
+        minimax_memory = minimax_checkpoint_memory(root,float_bytes=width,duration=duration,
+            prompt_tokens=tokens,free_vram=free_gpu,available_ram=ram)
+        if minimax_memory:
+            placement = minimax_memory["placement"]
+            required_gpu = minimax_memory["requiredDeviceBytes"]
     report = {"schemaVersion": 1, "checkedAt": time.time(), "modelId": model, "duration": duration,
         "device": selected.device, "deviceName": selected.name, "unifiedMemory": selected.unified_memory,
         "precision": "BF16" if bf16 else "FP32", "placement": placement,
         "estimateBasis": "Checkpoint weights and duration-dependent working reserve; runtime peaks may differ.",
         "memory": [], "notes": [], "status": "warning"}
+    report["optimization"] = optimization
+    if compilation_policy:
+        report["compilationPolicy"] = compilation_policy
+        report["placement"] = "resident"
+        report["notes"].append("Compiled generation requires resident placement. This conservative estimate can differ from measured peaks; first-generation compilation adds startup time.")
+    if startup_policy:
+        if placement != "resident":
+            raise ValueError("Faster AMD startup currently requires resident placement; choose Automatic for offloading")
+        report["startupPolicy"] = startup_policy
+        report["activationReserveBytes"] = reserve
+        report["notes"].append("Qualified AMD fast convolution selection; precision and musical settings are unchanged. This preference applies to a new worker.")
+    if optimization == "fp8-storage":
+        report["precision"] = "FP8 transformer storage / BF16 computation"
+        report["placement"] = "resident"
+        report["notes"].append("FP8 storage is an explicit local setting. This conservative estimate retains original weight bytes; processing details report actual allocation. Audition the result.")
     required_ram = weights + 3 * GIB if weights is not None else None
+    if minimax_memory:
+        required_ram = minimax_memory["requiredHostBytes"]
+        report.update(loadingPlan=minimax_memory, promptTokens=tokens,
+                      estimateBasis="Model size, song length, lyrics, and space needed while loading.")
+        if minimax_memory["loadingBacking"] == "disk":
+            report["notes"].append("Automatic memory management loads the model in stages and temporarily keeps inactive parts on disk. It keeps the selected precision; transfers can be slow.")
     qualification_error = ""
     strict = False
     if model == "minimax-music-3" and "modelVariant" not in params:
@@ -152,6 +197,9 @@ def preflight(model, root, request):
         report["memory"].append(memory_row("GPU memory", free_gpu, required_gpu))
     report["status"] = assess_memory(report["memory"], strict=strict)
     if strict and qualification_error and not options:
+        report["status"] = "blocked"
+    if (minimax_memory and free_gpu is not None
+            and free_gpu < minimax_memory["minimumDeviceBytes"]):
         report["status"] = "blocked"
     if ram is not None and ram < 2 * GIB:
         report["status"] = "blocked"

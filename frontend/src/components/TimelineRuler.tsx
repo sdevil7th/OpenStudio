@@ -6,6 +6,7 @@ import { useDAWStore } from "../store/useDAWStore";
 import { MemoizedPlayhead as Playhead } from "./Playhead";
 import { snapToGrid } from "../utils/snapToGrid";
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
+import { getTimelineRulerDensity } from "../utils/timelineRulerDensity";
 import { getRulerDragZoom, resolveRulerDragAxis } from "../utils/timelineRulerDrag";
 import type { TimelineDragAxisLock } from "../utils/timelineDragAxisLock";
 import { getMouseBehaviorProfile, toMouseBehaviorPlatform } from "../utils/mouseBehaviorProfiles";
@@ -492,47 +493,20 @@ export function TimelineRuler() {
     };
   }, [finishRulerZoom, flushZoom, scheduleZoom, seekTo, setProjectRange, setTimeSelection]);
 
-  const rulerDensity = useMemo(() => {
-    const beatsPerBar = timeSignature.numerator;
-    const secondsPerBeat = 60 / tempo;
-    const pixelsPerBeat = secondsPerBeat * pixelsPerSecond;
-    const pixelsPerBar = pixelsPerBeat * beatsPerBar;
-
-    if (pixelsPerBeat >= 140) {
-      return {
-        mode: "division" as const,
-        divisionsPerBeat: pixelsPerBeat >= 260 ? 8 : 4,
-        labelEveryBars: pixelsPerBar < 90 ? 2 : 1,
-      };
-    }
-
-    if (pixelsPerBeat >= 32) {
-      return {
-        mode: "beat" as const,
-        divisionsPerBeat: 1,
-        labelEveryBars: pixelsPerBar < 60 ? 2 : 1,
-      };
-    }
-
-    return {
-      mode: "bar" as const,
-      divisionsPerBeat: 1,
-      labelEveryBars:
-        pixelsPerBar < 30 ? 8 : pixelsPerBar < 45 ? 4 : pixelsPerBar < 70 ? 2 : 1,
-    };
-  }, [pixelsPerSecond, tempo, timeSignature.numerator]);
+  const rulerDensity = useMemo(() => getTimelineRulerDensity(
+    pixelsPerSecond, tempo, timeSignature, scrollX, width,
+  ), [pixelsPerSecond, tempo, timeSignature, scrollX, width]);
 
   const rulerMarks = useMemo(() => {
     const marks: React.ReactNode[] = [];
     const beatsPerBar = timeSignature.numerator;
-    const secondsPerBeat = 60 / tempo;
-    const secondsPerBar = secondsPerBeat * beatsPerBar;
+    const { secondsPerBeat, secondsPerBar, barStep } = rulerDensity;
     const startTime = Math.max(0, scrollX / pixelsPerSecond - secondsPerBar);
     const endTime = (scrollX + width) / pixelsPerSecond + secondsPerBar;
-    const startBar = Math.floor(startTime / secondsPerBar);
+    const startBar = Math.floor(startTime / secondsPerBar / barStep) * barStep;
     const endBar = Math.ceil(endTime / secondsPerBar);
 
-    for (let bar = startBar; bar <= endBar; bar += 1) {
+    for (let bar = startBar; bar <= endBar; bar += barStep) {
       const barTime = bar * secondsPerBar;
       const barX = barTime * pixelsPerSecond - scrollX;
       // A bar starting offscreen can still contain visible beats.
@@ -552,7 +526,7 @@ export function TimelineRuler() {
             <Text
               key={`bar-label-${bar}`}
               x={Math.round(barX) + 3}
-              y={2}
+              y={9}
               text={`${bar + 1}`}
               fontSize={10}
               fill="#888"
@@ -582,7 +556,7 @@ export function TimelineRuler() {
               <Text
                 key={`beat-label-${bar}-${beat}`}
                 x={Math.round(beatX) + 2}
-                y={14}
+                y={11}
                 text={`${bar + 1}.${beat + 1}`}
                 fontSize={9}
                 fill="#666"

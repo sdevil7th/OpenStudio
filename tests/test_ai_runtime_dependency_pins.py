@@ -1,6 +1,7 @@
 import json
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -41,6 +42,62 @@ def package_name(requirement: str) -> str:
 
 
 class AiRuntimeDependencyPinTests(unittest.TestCase):
+    def test_stem_only_cuda_install_applies_matching_torch_family(self):
+        plan = json.loads((TOOLS_DIR / "ai-runtime-install-plan-windows-cuda.json").read_text(encoding="utf-8"))
+        with patch.object(installer, "stream_step") as run, patch.object(installer, "emit"), \
+             patch.object(installer.platform, "system", return_value="Windows"), \
+             patch.object(installer.subprocess, "run", return_value=type("Result", (), {"stdout": "[]"})()), \
+             patch.object(installer, "run_step"), patch.object(installer, "log_event"), patch.object(installer, "write_log"):
+            installer.apply_backend_install_plan(Path("python"), Path("runtime"), plan,
+                backend_requested="cuda", selected_features=["stemSeparation"], install_source="downloadedRuntime",
+                requires_external_python=False, python_detected=False, build_runtime_mode="downloaded-runtime")
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertTrue(any("torch==2.11.0+cu128" in command and "torchvision==0.26.0+cu128" in command
+                            and "torchaudio==2.11.0+cu128" in command for command in commands))
+        self.assertFalse(any("diffusers==0.39.0" in command for command in commands))
+
+    def test_legacy_catalog_and_existing_directml_runtime_are_repaired_before_install(self):
+        legacy = {"id": "legacy", "backend": "cuda", "steps": [
+            {"type": "pip_install", "features": ["audioGeneration"], "packages": ["torch", "torchaudio"]}]}
+        for features in (["stemSeparation"], ["stemSeparation", "audioGeneration"]):
+            with self.subTest(features=features), patch.object(installer.platform, "system", return_value="Windows"), \
+                 patch.object(installer.subprocess, "run", return_value=type("Result", (), {"stdout": '["torch-directml", "onnxruntime-gpu", "onnxruntime-directml"]'})()), \
+                 patch.object(installer, "stream_step") as install, patch.object(installer, "run_step") as uninstall, \
+                 patch.object(installer, "emit"), patch.object(installer, "log_event"), patch.object(installer, "write_log"):
+                installer.apply_backend_install_plan(Path("python"), Path("runtime"), legacy,
+                    backend_requested="cuda", selected_features=features, install_source="downloadedRuntime",
+                    requires_external_python=False, python_detected=False, build_runtime_mode="downloaded-runtime")
+                self.assertIn("torch-directml", uninstall.call_args_list[0].args[0])
+                self.assertIn("onnxruntime-gpu", uninstall.call_args_list[0].args[0])
+                self.assertTrue(any("torchvision==0.26.0+cu128" in c.args[0] for c in install.call_args_list))
+                self.assertEqual(any("diffusers==0.39.0" in c.args[0] for c in install.call_args_list), "audioGeneration" in features)
+        self.assertEqual(legacy["id"], "legacy")
+
+    def test_stem_dependencies_retain_the_separators_audio_api(self):
+        for path in TOOLS_DIR.glob("ai-runtime-requirements*.txt"):
+            content = path.read_text(encoding="utf-8")
+            if "audio-separator" in content:
+                self.assertIn("librosa==0.11.0", content, path.name)
+                self.assertIn("audioread==3.1.0", content, path.name)
+        for path in TOOLS_DIR.glob("ai-runtime-install-plan*.json"):
+            for step in json.loads(path.read_text(encoding="utf-8"))["steps"]:
+                packages = step.get("packages", [])
+                if any(package.startswith("audio-separator") for package in packages):
+                    self.assertIn("librosa==0.11.0", packages, path.name)
+                    self.assertIn("audioread==3.1.0", packages, path.name)
+
+    def test_legacy_linux_rocm_plan_cannot_skip_stem_torch_overlay(self):
+        legacy = {"backend": "rocm", "steps": []}
+        with patch.object(installer.platform, "system", return_value="Linux"), \
+             patch.object(installer, "select_rocm_architecture_plan", side_effect=lambda plan, backend: plan), \
+             patch.object(installer, "stream_step") as install, patch.object(installer, "run_step"), \
+             patch.object(installer, "emit"), patch.object(installer, "log_event"), patch.object(installer, "write_log"):
+            installer.apply_backend_install_plan(Path("python"), Path("runtime"), legacy,
+                backend_requested="rocm", selected_features=["stemSeparation"], install_source="downloadedRuntime",
+                requires_external_python=False, python_detected=False, build_runtime_mode="downloaded-runtime")
+        self.assertTrue(any("torch==2.5.1" in call.args[0] and "torchaudio==2.5.1" in call.args[0]
+                            for call in install.call_args_list))
+
     def assert_core_packages_are_pinned(self, packages: list[str], source: str) -> None:
         package_map = {package_name(package): package for package in packages}
         for name, expected_requirement in CORE_MUSIC_GENERATION_PACKAGES.items():

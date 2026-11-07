@@ -11,6 +11,10 @@ from diffusers_audio_pipeline import DiffusersAudioSession, MINIMAX_MODEL, GIB, 
 
 
 class MiniMaxMemoryTests(unittest.TestCase):
+    def test_rejected_torchao_stops_before_importing_or_allocating_torch(self):
+        with patch.dict(sys.modules, {"torch":types.SimpleNamespace()}), self.assertRaisesRegex(ValueError,"failed user audition"):
+            DiffusersAudioSession(Path("unused"), "stable-audio-3-medium", quantization="torchao-int8", placement="resident")
+
     def test_stage_reuse_rejects_growing_duration_or_prompt_before_forward(self):
         for stage in ("_partial", "_int8_stage"):
             session = DiffusersAudioSession.__new__(DiffusersAudioSession)
@@ -176,13 +180,21 @@ class MiniMaxPlacementIntegrationTests(unittest.TestCase):
         root = Path(temporary.name)
         (root / "modular_model_index.json").write_text("{}")
         pipeline = types.SimpleNamespace(sampling_rate=44100, load_components=Mock(), to=Mock())
-        for name in ("language_model", "condition_encoder", "rvq_depth_decoder", "transformer", "vocoder", "tokenizer", "scheduler"):
-            setattr(pipeline, name, object())
+        def model(size):
+            tensor = types.SimpleNamespace(numel=lambda:size//2, element_size=lambda:2)
+            return types.SimpleNamespace(parameters=lambda:iter([tensor]), buffers=lambda:iter([]))
+        for name, size in (("language_model",16*GIB), ("condition_encoder",GIB),
+                           ("rvq_depth_decoder",GIB), ("transformer",4*GIB), ("vocoder",GIB)):
+            setattr(pipeline, name, model(size))
+        pipeline.language_model.config = types.SimpleNamespace(num_hidden_layers=36, num_key_value_heads=8, head_dim=128)
+        pipeline.language_model.model = types.SimpleNamespace(layers=[model(16*GIB//36) for _ in range(36)])
+        pipeline.tokenizer, pipeline.scheduler = object(), object()
         manager, group = Mock(), Mock()
         torch = types.SimpleNamespace(set_num_threads=Mock(), bfloat16="torch.bfloat16", float32="torch.float32",
             version=types.SimpleNamespace(hip=None), device=lambda value: value,
             cuda=types.SimpleNamespace(is_available=lambda: True, is_bf16_supported=lambda: True,
-                                      mem_get_info=lambda: (free_gib * GIB, 32 * GIB)))
+                                      mem_get_info=lambda _: (free_gib * GIB, 32 * GIB),
+                                      memory_allocated=lambda _:0, memory_reserved=lambda _:0))
         modules = {"torch": torch, "diffusers": types.SimpleNamespace(
             ComponentsManager=lambda: manager,
             ModularPipeline=types.SimpleNamespace(from_pretrained=Mock(return_value=pipeline))),
@@ -198,11 +210,11 @@ class MiniMaxPlacementIntegrationTests(unittest.TestCase):
         group.assert_not_called()
         self.assertIn("model stays on device", session.execution_summary())
 
-    def test_unqualified_partial_residency_is_never_selected_automatically(self):
+    def test_unknown_checkpoint_layout_keeps_standard_group_placement(self):
         _, _, group, session = self.load(13, duration=30)
         group.assert_called_once()
         self.assertIsNone(session._partial)
-        self.assertIn("qualification incomplete", session.execution_details["partialResidencyQualification"])
+        self.assertEqual("standard host-backed group placement", session.execution_details["partialResidencyQualification"])
 
     def test_intermediate_capacity_uses_only_component_manager(self):
         pipeline, manager, group, session = self.load(25)

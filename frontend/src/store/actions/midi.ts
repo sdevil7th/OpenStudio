@@ -11,6 +11,7 @@ import {
   eventsFromClipboardItems,
   noteIdFor as sharedNoteIdFor,
   parseMIDINotePairs,
+  parseNoteIdentity,
   rebuildMIDIEventsForNotes,
   sortMIDIEvents as sortSharedMIDIEvents,
 } from "../../utils/midiNotes";
@@ -204,116 +205,10 @@ function buildDiatonicChordNotes(rootNote: number, scaleRoot: number, scaleType:
   return [root, clampMidiNote(root + 4), clampMidiNote(root + 7)];
 }
 
-function noteIdFor(clipId: string, timestamp: number, note: number) {
-  return `${clipId}:${timestamp.toFixed(6)}:${note}`;
-}
-
-function parseNoteIdentity(noteId: string) {
-  const parts = String(noteId).split(":");
-  const note = Number.parseInt(parts[parts.length - 1], 10);
-  const timestamp = Number.parseFloat(parts[parts.length - 2]);
-  return Number.isFinite(timestamp) && Number.isFinite(note)
-    ? { timestamp, note }
-    : null;
-}
-
-function noteIdentityMatches(noteId: string, clipId: string, timestamp: number, note: number) {
-  const parsed = parseNoteIdentity(noteId);
-  if (!parsed) return false;
-  return Math.abs(parsed.timestamp - timestamp) < 0.001 && parsed.note === note;
-}
-
-function parseNotePairs(events: any[], clipId: string) {
-  const pairs: any[] = [];
-  const usedNoteOffs = new Set<number>();
-
-  for (let onIndex = 0; onIndex < events.length; onIndex += 1) {
-    const noteOn = events[onIndex];
-    if (noteOn.type !== "noteOn" || noteOn.note === undefined) continue;
-
-    let offIndex = -1;
-    for (let index = 0; index < events.length; index += 1) {
-      const candidate = events[index];
-      if (
-        usedNoteOffs.has(index) ||
-        candidate.type !== "noteOff" ||
-        candidate.note !== noteOn.note ||
-        candidate.timestamp <= noteOn.timestamp
-      ) {
-        continue;
-      }
-
-      if (offIndex === -1 || candidate.timestamp < events[offIndex].timestamp) {
-        offIndex = index;
-      }
-    }
-
-    if (offIndex === -1) continue;
-    usedNoteOffs.add(offIndex);
-    const noteOff = events[offIndex];
-    pairs.push({
-      id: noteIdFor(clipId, noteOn.timestamp, noteOn.note),
-      onIndex,
-      offIndex,
-      noteOn,
-      noteOff,
-      noteNumber: noteOn.note,
-      velocity: noteOn.velocity || 80,
-      startTime: noteOn.timestamp,
-      duration: Math.max(MIDI_NOTE_MIN_DURATION, noteOff.timestamp - noteOn.timestamp),
-    });
-  }
-
-  return pairs;
-}
-
-function rebuildEventsForNotes(events: any[], clipId: string, noteIds: string[], transform: (pair: any) => any | null) {
-  const selectedIds = new Set(noteIds);
-  const consumed = new Set<number>();
-  const additions: any[] = [];
-  const nextIds: string[] = [];
-
-  for (const pair of parseNotePairs(events, clipId)) {
-    const selected = selectedIds.has(pair.id)
-      || noteIds.some((id) => noteIdentityMatches(id, clipId, pair.startTime, pair.noteNumber));
-    if (!selected) continue;
-
-    consumed.add(pair.onIndex);
-    consumed.add(pair.offIndex);
-
-    const nextPair = transform(pair);
-    if (!nextPair) continue;
-
-    const nextStart = Math.max(0, nextPair.startTime);
-    const nextDuration = Math.max(MIDI_NOTE_MIN_DURATION, nextPair.duration);
-    const nextNote = clampMidiNote(nextPair.noteNumber);
-    const nextVelocity = clampVelocity(nextPair.velocity ?? pair.velocity);
-
-    additions.push(
-      {
-        ...pair.noteOn,
-        timestamp: nextStart,
-        type: "noteOn",
-        note: nextNote,
-        velocity: nextVelocity,
-      },
-      {
-        ...pair.noteOff,
-        timestamp: nextStart + nextDuration,
-        type: "noteOff",
-        note: nextNote,
-        velocity: 0,
-      },
-    );
-    nextIds.push(noteIdFor(clipId, nextStart, nextNote));
-  }
-
-  const retained = events.filter((_, index) => !consumed.has(index));
-  return {
-    events: sortMIDIEvents([...retained, ...additions]),
-    nextIds,
-  };
-}
+// Keep editing and playback on the same channel/pair-aware parser.
+const noteIdFor = sharedNoteIdFor;
+const parseNotePairs = parseMIDINotePairs;
+const rebuildEventsForNotes = rebuildMIDIEventsForNotes;
 
 function getTrack(get: GetFn, trackId: string) {
   return get().tracks.find((track: any) => track.id === trackId);
@@ -1503,7 +1398,7 @@ export const midiActions = (set: SetFn, get: GetFn) => ({
       const oldEvents = cloneEvents(clip.events);
       const oldCCEvents = cloneCCEvents(clip.ccEvents || []);
       const allNoteIds = parseMIDINotePairs(oldEvents)
-        .map((pair) => sharedNoteIdFor(clipId, pair.startTime, pair.noteNumber));
+        .map((pair) => sharedNoteIdFor(clipId, pair.startTime, pair.noteNumber, pair.noteOn.notePairId));
       const selectedIds = requestedSelectedIds.length > 0 ? requestedSelectedIds : allNoteIds;
       if (selectedIds.length === 0) return [];
       const oldSelectedNoteIds = [...requestedSelectedIds];

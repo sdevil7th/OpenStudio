@@ -12,6 +12,19 @@ beforeEach(() => {
 });
 afterEach(() => { bridge.isNative = originalNative; bridge.transportRequestToken = ""; bridge.transportRequestsPending = 0; vi.unstubAllGlobals(); vi.restoreAllMocks(); useDAWStore.setState(initial); });
 describe("native transport request ordering", () => {
+  it("uses one tokenized prepared start and fails closed with an older backend", async () => {
+    const calls: unknown[][] = [];
+    vi.stubGlobal("window", { __JUCE__: { backend: {
+      setTransportStateWithToken: async (...args: unknown[]) => { calls.push(args); return true; },
+    } } });
+    expect(await nativeBridge.startPreparedRecording()).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["preparedRecording", true, expect.any(String)]);
+    vi.stubGlobal("window", { __JUCE__: { backend: { setTransportPlaying: vi.fn(), setTransportRecording: vi.fn() } } });
+    expect(await nativeBridge.startPreparedRecording()).toBe(false);
+    expect(window.__JUCE__!.backend.setTransportPlaying).not.toHaveBeenCalled();
+    expect(window.__JUCE__!.backend.setTransportRecording).not.toHaveBeenCalled();
+  });
   it.each(["pause", "stop"] as const)("does not end a new write session while the old %s position request is pending", async action => {
     const pending = gate();
     vi.spyOn(nativeBridge, "setTransportPlaying").mockResolvedValue(true);

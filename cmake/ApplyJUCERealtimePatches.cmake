@@ -7,6 +7,8 @@ include("${CMAKE_CURRENT_LIST_DIR}/ApplyJUCEAutomationPatch.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ApplyJUCELV2IdentifierPatch.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ApplyJUCEMacBrowserNavigationPatch.cmake")
 
+include("${CMAKE_CURRENT_LIST_DIR}/ApplyJUCEHeapBlockPatch.cmake")
+
 set(JUCE_ASIO_DEVICE_SOURCE
     "${JUCE_SOURCE_DIR}/modules/juce_audio_devices/native/juce_ASIO_windows.cpp")
 if(NOT EXISTS "${JUCE_ASIO_DEVICE_SOURCE}")

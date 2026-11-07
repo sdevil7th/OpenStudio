@@ -6,10 +6,11 @@
 #include <map>
 #include <functional>
 #include "RecordingWriterSafety.h"
+#include "RecordingDiskWriter.h"
 
 // Handles recording audio to disk for individual tracks.
-// Uses JUCE's ThreadedWriter to move disk I/O off the audio thread,
-// preventing crackling and buffer underruns.
+// Copies PCM into a prepared FIFO; a polling disk client writes it in the
+// background without audio-thread locks or wake notifications.
 class AudioRecorder
 {
 public:
@@ -90,7 +91,7 @@ private:
     struct ActiveRecording
     {
         juce::String trackId;
-        std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> threadedWriter;
+        std::unique_ptr<RecordingDiskWriter> threadedWriter;
         std::shared_ptr<RecordingWriteStatus> writeStatus;
         juce::File outputFile;
         std::atomic<bool> isActive { false };

@@ -1,0 +1,118 @@
+name: Offline support qualification
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: '0.0.0'
+  push:
+    branches: ['codex/support-packaging-qa-**']
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-latest, platform: windows, arch: x64}
+          - {os: ubuntu-22.04, platform: linux, arch: x64}
+          - {os: macos-15, platform: macos, arch: arm64}
+          - {os: macos-15-intel, platform: macos, arch: x86_64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      SUPPORT_VERSION: ${{ inputs.version || '0.0.0' }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version-file: frontend/.nvmrc
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: '3.13'
+      - name: Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb xauth desktop-file-utils dpkg-dev rpm
+      - run: npm --prefix frontend ci
+      - name: Build native support
+        shell: bash
+        run: python tools/build-support-tool.py --version "$SUPPORT_VERSION"
+      - name: Windows installed support tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./.venv-support/Scripts/python.exe -m unittest tools.test_openstudio_support tests.test_support_identity -q
+          if ($LASTEXITCODE -ne 0) { throw 'Support tests failed' }
+          $env:OPENSTUDIO_SUPPORT_TEST_BUNDLE = "$PWD/output/support-package/OpenStudioSupport"
+          python tests/test_windows_installer.py --require-tools
+          if ($LASTEXITCODE -ne 0) { throw 'Installer regression failed' }
+          python tools/test-packaged-support.py --bundle $env:OPENSTUDIO_SUPPORT_TEST_BUNDLE
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen support failed' }
+          ./tools/test-support-msix.ps1 -BundlePath $env:OPENSTUDIO_SUPPORT_TEST_BUNDLE -OutputDir output/support-msix-qa
+      - name: macOS support tests
+        if: runner.os == 'macOS'
+        timeout-minutes: 6
+        run: |
+          .venv-support/bin/python -c "import faulthandler, unittest; faulthandler.dump_traceback_later(180, exit=True); unittest.main(module=None, argv=['unittest', 'tools.test_openstudio_support', 'tests.test_support_identity', '-v'])"
+          python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport.app
+          codesign --verify --deep --strict output/support-package/OpenStudioSupport.app
+      - name: Linux support tests and native packaging
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a .venv-support/bin/python -m unittest tools.test_openstudio_support tests.test_support_identity -q
+          python -m unittest tests.test_linux_native_packaging tests.test_linux_abi tests.test_release_notes -q
+          xvfb-run -a python tools/test-packaged-support.py --bundle output/support-package/OpenStudioSupport
+          xvfb-run -a python tools/test-support-linux.py --bundle output/support-package/OpenStudioSupport --version "$SUPPORT_VERSION"
+          python tools/validate-linux-abi.py --root output/support-package/OpenStudioSupport --report output/support-distribution/abi.json --max-glibc 2.35 --require-os ubuntu:22.04
+      - name: Archive native payload preserving executable modes and links
+        shell: bash
+        run: tar -czf support-${{ matrix.platform }}-${{ matrix.arch }}.tgz -C output/support-package .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: support-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            support-*.tgz
+            output/support-distribution/*.AppImage
+            output/support-distribution/abi.json
+          if-no-files-found: error
+  universal-macos:
+    needs: native
+    if: ${{ !cancelled() }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: support-macos-*
+          path: output/native
+      - name: Assemble both native runtimes and Finder launcher
+        run: |
+          mkdir -p output/arm64 output/x86_64
+          tar -xzf output/native/support-macos-arm64/support-macos-arm64.tgz -C output/arm64
+          tar -xzf output/native/support-macos-x86_64/support-macos-x86_64.tgz -C output/x86_64
+          python3 tools/assemble-macos-support.py --arm64 output/arm64/OpenStudioSupport.app --x86-64 output/x86_64/OpenStudioSupport.app --version '${{ inputs.version || '0.0.0' }}' --output output/universal
+          python3 tools/sign-macos-support.py output/universal/OpenStudioSupport.app --identity - --no-timestamp
+          python3 tools/test-macos-support-package.py --bundle output/universal --version '${{ inputs.version || '0.0.0' }}'
+          tar -czf support-macos-universal.tgz -C output/universal .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: support-macos-universal
+          path: support-macos-universal.tgz
+  universal-macos-intel:
+    needs: universal-macos
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: support-macos-universal
+          path: output/universal
+      - name: Qualify universal launcher and mounted DMG on Intel
+        run: |
+          tar -xzf output/universal/support-macos-universal.tgz -C output/universal
+          python3 tools/test-macos-support-package.py --bundle output/universal --version '${{ inputs.version || '0.0.0' }}'

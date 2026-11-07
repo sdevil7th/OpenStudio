@@ -31,7 +31,8 @@ export function ProjectSettingsModal({
     projectNotes,
     projectSampleRate,
     projectBitDepth,
-    transport,
+    projectAudioImportPolicy,
+    projectTempo,
     timeSignature,
     projectAuthor,
     projectRevisionNotes,
@@ -39,6 +40,7 @@ export function ProjectSettingsModal({
     setProjectNotes,
     setProjectSampleRate,
     setProjectBitDepth,
+    setProjectAudioImportPolicy,
     setTempo,
     setTimeSignature: setTimeSignatureAction,
     setProjectAuthor,
@@ -49,7 +51,8 @@ export function ProjectSettingsModal({
     projectNotes: s.projectNotes,
     projectSampleRate: s.projectSampleRate,
     projectBitDepth: s.projectBitDepth,
-    transport: s.transport,
+    projectAudioImportPolicy: s.projectAudioImportPolicy,
+    projectTempo: s.transport.tempo,
     timeSignature: s.timeSignature,
     projectAuthor: s.projectAuthor,
     projectRevisionNotes: s.projectRevisionNotes,
@@ -57,6 +60,7 @@ export function ProjectSettingsModal({
     setProjectNotes: s.setProjectNotes,
     setProjectSampleRate: s.setProjectSampleRate,
     setProjectBitDepth: s.setProjectBitDepth,
+    setProjectAudioImportPolicy: s.setProjectAudioImportPolicy,
     setTempo: s.setTempo,
     setTimeSignature: s.setTimeSignature,
     setProjectAuthor: s.setProjectAuthor,
@@ -69,7 +73,8 @@ export function ProjectSettingsModal({
   const [localNotes, setLocalNotes] = useState(projectNotes);
   const [localSampleRate, setLocalSampleRate] = useState(projectSampleRate);
   const [localBitDepth, setLocalBitDepth] = useState(projectBitDepth);
-  const [localTempo, setLocalTempo] = useState(transport.tempo);
+  const [localImportPolicy, setLocalImportPolicy] = useState(projectAudioImportPolicy);
+  const [localTempo, setLocalTempo] = useState(projectTempo);
   const [localTimeSignatureNum, setLocalTimeSignatureNum] = useState(
     timeSignature.numerator
   );
@@ -87,7 +92,8 @@ export function ProjectSettingsModal({
       setLocalNotes(projectNotes);
       setLocalSampleRate(projectSampleRate);
       setLocalBitDepth(projectBitDepth);
-      setLocalTempo(transport.tempo);
+      setLocalImportPolicy(projectAudioImportPolicy);
+      setLocalTempo(projectTempo);
       setLocalTimeSignatureNum(timeSignature.numerator);
       setLocalTimeSignatureDenom(timeSignature.denominator);
       setLocalAuthor(projectAuthor);
@@ -102,7 +108,8 @@ export function ProjectSettingsModal({
     projectNotes,
     projectSampleRate,
     projectBitDepth,
-    transport.tempo,
+    projectAudioImportPolicy,
+    projectTempo,
     timeSignature,
     projectAuthor,
   ]);
@@ -112,6 +119,7 @@ export function ProjectSettingsModal({
     setProjectNotes(localNotes);
     setProjectSampleRate(localSampleRate);
     setProjectBitDepth(localBitDepth);
+    setProjectAudioImportPolicy(localImportPolicy);
     setTempo(localTempo);
     setTimeSignatureAction(localTimeSignatureNum, localTimeSignatureDenom);
     if (localAuthor !== projectAuthor) setProjectAuthor(localAuthor);
@@ -132,7 +140,7 @@ export function ProjectSettingsModal({
     setLocalNotes(projectNotes);
     setLocalSampleRate(projectSampleRate);
     setLocalBitDepth(projectBitDepth);
-    setLocalTempo(transport.tempo);
+    setLocalTempo(projectTempo);
     setLocalTimeSignatureNum(timeSignature.numerator);
     setLocalTimeSignatureDenom(timeSignature.denominator);
     setLocalAuthor(projectAuthor);
@@ -175,6 +183,21 @@ export function ProjectSettingsModal({
             <h3 className="text-sm font-semibold text-daw-text border-b border-daw-border pb-2">
               Audio Settings
             </h3>
+
+            <Select
+              fullWidth
+              label="Audio import sample rate"
+              options={[
+                { value: "preserve", label: "Keep source files and convert during playback" },
+                { value: "project-rate-copy", label: "Create high-quality copies at the project rate" },
+              ]}
+              value={localImportPolicy}
+              onChange={value => setLocalImportPolicy(value as "preserve" | "project-rate-copy")}
+            />
+            <p className="text-xs leading-relaxed text-daw-text-secondary">
+              Conversion copies use band-limited resampling and 32-bit float WAV. Originals remain available.
+              This applies to new audio imports; existing clips have a Create Project-Rate Copy command.
+            </p>
 
             <div className="grid grid-cols-2 gap-4">
               {/* Sample Rate */}

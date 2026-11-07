@@ -8,82 +8,14 @@ from __future__ import annotations
 import math
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from ai_memory_manager import (GIB, MiniMaxMemoryPlan, plan_minimax_memory,
+                               plan_audio_memory, available_host_memory, module_weight_bytes)
 
 STABLE_MODEL = "stable-audio-3-medium"
 MINIMAX_MODEL = "minimax-music-3"
 DIFFUSERS_REVISION = "7643c4826609c47755e3da0e5b768e8070468f49"
-GIB = 1024 ** 3
-
-
-@dataclass(frozen=True)
-class MiniMaxMemoryPlan:
-    mode: str
-    use_stream: bool = False
-    low_cpu_mem_usage: bool = False
-
-
-def plan_minimax_memory(*, free_vram: int | None, available_ram: int | None,
-                       weights_bytes: int, language_model_bytes: int,
-                       bf16: bool) -> MiniMaxMemoryPlan:
-    """Conservative placement estimates, not a guarantee against request-time OOM.
-
-    HF documents ~23 GB resident / ~22 GB component offload in BF16.
-    Keep 3 GiB beyond those estimates for the DAW, activations and KV growth.
-    FP32 needs larger budgets; unknown memory retains the previous safe path.
-    """
-    scale = 1 if bf16 else 2
-    reserve = 3 * GIB
-    if free_vram is not None:
-        if free_vram >= max(weights_bytes, 23 * scale * GIB) + reserve:
-            return MiniMaxMemoryPlan("resident")
-        if free_vram >= 22 * scale * GIB + reserve:
-            return MiniMaxMemoryPlan("model-offload")
-    # Prefetch needs both GPU headroom and host memory. Only pre-pin the full
-    # LM when another LM-sized allocation plus DAW headroom fits in free RAM.
-    stream = (free_vram is not None and free_vram >= 8 * scale * GIB
-              and available_ram is not None and available_ram >= 3 * GIB)
-    low_ram = stream and available_ram < language_model_bytes + reserve
-    return MiniMaxMemoryPlan("group-offload", stream, low_ram)
-
-
-def available_host_memory() -> int | None:
-    try:
-        import psutil  # Already supplied by Accelerate; never required for fallback.
-        return int(psutil.virtual_memory().available)
-    except (ImportError, OSError, AttributeError):
-        return None
-
-
-def module_weight_bytes(modules: Any) -> int:
-    """Count parameters/buffers once without making state-dict tensor copies."""
-    seen: set[int] = set()
-    total = 0
-    for module in modules:
-        if not hasattr(module, "parameters"):
-            continue
-        for tensors in (module.parameters(), module.buffers()):
-            for tensor in tensors:
-                if id(tensor) not in seen:
-                    seen.add(id(tensor))
-                    total += tensor.numel() * tensor.element_size()
-    return total
-
-
-def plan_audio_memory(free_vram: int | None, weights: int, largest: int,
-                      duration: float = 30, conservative: bool = False,
-                      allow_group: bool = True) -> str:
-    """Reserve grows with duration; measured OOM retries choose layer offload."""
-    if conservative:
-        return "group-offload" if allow_group else "model-offload"
-    reserve = int((3 + max(0, duration - 30) / 60) * GIB)
-    if free_vram is not None and free_vram >= weights + reserve:
-        return "resident"
-    if free_vram is None or free_vram >= largest + reserve:
-        return "model-offload"
-    return "group-offload" if allow_group else "model-offload"
 
 
 def cuda_memory_budget() -> int | None:
@@ -206,7 +138,11 @@ class DiffusersAudioSession:
     def __init__(self, root: Path, model_id: str = STABLE_MODEL, *, conservative: bool = False,
                  request_duration: float | None = None, requested_device: str | None = None,
                  attention: str = "native", placement: str = "auto", request_prompt_tokens: int = 5000,
-                 quantization: str = "none", int8_reserve_bytes: int = 3 * GIB) -> None:
+                 quantization: str = "none", int8_reserve_bytes: int = 3 * GIB, compilation: bool = False) -> None:
+        if model_id == STABLE_MODEL and quantization == "torchao-int8":
+            raise ValueError("TorchAO INT8 is excluded for Stable Audio: the preview failed user audition")
+        if quantization == "fp8-storage" and model_id != STABLE_MODEL:
+            raise ValueError("FP8 storage has no qualified model-specific loader here")
         import torch
         # This separate worker must not create a full-machine CPU thread pool
         # beside live monitoring. GPU offload still consumes RAM/bandwidth.
@@ -219,9 +155,11 @@ class DiffusersAudioSession:
         self._partial = None
         self._int8_stage = None
         self._int8_disk_store = None
+        self._loaded_disk_bank = None
         self.request_duration = request_duration
         self.request_prompt_tokens = request_prompt_tokens
         self.requested_device = requested_device
+        self.compilation = compilation
         self.attention = attention
         self.placement = placement
         self.quantization = quantization
@@ -246,7 +184,7 @@ class DiffusersAudioSession:
         if quantization != "none" and placement != "resident" and not int8_stage:
             raise ValueError("Quantization evaluation requires explicit resident placement; offload combinations are unqualified.")
         from ai_execution_policy import quantization_kwargs, optimization_candidates
-        quant_kwargs = {} if saved_int8 else quantization_kwargs(quantization, modular=model_id == MINIMAX_MODEL)
+        quant_kwargs = {} if saved_int8 or quantization == "fp8-storage" else quantization_kwargs(quantization, modular=model_id == MINIMAX_MODEL)
         model_workflows(model_id)
         self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         from ai_execution_policy import select_device, activate_device
@@ -263,10 +201,17 @@ class DiffusersAudioSession:
         if self.device == "cuda" and not torch.cuda.is_bf16_supported():
             dtype = torch.float32  # Avoid silently using unsupported BF16 kernels.
         self.dtype = dtype
-        if dtype == torch.float32:
+        if dtype == torch.float32 and not (model_id == MINIMAX_MODEL and self.device == "cuda"
+                and quantization == "none" and placement in {"auto","partial-resident-disk"}):
             from ai_execution_policy import check_host_capacity
             check_host_capacity(root, float_bytes=4)
         self.execution_device = self.device_spec.device if self.device_spec else self.device
+        if quantization == "fp8-storage":
+            from ai_layerwise_storage import validate_fp8_device
+            validate_fp8_device(torch, self.execution_device)
+        if compilation and (model_id != STABLE_MODEL or self.device != "cuda" or torch.version.hip
+                            or placement != "resident" or quantization != "none"):
+            raise ValueError("Compilation requires Original Stable Audio with resident NVIDIA CUDA placement")
         backend = "ROCm" if self.device == "cuda" and torch.version.hip else self.device.upper()
         self.execution_details = {"device": backend, "precision": str(dtype).removeprefix("torch."),
                                   "attentionPolicy": "PyTorch SDPA (automatic)",
@@ -289,6 +234,9 @@ class DiffusersAudioSession:
             if placement not in {"auto", "resident", "model-offload"}:
                 raise ValueError("Stable Audio only qualifies resident and component offload; group/sequential modes are excluded.")
             self.pipe = StableAudio3Pipeline.from_pretrained(str(root), torch_dtype=dtype, local_files_only=True, **quant_kwargs)
+            if quantization == "fp8-storage":
+                from ai_layerwise_storage import configure_fp8_storage
+                self.execution_details["layerwiseStorage"] = configure_fp8_storage(torch, self.pipe.transformer, self.execution_device)
             if not self.pipe.scheduler.config.stochastic_sampling:
                 raise RuntimeError("This slot requires distilled Stable Audio 3 Medium, not Medium Base.")
             self.sample_rate = int(self.pipe.vae.config.sampling_rate)
@@ -309,6 +257,19 @@ class DiffusersAudioSession:
             required = ("language_model", "condition_encoder", "rvq_depth_decoder", "transformer", "vocoder", "tokenizer", "scheduler")
             load_kwargs = dict(dtype=dtype, local_files_only=True,
                                pretrained_model_name_or_path=str(root), **quant_kwargs)
+            automatic_disk = False
+            if self.device == "cuda" and placement == "auto" and quantization == "none":
+                from ai_execution_policy import minimax_checkpoint_memory, device_budget
+                loading = minimax_checkpoint_memory(root, float_bytes=2 if dtype == torch.bfloat16 else 4,
+                    duration=request_duration or 300, prompt_tokens=request_prompt_tokens,
+                    free_vram=device_budget(torch,self.execution_device),available_ram=available_host_memory())
+                if loading:
+                    self.execution_details["loadingPlan"] = loading
+                    automatic_disk = loading["loadingBacking"] == "disk"
+                    budget = device_budget(torch,self.execution_device)
+                    if budget is not None and budget < loading["minimumDeviceBytes"]:
+                        raise ValueError(f"MiniMax needs at least {loading['minimumDeviceBytes']/GIB:.2f} GiB of available GPU memory for this request; {budget/GIB:.2f} GiB is available.")
+            self.execution_details["loadingBacking"] = "disk" if automatic_disk or placement == "partial-resident-disk" else "host-memory"
             if int8_stage:
                 # Quantization temporarily reads the unquantized LM checkpoint.
                 # Do this before other CPU components consume the host budget.
@@ -330,6 +291,47 @@ class DiffusersAudioSession:
                         [getattr(self.pipe, name) for name in required[:5]], allow_device=True)
                 move_int8_module(self.pipe.language_model, "cpu")
                 torch.cuda.empty_cache()
+            elif (placement == "partial-resident-disk" or automatic_disk) and quantization == "none":
+                # Do not overlap every component's CPU conversion peak. This
+                # candidate archives each completed component before loading
+                # the next; inference still uses the original exact weights.
+                from ai_disk_store import DiskWeightBank
+                self._loaded_disk_bank = DiskWeightBank()
+                try:
+                    for name in required:
+                        from ai_execution_policy import checkpoint_storage_bytes, device_budget
+                        from ai_memory_manager import component_load_on_device
+                        size = checkpoint_storage_bytes(root / name, 2 if dtype == torch.bfloat16 else 4)
+                        ram = available_host_memory()
+                        on_device = self.device == "cuda" and component_load_on_device(
+                            size, ram, device_budget(torch, self.execution_device, include_allocated=True))
+                        kwargs = dict(load_kwargs, low_cpu_mem_usage=True)
+                        if on_device:
+                            kwargs["device_map"] = {name: {"": self.execution_device}}
+                        self.pipe.load_components(names=[name], **kwargs)
+                        component = getattr(self.pipe, name, None)
+                        if component is None:
+                            raise RuntimeError("MiniMax component could not be loaded: "+name)
+                        if hasattr(component, "parameters"):
+                            if on_device:
+                                from accelerate.hooks import remove_hook_from_module
+                                remove_hook_from_module(component, recurse=True)
+                                component.hf_device_map = None
+                            self._loaded_disk_bank.add(component, allow_device=on_device)
+                        self.execution_details.setdefault("componentLoads", []).append({"component":name,
+                            "device": self.execution_device if on_device else "cpu",
+                            "availableRamBefore":ram, "availableRamAfter":available_host_memory()})
+                    # End the loading lease before assigning the inference
+                    # budget. In particular, WDDM must be able to retire the
+                    # temporary GPU loading pool instead of charging it as a
+                    # second resident component.
+                    import gc
+                    gc.collect()
+                    if self.device == "cuda":
+                        torch.cuda.empty_cache()
+                except BaseException:
+                    self.close()
+                    raise
             else:
                 self.pipe.load_components(**load_kwargs)
             missing = [name for name in required if getattr(self.pipe, name, None) is None]
@@ -337,39 +339,41 @@ class DiffusersAudioSession:
                 raise RuntimeError("MiniMax components could not be loaded locally: " + ", ".join(missing))
             self.sample_rate = int(self.pipe.sampling_rate)
             if self.device == "cuda":
-                try:
-                    free_vram = int(torch.cuda.mem_get_info()[0])
-                    from ai_execution_policy import physical_cuda_free
-                    physical = physical_cuda_free(torch, self.execution_device)
-                    if physical is not None:
-                        free_vram = min(free_vram, physical)
-                except (RuntimeError, OSError):
-                    free_vram = None
+                from ai_execution_policy import device_budget
+                free_vram = device_budget(torch,self.execution_device,include_allocated=True)
                 available_ram = available_host_memory()
+                from ai_execution_policy import minimax_kv_bytes
+                lm = self.pipe.language_model
+                stage_weights = {name: module_weight_bytes([getattr(self.pipe, name)]) for name in required}
+                kv = minimax_kv_bytes(lm.config, duration=request_duration or 300,
+                    prompt_tokens=request_prompt_tokens, element_size=2 if dtype == torch.bfloat16 else 4)
+                largest_group = max((module_weight_bytes([block]) for block in getattr(getattr(lm, "model", None), "layers", [])), default=0)
                 plan = plan_minimax_memory(
                     free_vram=free_vram, available_ram=available_ram,
-                    weights_bytes=module_weight_bytes(getattr(self.pipe, name) for name in required),
-                    language_model_bytes=module_weight_bytes([self.pipe.language_model]),
-                    bf16=dtype == torch.bfloat16)
+                    weights_bytes=sum(stage_weights.values()),
+                    language_model_bytes=stage_weights["language_model"],
+                    bf16=dtype == torch.bfloat16, stage_bytes=stage_weights, kv_bytes=kv,
+                    largest_group_bytes=largest_group)
+                from dataclasses import replace
                 if conservative:
-                    plan = MiniMaxMemoryPlan("group-offload")
+                    plan = replace(plan, mode="group-offload", use_stream=False, low_cpu_mem_usage=False, staging_bytes=0)
                 if placement == "group-offload":
-                    plan = MiniMaxMemoryPlan("group-offload")
+                    plan = replace(plan, mode="group-offload", use_stream=False, low_cpu_mem_usage=False, staging_bytes=0)
                 if placement in {"resident", "model-offload"}:
-                    plan = MiniMaxMemoryPlan(placement)
+                    plan = replace(plan, mode=placement, use_stream=False, low_cpu_mem_usage=False, staging_bytes=0)
+                self._minimax_memory_plan = plan
                 if placement not in {"auto", "resident", "model-offload", "group-offload", "partial-resident", "partial-resident-disk"}:
                     raise ValueError(f"Unsupported MiniMax placement {placement}.")
                 # Delay partial planning until the request duration is known.
                 # A conservative byte-BPE prompt bound covers KV storage;
                 # exact tokenization still belongs to the upstream encoder.
                 partial = None
-                # The bounded adapter remains a harness candidate: real 32-GB
-                # Windows qualification hit the host RAM reserve. Do not
-                # promote availability or toy parity into automatic selection.
-                if placement == "auto" and plan.mode == "group-offload":
+                if placement == "auto" and plan.mode == "group-offload" and not automatic_disk:
                     self.execution_details["partialResidencyQualification"] = (
-                        "excluded from automatic selection: host-memory qualification incomplete")
-                if request_duration is not None and not conservative and quantization == "none" and placement in {"partial-resident", "partial-resident-disk"}:
+                        "standard host-backed group placement")
+                if request_duration is not None and quantization == "none" and (
+                        not conservative and placement in {"partial-resident", "partial-resident-disk"}
+                        or automatic_disk and plan.mode != "resident"):
                     from ai_execution_policy import plan_residency, minimax_kv_bytes
                     lm = self.pipe.language_model
                     blocks = [module_weight_bytes([block]) for block in lm.model.layers]
@@ -379,15 +383,21 @@ class DiffusersAudioSession:
                         kv_bytes=minimax_kv_bytes(lm.config, duration=request_duration,
                             prompt_tokens=request_prompt_tokens, element_size=next(lm.parameters()).element_size()),
                         available_ram=available_ram)
+                    if conservative and partial.reason == "fits":
+                        partial = replace(partial, resident_blocks=0,
+                            resident_bytes=module_weight_bytes([lm])-sum(blocks), use_stream=False)
                     other_stage = max(module_weight_bytes([getattr(self.pipe, name)]) for name in
                                       ("condition_encoder", "transformer", "vocoder"))
                     if partial.reason != "fits" or (free_vram or 0) < other_stage + partial.reserve_bytes:
                         partial = None
-                if placement in {"partial-resident", "partial-resident-disk"} and partial is None:
+                if (placement in {"partial-resident", "partial-resident-disk"}
+                        or automatic_disk and plan.mode != "resident") and partial is None:
+                    self.close()
                     raise ValueError("Partial residency does not fit the available stage memory budget.")
                 self.execution_details.update(offload=plan.mode, streaming=plan.use_stream,
                     lowCpuMemory=plan.low_cpu_mem_usage, freeVramBytes=free_vram,
-                    availableRamBytes=available_ram)
+                    availableRamBytes=available_ram, memoryPlanReason=plan.reason,
+                    stageWeightBytes=stage_weights, requestKvBytes=kv, prefetchStagingBytes=plan.staging_bytes)
                 if int8_stage:
                     from ai_execution_policy import device_budget, minimax_kv_bytes
                     lm = self.pipe.language_model
@@ -415,11 +425,15 @@ class DiffusersAudioSession:
                     from dataclasses import asdict
                     from ai_partial_offload import PartialStagePlacement
                     self._partial = PartialStagePlacement(self.pipe, partial, self.execution_device,
-                                                         disk_backed=placement == "partial-resident-disk")
+                        disk_backed=placement == "partial-resident-disk" or automatic_disk, disk_store=self._loaded_disk_bank)
+                    self._loaded_disk_bank = None  # Stage placement owns retirement now.
                     self.execution_details.update(offload="partial-resident", streaming=partial.use_stream,
                         lowCpuMemory=False, residency=asdict(partial))
                     if self._partial.disk_store is not None:
                         self.execution_details["diskCacheBytes"] = self._partial.disk_store.bytes
+                    self.execution_details["memoryPlanReason"] = (
+                        "Automatic disk backing bounds host copies and retains the GPU blocks that fit"
+                        if automatic_disk else "Explicit partial residency")
                 elif plan.mode == "resident":
                     self.pipe.to(self.execution_device)
                 else:
@@ -462,8 +476,14 @@ class DiffusersAudioSession:
         self.execution_details["optimizations"] = optimization_candidates()
         from ai_attention_policy import configure_attention
         self.execution_details["attention"] = configure_attention(components, backend.lower(), attention)
+        if compilation:
+            from ai_execution_policy import compile_components
+            self.execution_details["compilation"] = compile_components(components, self.execution_device)
 
     def close(self):
+        if getattr(self, "_loaded_disk_bank", None) is not None:
+            self._loaded_disk_bank.close()
+            self._loaded_disk_bank = None
         if self._int8_stage is not None:
             self._int8_stage.close()
             self._int8_stage = None
@@ -488,6 +508,16 @@ class DiffusersAudioSession:
             minimum = required.resident_bytes + required.transient_bytes + required.reserve_bytes + required.kv_bytes
             minimum += module_weight_bytes([self.pipe.rvq_depth_decoder])
             return budget is not None and budget < minimum
+        plan = getattr(self, "_minimax_memory_plan", None)
+        if plan is not None and plan.resident_required_bytes is not None:
+            minimum = {"resident": plan.resident_required_bytes, "model-offload": plan.stage_required_bytes,
+                       "group-offload": plan.group_required_bytes}[mode]
+            if mode == "group-offload" and self.execution_details["streaming"]:
+                ram = available_host_memory()
+                if ram is None or ram < plan.staging_bytes + 3*GIB:
+                    return True
+            return (minimum is not None and budget is not None and budget < minimum
+                    and (mode != "group-offload" or self.execution_details["streaming"]))
         scale = 1 if self.execution_details["precision"] == "bfloat16" else 2
         minimum = ({"resident": 23, "model-offload": 22, "group-offload": 8}[mode] * scale
                    + (0 if mode == "group-offload" else 3)) * GIB
@@ -561,9 +591,13 @@ class DiffusersAudioSession:
                 placement += " (lower RAM use)"
         physical = details.get("physicalDevice", details["device"])
         precision = details["precision"]
-        if details.get("quantization") == "int8":
+        if details.get("quantization") in {"int8", "torchao-int8"}:
             precision += " / INT8 language model" if self.model_id == "minimax-music-3" else " / INT8 diffusion transformer"
+        if details.get("quantization") == "fp8-storage":
+            precision += " / experimental FP8 transformer storage"
         summary = f"{physical} · {details['device']} · {precision} · {placement} · automatic SDPA"
+        if details.get("compilation", {}).get("state") == "pass":
+            summary += " · compiled repeated blocks"
         if details.get("attention", {}).get("requested", "native") != "native":
             summary = summary.replace("automatic SDPA", details["attention"]["requested"] + " attention")
         if details.get("residency"):
@@ -571,7 +605,7 @@ class DiffusersAudioSession:
         if self.device == "cuda":
             try:
                 import torch
-                summary += f" · GPU {torch.cuda.memory_allocated() / GIB:.1f} GiB allocated"
+                summary += f" · GPU {torch.cuda.memory_allocated(self.execution_device) / GIB:.1f} GiB allocated"
             except (ImportError, RuntimeError, AttributeError):
                 pass
         return summary
@@ -594,7 +628,14 @@ class DiffusersAudioSession:
         with observe_generation(self.pipe, self.model_id, kwargs["duration"], kwargs.get("steps", 8), progress_callback) as (report, timings):
             self._report_progress = report
             try:
-                return self._generate(**kwargs)
+                from ai_compilation import compilation_proof
+                with compilation_proof(getattr(self, "execution_details", {}).get("compilation")):
+                    audio = self._generate(**kwargs)
+                storage = getattr(self, "execution_details", {}).get("layerwiseStorage")
+                if storage:
+                    from ai_layerwise_storage import verify_fp8_storage
+                    verify_fp8_storage(self.pipe.transformer, storage)
+                return audio
             finally:
                 self._report_progress = None
                 if getattr(self, "_int8_stage", None) is not None:

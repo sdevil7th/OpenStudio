@@ -1,0 +1,28 @@
+{
+  "name": "openstudio",
+  "title": "OpenStudio",
+  "summary": "Record, edit and mix audio and MIDI",
+  "description": "OpenStudio is a digital audio workstation for recording, editing and mixing music. Work with audio and MIDI tracks, edit notes in the piano roll, use built-in instruments and effects, host native VST3, CLAP and LV2 plugins, and export finished mixes.\n\nNAM Rack provides a guitar-rig workflow using Neural Amp Modeler models and cabinet impulse responses. Optional AI stem-separation and generation features require additional runtimes and models.\n\nOpenStudio Support is a separate, explicitly opened application for reviewing existing diagnostics and inspecting audio or MIDI exports. Nothing is uploaded automatically. Close the DAW before collecting evidence, review the output, and share it yourself.\n\nAudio interface, driver and plugin compatibility depend on the system; automated checks do not guarantee dropout-free recording at every buffer size.",
+  "keywords": [
+    "daw",
+    "audio",
+    "midi",
+    "recording",
+    "music-production"
+  ],
+  "category": "music-and-audio",
+  "license": "AGPL-3.0-only",
+  "website": "https://openstudio.org.in",
+  "contact": "mailto:support@openstudio.org.in",
+  "issues": "https://github.com/sdevil7th/OpenStudio/issues",
+  "source-code": "https://github.com/sdevil7th/OpenStudio",
+  "iconSource": "frontend/public/icon.png",
+  "iconDimensions": "512x512",
+  "screenshots": [],
+  "screenshotsStatus": "awaiting reviewed native Linux candidate captures",
+  "storeApplied": false,
+  "storeIconApplied": true,
+  "storeIconSha256": "32ee0324c1fc4d30d1451bee95af868040e6775217b3ca24f2fa994d0ab57297",
+  "storeTextStatus": "staged; API rejects nonempty summary/description as blank; owner chose to revisit after package qualification",
+  "published": false
+}

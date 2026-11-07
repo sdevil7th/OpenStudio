@@ -1,0 +1,4 @@
+# Optional: collection and MIDI structure inspection use only Python 3.11+ stdlib.
+# Install in a separate environment; never in the app's audio/AI runtime.
+numpy>=1.26,<3
+soundfile==0.13.1

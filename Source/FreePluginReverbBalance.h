@@ -77,7 +77,7 @@ inline juce::var renderReverbBalancePack()
                     else tailEnergy += full * full;
                 }
             maximumHalfError = juce::jmax(maximumHalfError, halfError); maximumGainError = juce::jmax(maximumGainError, gainError);
-            const auto rms = [rate] (double energy) { return std::sqrt(energy / (2 * rate * 3)); };
+            const auto rms = [rate=rate] (double energy) { return std::sqrt(energy / (2 * rate * 3)); };
             const auto ratio = [] (double wet, double dry) { return 10 * std::log10(juce::jmax(1e-30, wet) / juce::jmax(1e-30, dry)); };
             auto* row = new juce::DynamicObject(); row->setProperty("type", type);
             row->setProperty("name", type < 27 ? juce::String(names[static_cast<size_t>(type)]) : juce::String(BuiltInRetroReverb::names[static_cast<size_t>(type - 27)]));

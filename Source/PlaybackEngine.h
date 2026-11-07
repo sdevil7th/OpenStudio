@@ -1,4 +1,5 @@
 #pragma once
+#include "RealtimeSourceReadWindow.h"
 
 #include <JuceHeader.h>
 
@@ -16,6 +17,7 @@
 #include <map>
 #include <limits>
 #include <array>
+#include <functional>
 
 /**
  * PlaybackEngine manages audio clip playback for the DAW.
@@ -24,6 +26,16 @@
  */
 class PlaybackEngine
 {
+    struct FullyDecodedSource;
+    struct StreamingContinuityState;
+    struct PreparedSourceBinding
+    {
+        juce::uint64 generation = 0;
+        const FullyDecodedSource* decoded = nullptr;
+        juce::AudioFormatReader* reader = nullptr;
+        StreamingContinuityState* continuity = nullptr;
+    };
+
 public:
     PlaybackEngine();
     ~PlaybackEngine();
@@ -45,6 +57,7 @@ public:
         double duration;       // Clip duration (seconds)
         double offset;         // Offset into audio file (for trimming, seconds)
         double volumeDB;       // Per-clip gain (-60 to +12 dB)
+        float linearGain;      // Prepared with the clip, never recomputed per callback
         double fadeIn;         // Fade in length (seconds)
         double fadeOut;        // Fade out length (seconds)
         int fadeInCurve;       // Fade in curve type: 0=linear, 1=equal_power, 2=s_curve, 3=log, 4=exp
@@ -54,23 +67,38 @@ public:
         juce::String envelopeKey;    // Pre-computed "trackId::clipId" key — avoids string alloc in audio thread
         juce::String readerKey;      // Stable read-ahead stream for this logical clip
         bool isActive;         // Whether clip is currently loaded
+        juce::uint64 publicationSerial = 0;
+        // Populated by getClipSnapshot; the realtime envelope remains in its keyed map.
+        std::vector<GainEnvelopePoint> gainEnvelope;
 
         ClipInfo(const juce::File& file, double start, double dur, const juce::String& track, double off = 0.0,
                  double volDB = 0.0, double fIn = 0.0, double fOut = 0.0, int fInCurve = 0, int fOutCurve = 0)
             : audioFile(file), startTime(start), duration(dur), offset(off),
-              volumeDB(volDB), fadeIn(fIn), fadeOut(fOut), fadeInCurve(fInCurve), fadeOutCurve(fOutCurve),
+              volumeDB(volDB), linearGain(juce::Decibels::decibelsToGain(static_cast<float>(volDB))),
+              fadeIn(fIn), fadeOut(fOut), fadeInCurve(fInCurve), fadeOutCurve(fOutCurve),
               trackId(track), isActive(true) {}
+
+    private:
+        friend class PlaybackEngine;
+        // Borrowed only while the publication lock is held. A resource change
+        // invalidates this binding before any cached pointer can be used.
+        mutable PreparedSourceBinding preparedSource;
     };
     
     // Clip management
     void addClip(const juce::File& audioFile, double startTime, double duration, const juce::String& trackId,
                  double offset = 0.0, double volumeDB = 0.0, double fadeIn = 0.0, double fadeOut = 0.0,
                  const juce::String& clipId = juce::String(), const juce::File& sourceAudioFile = juce::File(),
-                 double sourceOffset = -1.0);
+                 double sourceOffset = -1.0, int fadeInCurve = 0, int fadeOutCurve = 0);
     void removeClip(const juce::String& trackId, const juce::String& filePath);
     void removeClipById(const juce::String& trackId, const juce::String& clipId);
     void clearAllClips();
     void clearTrackClips(const juce::String& trackId);
+    void addClipFromSnapshot(const ClipInfo& clip);
+    bool replaceClipSourcePreservingTimeline(const juce::String& trackId, const juce::String& clipId,
+        const juce::File& expectedFile, const juce::File& replacement, const juce::File& immutableSource,
+        double immutableOffset, const std::function<bool()>& keepRunning = {},
+        const std::function<std::shared_ptr<void>()>& publicationLeaseFactory = {});
 
     // Hot-swap a clip's audio file (used after pitch correction writes a new file)
     void replaceClipAudioFile(const juce::String& clipId, const juce::File& newFile);
@@ -89,6 +117,7 @@ public:
         double endSec = 0.0;
         double fileOffsetSec = 0.0;
         juce::String readerKey;
+        mutable PreparedSourceBinding preparedSource;
     };
 
     struct ClipPlaybackSourceStatus
@@ -121,12 +150,19 @@ public:
                              const std::vector<GainEnvelopePoint>& points);
     
     // Called from audio callback to fill track buffer with playback audio
-    // Called from audio callback to fill track buffer with playback audio
+    // Cache this key when publishing a track; zero requests the legacy lookup.
+    static juce::int64 prepareTrackContinuityKey(const juce::String& trackId) noexcept
+    {
+        const auto key = trackId.hashCode64();
+        return key == 0 ? 1 : key;
+    }
     void fillTrackBuffer(const juce::String& trackId,
                         juce::AudioBuffer<float>& buffer,
                         double currentTime,
                         int numSamples,
-                        double sampleRate);
+                        double sampleRate,
+                        bool foldStereoSourceToMono = false,
+                        juce::int64 preparedContinuityKey = 0);
     
     // ---- Real-time pitch preview ----
 
@@ -260,6 +296,11 @@ public:
     int getAudioDataCacheMissCount() const { return audioDataCacheMissCount.load(std::memory_order_relaxed); }
     int getAudioDataCachedFileCount() const { return cachedReaderCount.load(std::memory_order_acquire); }
     juce::int64 getStreamingReadAheadCapacityBytes() const;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    juce::uint64 getStreamingWindowHits() const { return streamingWindowCounters.hits.load(std::memory_order_relaxed); }
+    juce::uint64 getStreamingWindowReads() const { return streamingWindowCounters.reads.load(std::memory_order_relaxed); }
+    juce::uint64 getStreamingWindowFallbacks() const { return streamingWindowCounters.fallbacks.load(std::memory_order_relaxed); }
+#endif
     int getStreamingReaderEvictionCount() const { return streamingReaderEvictionCount.load(std::memory_order_relaxed); }
     int getStreamingReaderBudgetOvercommitCount() const { return streamingReaderBudgetOvercommitCount.load(std::memory_order_relaxed); }
     int getFullyDecodedSourceCount() const { return fullyDecodedSourceCount.load(std::memory_order_acquire); }
@@ -305,6 +346,9 @@ public:
     static OuterLockContinuityRegressionResult
         runOuterLockContinuityRegression();
 
+    // Device-free boundary parity and diagnostic-only fixed-cost benchmark.
+    static juce::var runSampleBoundaryRegression();
+
     // Control-thread hint used before starts/seeks. It only requests/optionally
     // waits for JUCE's background buffering thread; source decoding never runs
     // on the realtime callback.
@@ -315,6 +359,19 @@ public:
 
     // Render mode: uses Lagrange interpolation for higher quality resampling
     void setRenderMode(bool isRendering) { renderMode = isRendering; }
+
+    // Select before adding clips on an isolated offline worker. This changes
+    // I/O policy only; realtime readers must remain nonblocking.
+    void setOfflineSourceReads(bool enabled)
+    {
+        if (offlineSourceReads != enabled) invalidatePreparedSources();
+        offlineSourceReads = enabled;
+    }
+    bool hasOfflineSourceReadFailure() const noexcept { return offlineSourceReadFailure.load(); }
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    juce::uint64 getSourceBindingResolutionCount() const noexcept
+    { return sourceBindingResolutionCount.load(std::memory_order_relaxed); }
+#endif
 
     // Each streaming reader holds two 32768-frame blocks and source readers are
     // capped to two channels. The normal cache target is therefore 128 MiB.
@@ -340,8 +397,12 @@ private:
         juce::int64 decodedBytes = 0;
     };
 
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    RealtimeSourceReadWindow::Counters streamingWindowCounters;
+#endif
     struct StreamingContinuityState
     {
+        std::unique_ptr<RealtimeSourceReadWindow> readWindow;
         std::array<float, 2> lastOutput {};
         std::array<float, 2> concealedOutput {};
         double expectedNextTimelineTime = 0.0;
@@ -369,6 +430,10 @@ private:
     };
 
     std::vector<ClipInfo> clips;
+    // Published under lock on clip insertion/removal. Tiny callbacks must only
+    // visit this track's clips instead of rescanning the entire project.
+    std::map<juce::String, std::vector<size_t>> clipIndicesByTrack;
+    void rebuildClipIndicesLocked();
     // Declared before readers so it outlives them during reverse-order member
     // destruction. BufferingAudioReader registers itself as a time-slice client.
     juce::TimeSliceThread streamingReadAheadThread { "PlaybackEngine-ReadAhead" };
@@ -383,6 +448,12 @@ private:
     // waits on a decoder/read-ahead lock.
     std::map<juce::String, std::unique_ptr<FullyDecodedSource>>
         fullyDecodedSources;
+    // Offline renders decode one bounded block at a time, synchronously, and
+    // never conceal a read-ahead miss as successfully rendered audio.
+    std::map<juce::String, std::unique_ptr<juce::AudioFormatReader>> offlineReaders;
+    bool offlineSourceReads = false;
+    juce::uint64 nextClipPublicationSerial = 0;
+    std::atomic<bool> offlineSourceReadFailure { false };
     std::map<juce::String, juce::int64>
         fullyDecodedSourceAccessTimes;
     juce::int64 fullyDecodedBytesInUse = 0;
@@ -410,12 +481,20 @@ private:
     juce::uint64 trackPlaybackContinuityUseCounter = 0;
     StreamingContinuityState&
         getTrackPlaybackContinuityState(
-            const juce::String& trackId) noexcept;
+            juce::int64 trackKey) noexcept;
 
     // Get cached audio format reader (audio-thread safe — never creates readers)
-    juce::BufferingAudioReader* getCachedReader(const juce::String& readerKey);
+    juce::AudioFormatReader* getCachedReader(const juce::String& readerKey);
     const FullyDecodedSource* getFullyDecodedSource(
         const juce::String& readerKey) const noexcept;
+    const PreparedSourceBinding& resolvePreparedSource(
+        const juce::String& readerKey, PreparedSourceBinding& binding);
+    // Protected by lock (or exclusively owned by an offline worker).
+    juce::uint64 sourceBindingGeneration = 1;
+#if OPENSTUDIO_ENABLE_CALLBACK_DIAGNOSTICS
+    std::atomic<juce::uint64> sourceBindingResolutionCount { 0 };
+#endif
+    void invalidatePreparedSources() noexcept { ++sourceBindingGeneration; }
 
     // Pre-load reader on message thread so it's ready for audio thread
     void preloadReader(const juce::File& file,

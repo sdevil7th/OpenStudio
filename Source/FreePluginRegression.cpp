@@ -2797,12 +2797,12 @@ juce::var checkPreviewCallbackBounds()
     constexpr int capacity = 512;
     constexpr float poison = 0.375f;
     const std::array<int, 5> blockSizes { 5, 8, 16, 127, capacity };
-    const auto poisonBuffer = [poison] (juce::AudioBuffer<float>& buffer)
+    const auto poisonBuffer = [poison=poison] (juce::AudioBuffer<float>& buffer)
     {
         for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
             juce::FloatVectorOperations::fill(buffer.getWritePointer(channel), poison, buffer.getNumSamples());
     };
-    const auto suffixUntouched = [poison] (const juce::AudioBuffer<float>& buffer, int start)
+    const auto suffixUntouched = [poison=poison] (const juce::AudioBuffer<float>& buffer, int start)
     {
         for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
             for (int sample = start; sample < buffer.getNumSamples(); ++sample)

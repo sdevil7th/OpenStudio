@@ -47,6 +47,10 @@ def main():
     window.set_decorated(False)
     window.set_default_size(1200, 900)
     browser = WebKit2.WebView.new_with_context(WebKit2.WebContext.new_ephemeral())
+    # Xvfb has no DRI3 device. A WebKit compositor can keep a live DOM behind a
+    # blank surface here; qualify controls using its supported software path.
+    # Actual installed-app graphics remain covered by native window qualification.
+    browser.get_settings().set_hardware_acceleration_policy(WebKit2.HardwareAccelerationPolicy.NEVER)
     window.add(browser)
     x11 = ctypes.CDLL('libX11.so.6')
     xtest = ctypes.CDLL('libXtst.so.6')
@@ -65,7 +69,9 @@ def main():
     xtest.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
     report = {'engine': 'system WebKitGTK', 'version': [WebKit2.get_major_version(),
               WebKit2.get_minor_version(), WebKit2.get_micro_version()],
-              'backend': 'frontend mock bridge; audio not asserted', 'checks': [], 'success': False}
+              'backend': 'frontend mock bridge; audio not asserted',
+              'graphics': 'software controls under Xvfb; hardware GPU not asserted',
+              'checks': [], 'success': False}
     finished = False
 
     def check(name, passed, detail=None):
@@ -76,7 +82,10 @@ def main():
     def audit():
         selector = 'input[aria-label^="Volume fader for"]'
         for _ in range(60):
-            ready = yield ('js', f'document.querySelector({json.dumps(selector)}) !== null')
+            # React can mount the faders while its startup layers still block
+            # native input. DOM presence alone is not workspace readiness.
+            ready = yield ('js', f'''document.querySelector({json.dumps(selector)}) !== null
+                && !document.querySelector('#openstudio-boot-overlay, [data-qa="app-startup-loading"]')''')
             if ready:
                 break
             yield ('wait', 250)

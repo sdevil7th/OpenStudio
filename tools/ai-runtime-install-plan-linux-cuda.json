@@ -1,24 +1,24 @@
 {
   "steps": [
     {
-      "type": "pip_install",
-      "description": "Installing GPU stem separation packages",
-      "stepLabel": "Installing GPU stem separation packages",
-      "features": ["stemSeparation", "audioGeneration"],
-      "packages": ["audio-separator[gpu]==0.41.1"]
-    },
-    {
       "type": "pip_uninstall",
-      "features": ["audioGeneration"],
+      "features": ["stemSeparation", "audioGeneration"],
       "packages": ["torch", "torchvision", "torchaudio"]
     },
     {
       "type": "pip_install",
       "description": "Installing CUDA-capable PyTorch wheels",
       "stepLabel": "Installing CUDA PyTorch wheels",
-      "features": ["audioGeneration"],
+      "features": ["stemSeparation", "audioGeneration"],
       "indexUrl": "https://download.pytorch.org/whl/cu128",
-      "packages": ["torch==2.11.0+cu128", "torchaudio==2.11.0+cu128"]
+      "packages": ["torch==2.11.0+cu128", "torchvision==0.26.0+cu128", "torchaudio==2.11.0+cu128"]
+    },
+    {
+      "type": "pip_install",
+      "description": "Installing GPU stem separation packages",
+      "stepLabel": "Installing GPU stem separation packages",
+      "features": ["stemSeparation", "audioGeneration"],
+      "packages": ["audio-separator[gpu]==0.41.1", "librosa==0.11.0", "audioread==3.1.0"]
     },
     {
       "type": "pip_install",

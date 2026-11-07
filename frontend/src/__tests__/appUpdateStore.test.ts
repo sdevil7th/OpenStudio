@@ -13,9 +13,9 @@ describe("in-app update workflow", () => {
     useAppUpdateStore.getState().acceptStatus({ ...offer, status: "incompatible", message: "A newer OS is required." });
     expect(useAppUpdateStore.getState()).toMatchObject({ downloaded: false, offer: null, status: { status: "incompatible" } });
   });
-  it("native Linux packages discard AppImage offers and skip automatic installer updates", async () => {
+  it.each(["linux-package", "snap-store"])("%s installations discard AppImage offers and skip automatic installer updates", async (updateSource) => {
     useAppUpdateStore.getState().acceptStatus({ ...offer, status: "download-ready", platform: "linux" });
-    useAppUpdateStore.getState().acceptStatus({ status: "manual-update", message: "Use the matching .deb installer", updateSource: "linux-package" });
+    useAppUpdateStore.getState().acceptStatus({ status: "manual-update", message: "Use the installation's package manager", updateSource });
     expect(useAppUpdateStore.getState()).toMatchObject({ downloaded: false, offer: null });
     await useAppUpdateStore.getState().check(false);
     await useAppUpdateStore.getState().download();

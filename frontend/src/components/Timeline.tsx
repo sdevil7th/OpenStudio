@@ -1,5 +1,7 @@
-import React, { useRef, useEffect, useState, useCallback, useMemo, useTransition } from "react";
-import { Stage, Layer, Rect, Line, Text, Group, Circle } from "react-konva";
+import { exportMIDISelection, selectedMIDIExportEntries } from "../utils/midiSelectionExport";
+import "./Timeline.css";
+import React, { useRef, useEffect, useState, useCallback, useMemo, useSyncExternalStore } from "react";
+import { Stage, Layer, Rect, Line, Text, Group, Circle, Shape } from "react-konva";
 import type Konva from "konva";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type KonvaEvent = any; // Konva events access .evt.shiftKey, .target.getStage() etc. — full typing requires 70+ null guards
@@ -31,8 +33,10 @@ import {
   WaveformPeak,
   type ExternalMediaDragEvent,
   type MIDIImportTrack,
+  type MIDIExportOptions,
 } from "../services/NativeBridge";
 import { ContextMenu } from "./ContextMenu";
+import { getClipPlaybackGainEnvelope, interpolateClipGain, windowCrossfadeLayers } from "../utils/clipCrossfades";
 import { HorizontalScrollbar } from "./HorizontalScrollbar";
 import { MemoizedPlayhead as Playhead } from "./Playhead";
 import {
@@ -43,7 +47,9 @@ import {
   ticksToSeconds,
 } from "../utils/snapToGrid";
 import { getRulerClickSnapTime } from "../utils/rulerClickSnap";
+import { getTimelineRulerDensity } from "../utils/timelineRulerDensity";
 import { getRulerDragZoom, resolveRulerDragAxis } from "../utils/timelineRulerDrag";
+import { planWaveformTiles, readWaveformTileWindow, type WaveformTileRequest } from "../utils/waveformTiles";
 import {
   RecordingPreviewScheduler,
   recordingPeakX,
@@ -62,6 +68,7 @@ import {
 import {
   fadeInCurvePoints,
   fadeOutCurvePoints,
+  fadeCurve,
 } from "../utils/fadeUtils";
 import {
   getAutomationColor,
@@ -78,7 +85,7 @@ import {
   type InsertableTrackType,
 } from "../utils/trackCreation";
 import { buildScrollbarOverview } from "../utils/scrollbarOverview";
-import { buildMIDIThumbnailBars, sampleMIDIThumbnailBars } from "../utils/midiPreview";
+import { buildMIDIThumbnailBars, MIDIThumbnailIndex, sampleMIDIThumbnailBars } from "../utils/midiPreview";
 import { getMIDIClipSourceLoopLength, getVisibleMIDIEventsForClip, serializeMIDIClipsForBackend } from "../utils/midiClipSerialization";
 import {
   buildTimelineClipHitMap,
@@ -94,6 +101,7 @@ import {
 } from "../utils/timelineClipGestures";
 import {
   resolveTimelineDropTrackIndex,
+  resolveTimelineInsertionIndex,
   type TimelineDragAxisLock,
 } from "../utils/timelineDragAxisLock";
 import {
@@ -189,6 +197,10 @@ import {
   createTimelineGestureUndoCommand,
   reconcileTimelineTrackTopology,
 } from "../utils/timelineGestureUndo";
+import { midiExportOptions } from "../utils/midiExportOptions";
+import { getProjectEpoch } from "../utils/projectLifetime";
+import { WaveformRequestQueue } from "../utils/waveformRequestQueue";
+import { canEditSelectedCrossfade, midiJoinSelection, selectedCrossfadePairs } from "../store/actions/timelineEnhancements";
 
 // Constants
 const RULER_HEIGHT = 30;
@@ -286,6 +298,7 @@ type ExternalMediaDragContext = {
   sampleRate?: number;
   peaks?: WaveformPeak[];
   midiTracks?: MIDIImportTrack[];
+  sourceTempoInfo?: MIDIExportOptions;
   midiEvents?: MIDIEvent[];
   midiTrackCount?: number;
 };
@@ -402,6 +415,7 @@ type TimelineDragState = {
   clipId: string | null;
   trackIndex: number | null;
   targetTrackIndex: number | null;
+  insertTrackIndex?: number;
   startX: number;
   startY: number;
   startTime: number;
@@ -568,6 +582,7 @@ const cloneTimelineGestureTracks = (tracks: Track[]): Track[] =>
     clips: track.clips.map((clip) => ({
       ...clip,
       gainEnvelope: clip.gainEnvelope ? clip.gainEnvelope.map((point) => ({ ...point })) : clip.gainEnvelope,
+      crossfadeLayers: clip.crossfadeLayers?.map((layer) => ({ ...layer, memberClipIds: [...layer.memberClipIds], points: layer.points.map(point => ({ ...point })), settings: { ...layer.settings } })),
     })),
     midiClips: track.midiClips.map((clip) => ({
       ...clip,
@@ -672,6 +687,315 @@ const interpolateAutomationDrawSegment = (
   return points;
 };
 
+interface RecordingWaveformStore {
+  getSnapshot: () => RecordingWaveformCache;
+  subscribe: (listener: () => void) => () => void;
+  publish: (cache: RecordingWaveformCache) => void;
+}
+
+function createRecordingWaveformStore(): RecordingWaveformStore {
+  let cache: RecordingWaveformCache = new Map();
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => cache,
+    subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    publish: (next) => { cache = next; listeners.forEach(listener => listener()); },
+  };
+}
+
+interface RecordingClipsLayerProps {
+  tracks: Track[];
+  trackYs: number[];
+  trackHeight: number;
+  pixelsPerSecond: number;
+  scrollX: number;
+  scrollY: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  waveforms: RecordingWaveformStore;
+  renderCompactMIDIThumbnail: (
+    events: MIDIEvent[], clipDuration: number, x: number, width: number,
+    clipY: number, previewHeight: number, clipColor: string, isMuted: boolean,
+    activeNotes?: { note: number; startTimestamp: number }[], cacheId?: string,
+  ) => React.ReactNode;
+}
+
+// Growing takes repaint their own canvas. Completed clip artwork and its event
+// handlers do not need React reconciliation or canvas redraw at preview cadence.
+const RecordingClipsLayer = React.memo(function RecordingClipsLayer({
+  tracks, trackYs, trackHeight, pixelsPerSecond, scrollX, scrollY,
+  viewportWidth, viewportHeight, waveforms, renderCompactMIDIThumbnail,
+}: RecordingClipsLayerProps) {
+  const { recordingClips, recordingMIDIPreviews, isRecording } = useDAWStore(useShallow(state => ({
+    recordingClips: state.recordingClips,
+    recordingMIDIPreviews: state.recordingMIDIPreviews,
+    isRecording: state.transport.isRecording,
+  })));
+  const recordingWaveformCache = useSyncExternalStore(waveforms.subscribe, waveforms.getSnapshot, waveforms.getSnapshot);
+  const [recordingRenderTime, setRecordingRenderTime] = useState(
+    () => useDAWStore.getState().transport.currentTime,
+  );
+
+  useEffect(() => {
+    if (!isRecording || recordingClips.length === 0) {
+      setRecordingRenderTime(useDAWStore.getState().transport.currentTime);
+      return;
+    }
+
+    // Clip growth does not need the playhead's 60 Hz React update rate.
+    // Playhead keeps its independent imperative transport subscription.
+    const updateGeometry = () => setRecordingRenderTime(useDAWStore.getState().transport.currentTime);
+    updateGeometry();
+    const timer = window.setInterval(updateGeometry, RECORDING_GEOMETRY_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [isRecording, recordingClips.length]);
+
+  useEffect(() => {
+    const recordingMIDITrackIds = recordingClips
+      .map((clip) => clip.trackId)
+      .filter((trackId) => {
+        const track = tracks.find((candidate) => candidate.id === trackId);
+        return track?.type === "midi" || track?.type === "instrument";
+      });
+
+    if (!isRecording || recordingMIDITrackIds.length === 0) {
+      if (Object.keys(useDAWStore.getState().recordingMIDIPreviews).length > 0) {
+        useDAWStore.setState({ recordingMIDIPreviews: {} });
+      }
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+
+    const fetchRecordingMIDIPreviews = async () => {
+      if (inFlight) return;
+      inFlight = true;
+
+      try {
+        const state = useDAWStore.getState();
+        const requests = recordingMIDITrackIds.map((trackId) => {
+          const preview = state.recordingMIDIPreviews[trackId];
+          return {
+            trackId,
+            generation: preview?.generation ?? 0,
+            knownEventCount: preview?.totalEventCount ?? 0,
+          };
+        });
+
+        const previews = await nativeBridge.getActiveRecordingMIDIPreviews(requests);
+        if (cancelled || previews.length === 0) return;
+
+        useDAWStore.setState((currentState) => {
+          const nextPreviews = Object.fromEntries(
+            recordingMIDITrackIds
+              .filter((trackId) => currentState.recordingMIDIPreviews[trackId] !== undefined)
+              .map((trackId) => [trackId, currentState.recordingMIDIPreviews[trackId]]),
+          ) as typeof currentState.recordingMIDIPreviews;
+
+          for (const preview of previews) {
+            const existing = currentState.recordingMIDIPreviews[preview.trackId];
+            const shouldReset =
+              !existing ||
+              existing.generation !== preview.generation ||
+              existing.totalEventCount > preview.totalEventCount ||
+              existing.recordingStartTime !== preview.recordingStartTime;
+
+            const deltaEvents: MIDIEvent[] = preview.deltaEvents.map((event) => ({
+              timestamp: event.timestamp,
+              type: event.type as MIDIEvent["type"],
+              note: event.note,
+              velocity: event.velocity,
+              channel: event.channel,
+            }));
+
+            nextPreviews[preview.trackId] = {
+              generation: preview.generation,
+              recordingStartTime: preview.recordingStartTime,
+              totalEventCount: preview.totalEventCount,
+              events: shouldReset ? deltaEvents : deltaEvents.length ? [...existing.events, ...deltaEvents] : existing.events,
+              activeNotes: preview.activeNotes,
+            };
+          }
+
+          return { recordingMIDIPreviews: nextPreviews };
+        });
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void fetchRecordingMIDIPreviews();
+    const intervalId = window.setInterval(() => {
+      void fetchRecordingMIDIPreviews();
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [isRecording, recordingClips, tracks]);
+
+  // Render recording clip with live waveform
+  const renderRecordingClip = (
+    clip: RecordingClip,
+    trackY: number,
+    trackColor: string,
+  ) => {
+    const track = tracks.find((candidate) => candidate.id === clip.trackId);
+    const isMIDIRecordingTrack =
+      track?.type === "midi" || track?.type === "instrument";
+    const rowMetrics = getTimelineRowMetrics(
+      track ?? {
+        type: "audio",
+        showAutomation: false,
+        automationLanes: [],
+      },
+      trackHeight,
+    );
+    const clipY = trackY + rowMetrics.clipInsetY;
+    const clipHeight = rowMetrics.clipHeight;
+    const x = clip.startTime * pixelsPerSecond - scrollX;
+    const width = (recordingRenderTime - clip.startTime) * pixelsPerSecond;
+    const previewHeight = Math.max(8, clipHeight - 10);
+
+    if (width <= 0) return null;
+
+    // Get recording waveform data if available
+    const recordingData = recordingWaveformCache.get(clip.trackId);
+    const midiPreview = recordingMIDIPreviews[clip.trackId];
+
+    // Generate waveform visualization from recording peaks
+    const renderRecordingWaveform = (): React.ReactNode[] => {
+      if (!recordingData || recordingData.peaks.length === 0) return [];
+
+      if (recordingData.recordingStartTime !== clip.startTime) return [];
+      const { peaks: recordingPeaks } = recordingData;
+      const numChannels = recordingPeaks[0]?.channels?.length || 1;
+      const waveforms: React.ReactNode[] = [];
+      const waveformHeight = Math.max(8, clipHeight - 10);
+      const pixelsPerPeak = recordingData.samplesPerPixel / recordingData.sampleRate * pixelsPerSecond;
+      const waveformX = recordingPeakX(recordingData, 0, pixelsPerSecond, scrollX);
+      const firstVisiblePeak = Math.max(
+        0,
+        Math.floor((-waveformX) / Math.max(pixelsPerPeak, 0.001)) - 1,
+      );
+      const lastVisiblePeak = Math.min(
+        recordingPeaks.length,
+        Math.ceil((viewportWidth - waveformX) / Math.max(pixelsPerPeak, 0.001)) + 1,
+      );
+
+      for (let ch = 0; ch < numChannels; ch++) {
+        const points: number[] = [];
+        const channelHeight = waveformHeight / numChannels;
+        const channelY = clipY + 5 + ch * channelHeight;
+        const centerY = channelY + channelHeight / 2;
+        const halfHeight = channelHeight / 2 - 2;
+
+        // Reproject source sample bins at the current zoom, even while a new
+        // resolution is pending. Cached peaks never retain obsolete pixel widths.
+        for (let i = firstVisiblePeak; i < lastVisiblePeak; i++) {
+          const channelData = recordingPeaks[i].channels[ch];
+          if (!channelData) continue;
+
+          const px = waveformX + i * pixelsPerPeak;
+          const py = centerY - channelData.max * halfHeight;
+          points.push(px, py);
+        }
+
+        // Draw bottom half (min values, reversed)
+        for (let i = lastVisiblePeak - 1; i >= firstVisiblePeak; i--) {
+          const channelData = recordingPeaks[i].channels[ch];
+          if (!channelData) continue;
+
+          const px = waveformX + i * pixelsPerPeak;
+          const py = centerY - channelData.min * halfHeight;
+          points.push(px, py);
+        }
+
+        if (points.length > 0) {
+          waveforms.push(
+            <Line
+              key={`recording-waveform-${clip.trackId}-ch${ch}`}
+              perfectDrawEnabled={false}
+              points={points}
+              fill={trackColor}
+              opacity={0.8}
+              closed
+              stroke={trackColor}
+              strokeWidth={0.5}
+              listening={false}
+            />,
+          );
+        }
+      }
+
+      return waveforms;
+    };
+
+    return (
+      <Group key={`recording-${clip.trackId}`} name="recording-preview">
+        {/* Background */}
+        <Rect
+          x={x}
+          y={clipY}
+          width={width}
+          height={clipHeight}
+          fill={trackColor}
+          opacity={0.3}
+          cornerRadius={3}
+          stroke={trackColor}
+          strokeWidth={1}
+          perfectDrawEnabled={false}
+        />
+        {/* Live waveform or MIDI preview visualization */}
+        {isMIDIRecordingTrack
+          ? renderCompactMIDIThumbnail(
+              midiPreview?.events || [],
+              Math.max(0.001, recordingRenderTime - clip.startTime),
+              x,
+              width,
+              clipY,
+              previewHeight,
+              trackColor,
+              !!track?.muted,
+              midiPreview?.activeNotes ?? [],
+              `recording:${clip.trackId}:${midiPreview?.generation ?? 0}`,
+            )
+          : renderRecordingWaveform()}
+        {/* Recording indicator text */}
+        <Text
+          x={x + 5}
+          y={clipY + 3}
+          text="REC"
+          fontSize={10}
+          fill="#fff"
+          fontStyle="bold"
+          listening={false}
+        />
+        {/* Recording indicator dot (pulsing effect via opacity) */}
+        <Circle
+          x={x + 35}
+          y={clipY + 8}
+          radius={4}
+          fill="#ff3333"
+          listening={false}
+        />
+      </Group>
+    );
+  };
+
+  return <Layer name="timeline-recording" listening={false} offsetY={scrollY}>
+    {recordingClips.map(clip => {
+      const index = tracks.findIndex(track => track.id === clip.trackId);
+      if (index < 0) return null;
+      const track = tracks[index], y = trackYs[index];
+      if (y + getEffectiveTrackHeight(track, trackHeight) < scrollY || y > scrollY + viewportHeight) return null;
+      return renderRecordingClip(clip, y, track.color);
+    })}
+  </Layer>;
+});
+
 export function Timeline({
   tracks,
   masterAutomation,
@@ -681,10 +1005,14 @@ export function Timeline({
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const timelineStageRef = useRef<Konva.Stage>(null);
-  const [dimensions, setDimensions] = useState({ width: 800, height: 400 });
+  const [dimensions, setDimensions] = useState({ width: 800, height: 400, stickyHeaderHeight: 0 });
   const [waveformCache, setWaveformCache] = useState<WaveformCache>(new Map());
+  const waveformWindows = useMemo(() => new Map<string, WaveformPeak[]>(), [waveformCache]);
   const [waveformPreviewCache, setWaveformPreviewCache] = useState<WaveformCache>(new Map());
-  const [recordingWaveformCache, setRecordingWaveformCache] = useState<RecordingWaveformCache>(new Map());
+  const [recordingWaveformStore] = useState(createRecordingWaveformStore);
+  const midiThumbnailIndicesRef = useRef(new Map<string, MIDIThumbnailIndex>());
+  const midiVisibleEventsRef = useRef(new WeakMap<MIDIClip, MIDIEvent[]>());
+  const waveformArtworkRef = useRef(new Map<string, { key: string; clip: AudioClip; data?: WaveformPeak[]; preview?: WaveformPeak[]; shapes: React.ReactNode[] }>());
   // Canvas-only per-track view state: these scale-strip gestures do not edit
   // project/audio data, so they intentionally stay outside command undo.
   const [waveformScaleViews, setWaveformScaleViews] = useState<Record<
@@ -693,9 +1021,6 @@ export function Timeline({
   >>({});
   const waveformCacheRef = useRef(waveformCache);
   waveformCacheRef.current = waveformCache;
-  // Marks recording-waveform updates as low-priority so React won't interrupt
-  // the current RAF frame (playhead animation) to process them.
-  const [, startRecordingWaveformTransition] = useTransition();
 
   // Zooming flag — suppresses waveform fetches during active zoom
   const isZoomingRef = useRef(false);
@@ -727,10 +1052,10 @@ export function Timeline({
           currentTime: state.transport.currentTime,
         };
       },
-      isSuspended: () => isZoomingRef.current || isScrollingRef.current,
+      isInteracting: () => isZoomingRef.current || isScrollingRef.current,
       request: (trackId, samplesPerPixel, numPixels, startSample) =>
         nativeBridge.getRecordingPeaks(trackId, samplesPerPixel, numPixels, startSample),
-      publish: (cache) => startRecordingWaveformTransition(() => setRecordingWaveformCache(cache)),
+      publish: recordingWaveformStore.publish,
       onError: (error) => console.error(`${AUDIO_RECORD_LOG_PREFIX} waveformFetch:error`, { error }),
     });
   }
@@ -777,6 +1102,21 @@ export function Timeline({
 
   // In-flight waveform fetches — prevents duplicate concurrent requests for same cache key
   const inFlightRef = useRef<Set<string>>(new Set());
+  const waveformRequestTokensRef = useRef(new Map<string, symbol>());
+  const waveformGenerationRef = useRef(new Map<string, number>());
+  const waveformQueueRef = useRef(new WaveformRequestQueue());
+  const waveformCommitRef = useRef(new Map<string, { filePath: string; generation: number; peaks: WaveformPeak[] }>());
+  const waveformCommitFrameRef = useRef<number | null>(null);
+  const waveformMountedRef = useRef(true);
+  useEffect(() => {
+    waveformMountedRef.current = true;
+    return () => {
+      waveformMountedRef.current = false;
+      waveformQueueRef.current.clear(); waveformCommitRef.current.clear();
+      if (waveformCommitFrameRef.current !== null) cancelAnimationFrame(waveformCommitFrameRef.current);
+      waveformCommitFrameRef.current = null;
+    };
+  }, []);
 
   // Hovered automation point — for tooltip display
   const [hoveredAutoPoint, setHoveredAutoPoint] = useState<{
@@ -1038,6 +1378,7 @@ export function Timeline({
     fadeHandleGestureRef.current = null;
     clipVolumeGestureRef.current = null;
     slipEditRef.current = null;
+    setSlipFeedbackActive(false);
 
     if (hadTimelineDrag && !activeGesture.isFadeDrag) {
       restoreTimelineGestureUndo();
@@ -1076,6 +1417,7 @@ export function Timeline({
     isMidi: boolean,
     nextValues: { startTime: number; duration: number; offset: number },
   ) => {
+    const original = timelineGestureUndoRef.current?.tracks.flatMap(track => track.clips).find(clip => clip.id === clipId);
     return runTimelineClipGestureMutation(
       useDAWStore.getState(),
       [clipId],
@@ -1084,7 +1426,9 @@ export function Timeline({
           ...track,
           clips: isMidi
             ? track.clips
-            : track.clips.map((clip) => clip.id === clipId ? { ...clip, ...nextValues } : clip),
+            : track.clips.map((clip) => clip.id === clipId ? { ...clip, ...nextValues,
+              crossfadeLayers: windowCrossfadeLayers((original ?? clip).crossfadeLayers,
+                nextValues.startTime - (original ?? clip).startTime, nextValues.duration) } : clip),
           midiClips: isMidi
             ? track.midiClips.map((clip) => clip.id === clipId ? { ...clip, ...nextValues } : clip)
             : track.midiClips,
@@ -1326,6 +1670,7 @@ export function Timeline({
   const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
 
   // Slip editing state (the active mouse profile selects the gesture)
+  const [slipFeedbackActive, setSlipFeedbackActive] = useState(false);
   const slipEditRef = useRef<{
     clipId: string;
     trackId: string;
@@ -1369,7 +1714,7 @@ export function Timeline({
   // Use useShallow to prevent re-renders when unrelated state changes (like currentTime)
   const {
     recordingClips,
-    recordingMIDIPreviews,
+    audioConversionJobs,
     pixelsPerSecond,
     setZoom,
     seekTo,
@@ -1436,7 +1781,7 @@ export function Timeline({
   } = useDAWStore(
     useShallow((state) => ({
       recordingClips: state.recordingClips,
-      recordingMIDIPreviews: state.recordingMIDIPreviews,
+      audioConversionJobs: state.audioConversionJobs,
       pixelsPerSecond: state.pixelsPerSecond,
       setZoom: state.setZoom,
       seekTo: state.seekTo,
@@ -1515,108 +1860,14 @@ export function Timeline({
   const loopEnd = useDAWStore((state) => state.transport.loopEnd);
   const isPlaying = useDAWStore((state) => state.transport.isPlaying);
   const isRecording = useDAWStore((state) => state.transport.isRecording);
-  const [recordingRenderTime, setRecordingRenderTime] = useState(
-    () => useDAWStore.getState().transport.currentTime,
-  );
-
+  const [recordingExtentTime, setRecordingExtentTime] = useState(() => useDAWStore.getState().transport.currentTime);
   useEffect(() => {
-    if (!isRecording || recordingClips.length === 0) {
-      setRecordingRenderTime(useDAWStore.getState().transport.currentTime);
-      return;
-    }
-
-    // Clip growth does not need the playhead's 60 Hz React update rate.
-    // Playhead keeps its independent imperative transport subscription.
-    const updateGeometry = () => setRecordingRenderTime(useDAWStore.getState().transport.currentTime);
-    updateGeometry();
-    const timer = window.setInterval(updateGeometry, RECORDING_GEOMETRY_INTERVAL_MS);
+    if (!isRecording) return;
+    const update = () => setRecordingExtentTime(useDAWStore.getState().transport.currentTime);
+    update();
+    const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);
-  }, [isRecording, recordingClips.length]);
-
-  useEffect(() => {
-    const recordingMIDITrackIds = recordingClips
-      .map((clip) => clip.trackId)
-      .filter((trackId) => {
-        const track = tracks.find((candidate) => candidate.id === trackId);
-        return track?.type === "midi" || track?.type === "instrument";
-      });
-
-    if (!isRecording || recordingMIDITrackIds.length === 0) {
-      if (Object.keys(useDAWStore.getState().recordingMIDIPreviews).length > 0) {
-        useDAWStore.setState({ recordingMIDIPreviews: {} });
-      }
-      return;
-    }
-
-    let cancelled = false;
-    let inFlight = false;
-
-    const fetchRecordingMIDIPreviews = async () => {
-      if (inFlight) return;
-      inFlight = true;
-
-      try {
-        const state = useDAWStore.getState();
-        const requests = recordingMIDITrackIds.map((trackId) => {
-          const preview = state.recordingMIDIPreviews[trackId];
-          return {
-            trackId,
-            generation: preview?.generation ?? 0,
-            knownEventCount: preview?.totalEventCount ?? 0,
-          };
-        });
-
-        const previews = await nativeBridge.getActiveRecordingMIDIPreviews(requests);
-        if (cancelled || previews.length === 0) return;
-
-        useDAWStore.setState((currentState) => {
-          const nextPreviews = Object.fromEntries(
-            recordingMIDITrackIds
-              .filter((trackId) => currentState.recordingMIDIPreviews[trackId] !== undefined)
-              .map((trackId) => [trackId, currentState.recordingMIDIPreviews[trackId]]),
-          ) as typeof currentState.recordingMIDIPreviews;
-
-          for (const preview of previews) {
-            const existing = currentState.recordingMIDIPreviews[preview.trackId];
-            const shouldReset =
-              !existing ||
-              existing.generation !== preview.generation ||
-              existing.totalEventCount > preview.totalEventCount ||
-              existing.recordingStartTime !== preview.recordingStartTime;
-
-            const deltaEvents: MIDIEvent[] = preview.deltaEvents.map((event) => ({
-              timestamp: event.timestamp,
-              type: event.type as MIDIEvent["type"],
-              note: event.note,
-              velocity: event.velocity,
-            }));
-
-            nextPreviews[preview.trackId] = {
-              generation: preview.generation,
-              recordingStartTime: preview.recordingStartTime,
-              totalEventCount: preview.totalEventCount,
-              events: shouldReset ? deltaEvents : [...existing.events, ...deltaEvents],
-              activeNotes: preview.activeNotes,
-            };
-          }
-
-          return { recordingMIDIPreviews: nextPreviews };
-        });
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    void fetchRecordingMIDIPreviews();
-    const intervalId = window.setInterval(() => {
-      void fetchRecordingMIDIPreviews();
-    }, 150);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [isRecording, recordingClips, tracks]);
+  }, [isRecording]);
 
   // Calculate stage height: fill available viewport space, or grow for content
   const bottomSpacerHeight = footerHeight + BOTTOM_INTERACTION_BUFFER;
@@ -1636,7 +1887,11 @@ export function Timeline({
       targetRowIndex: dragState.targetTrackIndex ?? dragState.trackIndex ?? 0,
     }) : null;
   }, [dragState, tracks]);
-  const copyGhostHeight = (copyPreviewPlan?.newTracks.length ?? 0) * trackHeight;
+  const insertedMoveSourceIds = dragState.insertTrackIndex === undefined ? []
+    : [...new Set(dragState.multiClipInfo?.length
+      ? [...dragState.multiClipInfo].sort((a, b) => a.trackIndex - b.trackIndex).map(info => info.sourceTrackId)
+      : [tracks[dragState.trackIndex ?? -1]?.id].filter(Boolean))];
+  const copyGhostHeight = Math.max(copyPreviewPlan?.newTracks.length ?? 0, insertedMoveSourceIds.length) * trackHeight;
   // Master automation lanes add height below all tracks
   const masterVisibleLanes = useMemo(
     () => (masterAutomation?.showAutomation ? masterAutomation.lanes.filter((l) => l.visible) : []),
@@ -1772,10 +2027,10 @@ export function Timeline({
         : container.clientHeight;
 
       setDimensions((prev) => {
-        if (prev.width === newWidth && prev.height === newHeight) {
+        if (prev.width === newWidth && prev.height === newHeight && prev.stickyHeaderHeight === stickyHeaderHeight) {
           return prev;
         }
-        return { width: newWidth, height: newHeight };
+        return { width: newWidth, height: newHeight, stickyHeaderHeight };
       });
     };
 
@@ -1831,28 +2086,12 @@ export function Timeline({
         workspace.clientHeight - (stickyHeader?.offsetHeight ?? 0),
       );
       setDimensions((prev) => {
-        if (prev.width === newWidth && prev.height === newHeight) return prev;
-        return { width: newWidth, height: newHeight };
+        if (prev.width === newWidth && prev.height === newHeight && prev.stickyHeaderHeight === (stickyHeader?.offsetHeight ?? 0)) return prev;
+        return { width: newWidth, height: newHeight, stickyHeaderHeight: stickyHeader?.offsetHeight ?? 0 };
       });
     });
     return unsub;
   }, []);
-
-  // Sync native vertical scroll (workspace's scrollTop) → store's scrollY
-  // The workspace div has overflow-y: auto and handles vertical scrolling natively.
-  // We need to sync scrollTop to scrollY so viewport culling and hit-testing work.
-  useEffect(() => {
-    const workspace = containerRef.current?.closest(".workspace");
-    if (!workspace) return;
-    const handleScroll = () => {
-      const newScrollY = workspace.scrollTop;
-      if (Math.abs(newScrollY - scrollY) > 0.5) {
-        setScroll(scrollX, newScrollY);
-      }
-    };
-    workspace.addEventListener("scroll", handleScroll, { passive: true });
-    return () => workspace.removeEventListener("scroll", handleScroll);
-  }, [scrollX, scrollY, setScroll]);
 
   // Handle scroll wheel for zoom with native listener to prevent browser zoom
   // Use requestAnimationFrame for smooth scrolling and zooming
@@ -1966,6 +2205,24 @@ export function Timeline({
     },
     [queueScroll],
   );
+
+  // Native scrolling and modifier-wheel gestures share one publication per
+  // frame. Do not broadcast the entire store from a DOM scroll event, or use
+  // a render-time scrollX that can overwrite a queued horizontal zoom/pan.
+  useEffect(() => {
+    const workspace = containerRef.current?.closest(".workspace");
+    if (!workspace) return;
+    const handleScroll = () => {
+      const state = useDAWStore.getState();
+      const pending = pendingScrollRef.current;
+      const newScrollY = workspace.scrollTop;
+      if (Math.abs(newScrollY - (pending?.y ?? state.scrollY)) > 0.5) {
+        scheduleScroll(pending?.x ?? state.scrollX, newScrollY);
+      }
+    };
+    workspace.addEventListener("scroll", handleScroll, { passive: true });
+    return () => workspace.removeEventListener("scroll", handleScroll);
+  }, [scheduleScroll]);
 
   // Auto-scroll variant: batches via RAF like scheduleScroll but does NOT
   // suppress waveform fetches. Playback auto-scroll is incremental and
@@ -2357,17 +2614,10 @@ export function Timeline({
     const currentTrackHeight = trackHeightRef.current;
     if (currentTracks.length === 0) return { kind: "insertTrack", insertIndex: 0 };
 
-    const halfBand = EXTERNAL_TRACK_INSERT_BAND_PX / 2;
-    for (let index = 1; index < currentTracks.length; index += 1) {
-      const dividerY = currentTrackYs[index] ?? 0;
-      if (Math.abs(absoluteY - dividerY) <= halfBand) {
-        return { kind: "insertTrack", insertIndex: index };
-      }
-    }
-
-    if (absoluteY >= contentHeightRef.current - halfBand) {
-      return { kind: "insertTrack", insertIndex: currentTracks.length };
-    }
+    const insertion = resolveTimelineInsertionIndex(absoluteY, currentTrackYs, contentHeightRef.current,
+      externalMediaPreviewRef.current?.target.kind === "insertTrack" ? externalMediaPreviewRef.current.target.insertIndex : undefined,
+      EXTERNAL_TRACK_INSERT_BAND_PX);
+    if (insertion !== null) return { kind: "insertTrack", insertIndex: insertion };
 
     const hit = getTrackAtY(absoluteY, currentTracks, currentTrackYs, currentTrackHeight);
     if (!hit) {
@@ -2379,7 +2629,7 @@ export function Timeline({
       !isExternalTrackCompatible(hitTrack, mediaKind);
 
     return needsTrackInsertion
-      ? { kind: "insertTrack", insertIndex: hit.trackIndex }
+      ? { kind: "insertTrack", insertIndex: hit.trackIndex + 1 }
       : { kind: "existingTrack", trackIndex: hit.trackIndex };
   }, [isExternalTrackCompatible]);
 
@@ -2422,10 +2672,11 @@ export function Timeline({
     const container = containerRef.current;
     if (!file || !container) return null;
 
-    const rect = container.getBoundingClientRect();
+    const viewport = timelineStageRef.current?.container();
+    const rect = (viewport ?? container).getBoundingClientRect();
     const point = getNormalizedExternalDragPoint(event, rect);
     const localX = point.localX;
-    const stageY = point.localY - (showRuler ? RULER_HEIGHT : 0);
+    const stageY = point.localY - (!viewport && showRuler ? RULER_HEIGHT : 0);
     if (localX < 0 || localX > rect.width || stageY < 0) return null;
 
     const absoluteY = stageY + scrollYRef.current;
@@ -2508,6 +2759,7 @@ export function Timeline({
           const context = externalMediaDragContextRef.current;
           if (context?.dragId === dragId && context.filePath === filePath) {
             context.midiTracks = nonEmptyTracks;
+            context.sourceTempoInfo = info.sourceTempoInfo;
             context.midiTrackCount = Math.max(1, nonEmptyTracks.length);
             context.midiEvents = midiEvents;
             context.duration = duration;
@@ -2629,8 +2881,19 @@ export function Timeline({
         target: preview.target,
         startTime: Number(preview.startTime.toFixed(3)),
       });
+      const actualInsertIndex = (visibleIndex: number) => {
+        const next = tracksRef.current[visibleIndex];
+        return next ? useDAWStore.getState().tracks.findIndex(track => track.id === next.id)
+          : useDAWStore.getState().tracks.length;
+      };
 
-      mediaFiles.forEach((file, index) => {
+      const dropEpoch = getProjectEpoch();
+      const baseInsertIndex = actualInsertIndex(preview.target.kind === "insertTrack"
+        ? preview.target.insertIndex : preview.target.trackIndex);
+      void (async () => {
+      for (let index = 0; index < mediaFiles.length; index++) {
+        if (getProjectEpoch() !== dropEpoch) return;
+        const file = mediaFiles[index];
         const mediaKind = getExternalMediaKind(file);
         const name = file.name.replace(/\.[^.]+$/, "") || file.name;
         if (mediaKind === "midi") {
@@ -2643,12 +2906,12 @@ export function Timeline({
             targetTrack &&
             isExternalTrackCompatible(targetTrack, "midi");
           const insertIndex = preview.target.kind === "insertTrack"
-            ? preview.target.insertIndex + index
+            ? baseInsertIndex + index
             : preview.target.kind === "existingTrack"
-              ? preview.target.trackIndex + index
+              ? baseInsertIndex + index
               : tracksRef.current.length + index;
 
-          void importExternalMIDIAtTimeline({
+          await importExternalMIDIAtTimeline({
             filePath: file.path,
             name,
             targetTrackId: useExisting ? targetTrack.id : undefined,
@@ -2657,8 +2920,9 @@ export function Timeline({
             parsedTracks: index === 0 && context.filePath === file.path && context.midiTracks && context.midiTracks.length > 0
               ? context.midiTracks
               : undefined,
+            sourceTempoInfo: index === 0 ? context.sourceTempoInfo : undefined,
           }).catch((error) => console.error("[Timeline] External MIDI drop import failed", error));
-          return;
+          continue;
         }
 
         const targetTrack =
@@ -2670,12 +2934,12 @@ export function Timeline({
           targetTrack &&
           isExternalTrackCompatible(targetTrack, "audio");
         const insertIndex = preview.target.kind === "insertTrack"
-          ? preview.target.insertIndex + index
+          ? baseInsertIndex + index
           : preview.target.kind === "existingTrack"
-            ? preview.target.trackIndex + index
+            ? baseInsertIndex + index
             : tracksRef.current.length + index;
 
-        void importExternalMediaAtTimeline({
+        await importExternalMediaAtTimeline({
           filePath: file.path,
           name,
           trackId: useExisting ? targetTrack.id : undefined,
@@ -2685,7 +2949,8 @@ export function Timeline({
           sampleRate: index === 0 ? preview.sampleRate : undefined,
           waveformStatus: index === 0 && preview.peaks ? "preview" : "building",
         }).catch((error) => console.error("[audio.import] external drop import failed", error));
-      });
+      }
+      })().catch((error) => console.error("[Timeline] Media drop batch failed", error));
 
       clearDragContext(preview.dragId);
     };
@@ -2780,7 +3045,8 @@ export function Timeline({
     }];
 
     void (async () => {
-      const prepared = await nativeBridge.prepareExternalMIDIFileDrag(defaultFileName, midiTracks);
+      const prepared = await nativeBridge.prepareExternalMIDIFileDrag(defaultFileName, midiTracks,
+        midiExportOptions(state, midiClip.startTime, midiClip.startTime + midiClip.duration));
       if (!prepared.success || !prepared.filePath) {
         useDAWStore.getState().showToast(prepared.error || "Failed to prepare MIDI drag export", "error");
         return;
@@ -2821,7 +3087,7 @@ export function Timeline({
     liveModifiers?: PointerModifierEventLike,
   ) => {
     const gesture = dragStateRef.current;
-    if (!gesture.clipId || gesture.type === null || gesture.isFadeDrag) return;
+    if (finalizingTimelineClipGestureRef.current || !gesture.clipId || gesture.type === null || gesture.isFadeDrag) return;
     if (isTimelineGestureEditLocked(gesture)) {
       cancelActiveTimelineClipGesture();
       return;
@@ -2885,12 +3151,25 @@ export function Timeline({
       constrainedDrag.axisLock,
     );
     const effectiveStageY = gesture.startY + constrainedDrag.deltaY;
+    let insertTrackIndex = !gesture.copyOnDrag
+      && (!profiledDrag.axisLockRequested || constrainedDrag.axisLock === "y")
+      ? resolveTimelineInsertionIndex(effectiveStageY + scrollYRef.current, trackYsRef.current,
+          contentHeightRef.current, gesture.insertTrackIndex) ?? undefined
+      : undefined;
     let targetTrackIdx = getTimelineDropTrackIndex(effectiveStageY + scrollYRef.current, latestTracks, trackYsRef.current, trackHeightRef.current);
+    const destination = latestTracks[targetTrackIdx];
+    if (insertTrackIndex === undefined && !gesture.copyOnDrag && destination && targetTrackIdx !== gesture.trackIndex
+      && (isMidi ? destination.type !== "midi" && destination.type !== "instrument"
+        : destination.type === "midi" || destination.type === "instrument")
+      && (!profiledDrag.axisLockRequested || constrainedDrag.axisLock === "y")) {
+      insertTrackIndex = targetTrackIdx + 1;
+    }
+    if (insertTrackIndex !== undefined) targetTrackIdx = insertTrackIndex;
     if (profiledDrag.axisLockRequested && constrainedDrag.axisLock !== "y") {
       targetTrackIdx = gesture.trackIndex ?? targetTrackIdx;
     }
     // Keep a multi-track group intact when the pointer moves above its first row.
-    if (!gesture.copyOnDrag && gesture.multiClipInfo?.length) {
+    if (insertTrackIndex === undefined && !gesture.copyOnDrag && gesture.multiClipInfo?.length) {
       const firstTrack = Math.min(...gesture.multiClipInfo.map((info) => info.trackIndex));
       targetTrackIdx = Math.max(targetTrackIdx, (gesture.trackIndex ?? found.trackIndex) - firstTrack);
     }
@@ -3050,9 +3329,9 @@ export function Timeline({
       return;
     }
 
-    const needsGhost = multi
+    const needsGhost = insertTrackIndex !== undefined || (multi
       ? Math.max(...gesture.multiClipInfo!.map((info) => info.trackIndex)) + trackDelta >= latestTracks.length
-      : targetTrackIdx >= latestTracks.length;
+      : targetTrackIdx >= latestTracks.length);
     setShowGhostTrack(needsGhost);
 
     if (snapActive && (edgeSnapMatch || Math.abs(timeDelta - rawTimeDelta) * pps > 0.1)) {
@@ -3077,8 +3356,10 @@ export function Timeline({
       setSnapGhostRender(null);
     }
 
+    const movingIds = new Set(multi ? gesture.multiClipInfo!.map(info => info.clipId) : [gesture.clipId]);
     useDAWStore.setState((state) => {
-      let nextTracks = state.tracks.map((track) => ({
+      let nextTracks = state.tracks.map((track) => !track.clips.some(clip => movingIds.has(clip.id))
+        && !track.midiClips.some(clip => movingIds.has(clip.id)) ? track : ({
         ...track,
         clips: track.clips.map((clip) => {
           const info = gesture.multiClipInfo?.find((candidate) => candidate.clipId === clip.id && !candidate.isMidi);
@@ -3122,11 +3403,13 @@ export function Timeline({
       return { tracks: nextTracks, isModified: true };
     });
 
-    if (clampedTarget !== gesture.targetTrackIndex || constrainedDrag.axisLock !== (gesture.axisLock ?? null)) {
+    if (clampedTarget !== gesture.targetTrackIndex || insertTrackIndex !== gesture.insertTrackIndex
+      || constrainedDrag.axisLock !== (gesture.axisLock ?? null)) {
       setTimelineDragState((previous) => ({
         ...previous,
         axisLock: constrainedDrag.axisLock,
         targetTrackIndex: clampedTarget,
+        insertTrackIndex,
       }));
     }
   }, [
@@ -3176,6 +3459,7 @@ export function Timeline({
 
     clearTimelineGestureUndo();
     slipEditRef.current = null;
+    setSlipFeedbackActive(false);
     return true;
   }, [cancelActiveTimelineClipGesture, clearTimelineGestureUndo, slipEditClip]);
   finalizeSlipTimelineGestureRef.current = finalizeSlipTimelineGesture;
@@ -3258,6 +3542,20 @@ export function Timeline({
     const targetIdx = gesture.targetTrackIndex ?? anchorTrackIdx;
     const latestTracks = useDAWStore.getState().tracks;
     const trackDelta = targetIdx - anchorTrackIdx;
+
+    if (!gesture.copyOnDrag && gesture.type === "move" && gesture.insertTrackIndex !== undefined) {
+      const ids = gesture.multiClipInfo?.length ? gesture.multiClipInfo.map(info => info.clipId) : [gesture.clipId];
+      const placements = useDAWStore.getState().tracks.flatMap(track => [...track.clips, ...track.midiClips])
+        .filter(clip => ids.includes(clip.id)).map(clip => ({ clipId: clip.id, startTime: clip.startTime }));
+      const nextVisibleTrack = tracksRef.current[gesture.insertTrackIndex];
+      const insertIndex = nextVisibleTrack
+        ? latestTracks.findIndex(track => track.id === nextVisibleTrack.id) : latestTracks.length;
+      restoreTimelineGestureUndo();
+      resetDragState();
+      return Boolean(await useDAWStore.getState().moveTimelineClipsToNewTrack({
+        placements, insertIndex, type: isMidi ? "midi" : "audio",
+      }));
+    }
 
     if (gesture.type === "resize-left" || gesture.type === "resize-right") {
       if (gesture.resizeAction === "stretch") {
@@ -3578,6 +3876,7 @@ export function Timeline({
         if (!slipEdit.dragActivated) {
           if (!hasTimelineClipDragStarted(point.x - slipEdit.startX, 0)) return;
           slipEdit.dragActivated = true;
+          setSlipFeedbackActive(true);
         }
         const nextOffset = computeSlipOffset(slipEdit.originalOffset, deltaTime, slipEdit.maxOffset);
         useDAWStore.setState((state) => ({
@@ -3634,9 +3933,10 @@ export function Timeline({
 
     const handleWheel = (e: WheelEvent) => {
       if (isEditorWheelOwnedTarget(e.target, container)) return;
-      const rect = container.getBoundingClientRect();
+      const viewport = timelineStageRef.current?.container();
+      const rect = (viewport ?? container).getBoundingClientRect();
       const stageX = e.clientX - rect.left;
-      const stageY = e.clientY - rect.top - (showRuler ? RULER_HEIGHT : 0);
+      const stageY = e.clientY - rect.top - (!viewport && showRuler ? RULER_HEIGHT : 0);
       const mouseY = stageY + scrollYRef.current;
       const trackHit = getTrackAtY(mouseY, tracksRef.current, trackYsRef.current, trackHeightRef.current);
       const hoveredTrack = trackHit ? tracksRef.current[trackHit.trackIndex] : undefined;
@@ -4380,7 +4680,7 @@ export function Timeline({
       const stage = e.target.getStage();
       const pointerPos = stage?.getPointerPosition();
       if (pointerPos) {
-        setCrosshairPos({ x: pointerPos.x, y: pointerPos.y });
+        setCrosshairPos({ x: pointerPos.x, y: pointerPos.y + scrollY });
       }
     }
 
@@ -4407,6 +4707,7 @@ export function Timeline({
         if (!slipEditRef.current.dragActivated) {
           if (!hasTimelineClipDragStarted(deltaX, 0)) return;
           slipEditRef.current.dragActivated = true;
+          setSlipFeedbackActive(true);
         }
         const deltaTime = deltaX / pixelsPerSecond;
         // Moving right moves source content right (decreases offset); moving left increases offset.
@@ -4510,8 +4811,8 @@ export function Timeline({
         const dx = tlX - marqueeRef.current.startX;
         const dy = tlY - marqueeRef.current.startY;
         if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
-          const left = Math.min(marqueeRef.current.startX, tlX) - scrollX;
-          const top = Math.min(marqueeRef.current.startY, tlY) - scrollY;
+          const left = Math.min(marqueeRef.current.startX, tlX);
+          const top = Math.min(marqueeRef.current.startY, tlY);
           const w = Math.abs(dx);
           const h = Math.abs(dy);
           setMarqueeRect({ x: left, y: top, width: w, height: h });
@@ -4602,7 +4903,18 @@ export function Timeline({
     }
   };
 
-  // Only the last interacted editing surface receives its local shortcuts.
+  // Local keyboard shortcuts retain their editing-surface scope; explicit
+  // project-view commands from menus/palette target this Timeline directly.
+  const applyExplicitTimelineView = (view: { pixelsPerSecond: number; scrollX: number }) => {
+    // A menu command supersedes queued horizontal wheel/follow work. Publish
+    // scale and origin together, as the wheel path does, and allow the normal
+    // brief manual-navigation grace period before transport following resumes.
+    pendingScrollRef.current = null;
+    pendingZoomRef.current = null;
+    accZoomDeltaRef.current = 0;
+    manualScrollLockUntilRef.current = performance.now() + 250;
+    useDAWStore.setState({ pixelsPerSecond: view.pixelsPerSecond, scrollX: view.scrollX });
+  };
   const timelineActionExecutorRef = useRef<
     (actionId: string) => ReturnType<ShortcutSurfaceHandler>
   >(() => "unmatched");
@@ -4617,8 +4929,7 @@ export function Timeline({
         MAX_PIXELS_PER_SECOND,
       );
       if (!view) return "claimed_noop";
-      state.setZoom(view.pixelsPerSecond);
-      state.setScroll(view.scrollX, state.scrollY);
+      applyExplicitTimelineView(view);
       return "handled";
     }
     if (actionId === "view.zoomToSelection") {
@@ -4634,8 +4945,7 @@ export function Timeline({
           )
         : null;
       if (!view) return "claimed_noop";
-      state.setZoom(view.pixelsPerSecond);
-      state.setScroll(view.scrollX, state.scrollY);
+      applyExplicitTimelineView(view);
       return "handled";
     }
     if (actionId !== "clip.splitAtPointer") return "unmatched";
@@ -4870,16 +5180,20 @@ export function Timeline({
       const lookAheadSec = (viewWidth * 2) / pps;
       const aheadTime = curTime + lookAheadSec;
 
-      for (const track of daw.tracks) {
+      // Lookahead is useful only for rows the user can see. Active viewport
+      // requests have priority in the shared bounded queue.
+      for (const [index, track] of tracksRef.current.entries()) {
+        const y = trackYsRef.current[index] ?? 0;
+        if (y + getEffectiveTrackHeight(track, trackHeightRef.current) < daw.scrollY
+          || y > daw.scrollY + dimensions.height) continue;
         for (const clip of track.clips) {
           // Skip clips not in the look-ahead range
           if (clip.startTime > aheadTime || clip.startTime + clip.duration < curTime) continue;
           if (!clip.filePath) continue;
 
           const fileSR = clip.sampleRate || 44100;
-          const renderSpp = Math.max(1, Math.round(fileSR / pps));
+          const renderSpp = Math.max(1, fileSR / pps);
           const cacheSpp = quantizeSpp(renderSpp);
-          const tileSamples = 4096 * cacheSpp; // TILE_PEAKS = 4096
 
           // Compute which tiles cover the look-ahead range within this clip
           const clipOffset = clip.offset || 0;
@@ -4888,13 +5202,11 @@ export function Timeline({
           const startSampleInFile = Math.floor((clipOffset + rangeStartInClip) * fileSR);
           const endSampleInFile = Math.floor((clipOffset + rangeEndInClip) * fileSR);
 
-          for (let tileSample = Math.floor(startSampleInFile / tileSamples) * tileSamples;
-               tileSample < endSampleInFile;
-               tileSample += tileSamples) {
-            const cacheKey = `${clip.filePath}-${cacheSpp}-${tileSample}`;
-            if (!waveformCacheRef.current.has(cacheKey) && !inFlightRef.current.has(cacheKey)) {
-              const numPeaks = Math.min(8000, Math.ceil((endSampleInFile - tileSample) / cacheSpp) + 4096);
-              fetchWaveformDataRef.current(clip.filePath, cacheSpp, tileSample, numPeaks);
+          const tiles = planWaveformTiles(clip.filePath, cacheSpp, startSampleInFile, endSampleInFile,
+            Math.round(clipOffset * fileSR), Math.round((clipOffset + clip.duration) * fileSR));
+          for (const tile of tiles) {
+            if (!waveformCacheRef.current.has(tile.key) && !inFlightRef.current.has(tile.key)) {
+              fetchWaveformDataRef.current(tile, 1);
             }
           }
         }
@@ -4931,17 +5243,21 @@ export function Timeline({
   useEffect(() => {
     const unsubscribe = nativeBridge.onPeaksReady((filePath: string) => {
       if (!filePath) return;
+      waveformGenerationRef.current.set(filePath, (waveformGenerationRef.current.get(filePath) ?? 0) + 1);
       // Clear in-flight guards so the file can be re-fetched
       for (const key of [...inFlightRef.current]) {
-        if (key.startsWith(filePath)) {
+        if (key.startsWith(`${filePath}-`)) {
           inFlightRef.current.delete(key);
         }
+      }
+      for (const key of waveformRequestTokensRef.current.keys()) {
+        if (key.startsWith(`${filePath}-`)) waveformRequestTokensRef.current.delete(key);
       }
       // Clear cached (empty) waveform data to trigger re-fetch on next render
       setWaveformCache((prev) => {
         const next = new Map(prev);
         for (const key of next.keys()) {
-          if (key.startsWith(filePath)) {
+          if (key.startsWith(`${filePath}-`)) {
             next.delete(key);
           }
         }
@@ -4955,51 +5271,24 @@ export function Timeline({
     return unsubscribe;
   }, []);
 
-  const rulerDensity = useMemo(() => {
-    const beatsPerBar = timeSignature.numerator;
-    const secondsPerBeat = 60 / tempo;
-    const pixelsPerBeat = secondsPerBeat * pixelsPerSecond;
-    const pixelsPerBar = pixelsPerBeat * beatsPerBar;
-
-    if (pixelsPerBeat >= 140) {
-      return {
-        mode: "division" as const,
-        divisionsPerBeat: pixelsPerBeat >= 260 ? 8 : 4,
-        labelEveryBars: pixelsPerBar < 90 ? 2 : 1,
-      };
-    }
-
-    if (pixelsPerBeat >= 32) {
-      return {
-        mode: "beat" as const,
-        divisionsPerBeat: 1,
-        labelEveryBars: pixelsPerBar < 60 ? 2 : 1,
-      };
-    }
-
-    return {
-      mode: "bar" as const,
-      divisionsPerBeat: 1,
-      labelEveryBars:
-        pixelsPerBar < 30 ? 8 : pixelsPerBar < 45 ? 4 : pixelsPerBar < 70 ? 2 : 1,
-    };
-  }, [pixelsPerSecond, tempo, timeSignature.numerator]);
+  const rulerDensity = useMemo(() => getTimelineRulerDensity(
+    pixelsPerSecond, tempo, timeSignature, scrollX, dimensions.width,
+  ), [pixelsPerSecond, tempo, timeSignature, scrollX, dimensions.width]);
 
   const gridLines = useMemo(() => {
     const lines: React.ReactNode[] = [];
     const beatsPerBar = timeSignature.numerator;
-    const secondsPerBeat = 60 / tempo;
-    const secondsPerBar = secondsPerBeat * beatsPerBar;
+    const { secondsPerBeat, secondsPerBar, barStep } = rulerDensity;
     const visibleStartTime = Math.max(
       0,
       scrollX / pixelsPerSecond - secondsPerBar,
     );
     const visibleEndTime =
       (scrollX + dimensions.width) / pixelsPerSecond + secondsPerBar;
-    const startBar = Math.floor(visibleStartTime / secondsPerBar);
+    const startBar = Math.floor(visibleStartTime / secondsPerBar / barStep) * barStep;
     const endBar = Math.ceil(visibleEndTime / secondsPerBar);
 
-    for (let bar = startBar; bar <= endBar; bar += 1) {
+    for (let bar = startBar; bar <= endBar; bar += barStep) {
       const barTime = bar * secondsPerBar;
       const barX = barTime * pixelsPerSecond - scrollX;
       lines.push(
@@ -5070,15 +5359,14 @@ export function Timeline({
   const rulerMarks = useMemo(() => {
     const marks: React.ReactNode[] = [];
     const beatsPerBar = timeSignature.numerator;
-    const secondsPerBeat = 60 / tempo;
-    const secondsPerBar = secondsPerBeat * beatsPerBar;
+    const { secondsPerBeat, secondsPerBar, barStep } = rulerDensity;
     const startTime = Math.max(0, scrollX / pixelsPerSecond - secondsPerBar);
     const endTime =
       (scrollX + dimensions.width) / pixelsPerSecond + secondsPerBar;
-    const startBar = Math.floor(startTime / secondsPerBar);
+    const startBar = Math.floor(startTime / secondsPerBar / barStep) * barStep;
     const endBar = Math.ceil(endTime / secondsPerBar);
 
-    for (let bar = startBar; bar <= endBar; bar += 1) {
+    for (let bar = startBar; bar <= endBar; bar += barStep) {
       const barTime = bar * secondsPerBar;
       const barX = barTime * pixelsPerSecond - scrollX;
       // A bar starting offscreen can still contain visible beats.
@@ -5098,7 +5386,7 @@ export function Timeline({
             <Text
               key={`bar-label-${bar}`}
               x={Math.round(barX) + 3}
-              y={2}
+              y={9}
               text={`${bar + 1}`}
               fontSize={10}
               fill="#888"
@@ -5128,7 +5416,7 @@ export function Timeline({
               <Text
                 key={`beat-label-${bar}-${beat}`}
                 x={Math.round(beatX) + 2}
-                y={14}
+                y={11}
                 text={`${bar + 1}.${beat + 1}`}
                 fontSize={9}
                 fill="#666"
@@ -5216,61 +5504,90 @@ export function Timeline({
   //     });
   //   };
 
-  // Viewport-tile size in peaks per tile. Aligning requests to tile boundaries
-  // prevents a new fetch on every scroll pixel while keeping tiles small enough
-  // that we never fetch more than ~2x the viewport's worth of data.
-  // At cacheSpp=32 (extreme zoom 1000px/s): tile = 4096*32 = 131072 samples ≈ 3s ≈ 3000px
-  // At cacheSpp=1024 (zoom 43px/s):        tile = 4096*1024 = 4M samples ≈ 90s ≈ 3900px
-  const TILE_PEAKS = 4096;
-
-  // Fetch waveform peaks for the VISIBLE PORTION of a clip only.
-  // startSample: file-absolute sample where the visible clip portion begins (tile-aligned).
-  // numPixels: number of peaks to fetch (≈ viewport width, capped for safety).
-  const fetchWaveformData = async (
-    filePath: string,
-    cacheSpp: number,
-    startSample: number,  // tile-aligned start within the source file
-    numPixels: number,    // peaks to fetch (viewport-bounded)
-  ) => {
-    if (!filePath) return;
+  // Prefetch and visible rendering request the same complete source tiles.
+  // Only boundary tiles carry trim bounds; interior data is shared by clips.
+  const fetchWaveformData = (tile: WaveformTileRequest, priority = 0) => {
+    const { key: cacheKey, filePath, samplesPerPixel, startSample, numPixels,
+      sourceRangeStartSample, sourceRangeEndSample } = tile;
     if (isZoomingRef.current || isScrollingRef.current) return;
-
-    const cacheKey = `${filePath}-${cacheSpp}-${startSample}`;
-    if (inFlightRef.current.has(cacheKey)) return;
-
+    if (waveformCacheRef.current.has(cacheKey) || inFlightRef.current.has(cacheKey) || waveformCommitRef.current.has(cacheKey)) return;
+    const viewport = useDAWStore.getState(), epoch = getProjectEpoch();
+    const generation = waveformGenerationRef.current.get(filePath) ?? 0;
+    const relevant = () => {
+      const state = useDAWStore.getState();
+      return waveformMountedRef.current && getProjectEpoch() === epoch
+        && (waveformGenerationRef.current.get(filePath) ?? 0) === generation
+        && state.pixelsPerSecond === viewport.pixelsPerSecond && state.scrollX === viewport.scrollX && state.scrollY === viewport.scrollY
+        && !isZoomingRef.current && !isScrollingRef.current;
+    };
+    waveformQueueRef.current.enqueue(`${cacheKey}@${generation}`, priority, async () => {
+    if (waveformCacheRef.current.has(cacheKey) || inFlightRef.current.has(cacheKey) || waveformCommitRef.current.has(cacheKey)) return;
     inFlightRef.current.add(cacheKey);
+    const requestToken = Symbol(cacheKey);
+    waveformRequestTokensRef.current.set(cacheKey, requestToken);
+    const release = () => {
+      if (waveformRequestTokensRef.current.get(cacheKey) !== requestToken) return;
+      waveformRequestTokensRef.current.delete(cacheKey);
+      inFlightRef.current.delete(cacheKey);
+    };
+    let waitingForPeaks = false;
     try {
-      const peaks = await nativeBridge.getWaveformPeaks(filePath, cacheSpp, startSample, numPixels);
+      const peaks = await nativeBridge.getWaveformPeaks(filePath, samplesPerPixel, startSample, numPixels, sourceRangeStartSample, sourceRangeEndSample);
+      if (!relevant()) return;
 
       if (peaks && peaks.length > 0) {
-        setWaveformCache((prev) => {
-          const next = new Map(prev);
-          next.set(cacheKey, peaks);
-          // Prune cache if it grows too large (> 200 entries) — keep most recent
-          if (next.size > 200) {
-            const oldest = next.keys().next().value;
-            if (oldest) next.delete(oldest);
+        waveformCommitRef.current.set(cacheKey, { filePath, generation, peaks });
+        if (waveformCommitFrameRef.current !== null) return;
+        waveformCommitFrameRef.current = requestAnimationFrame(() => {
+          waveformCommitFrameRef.current = null;
+          if (!waveformMountedRef.current) return;
+          const next = new Map(waveformCacheRef.current);
+          for (const [key, pending] of waveformCommitRef.current) {
+            if ((waveformGenerationRef.current.get(pending.filePath) ?? 0) !== pending.generation) continue;
+            next.delete(key); next.set(key, pending.peaks);
           }
-          return next;
+          waveformCommitRef.current.clear();
+          // Bound retained source data rather than the number of variable-sized windows.
+          let bytes = 0;
+          for (const data of next.values()) bytes += data.length * (32 + (data[0]?.channels.length ?? 1) * 16);
+          while (bytes > 32 * 1024 * 1024 && next.size > 1) {
+            const oldest = next.keys().next().value;
+            if (!oldest) break;
+            const data = next.get(oldest)!;
+            bytes -= data.length * (32 + (data[0]?.channels.length ?? 1) * 16);
+            next.delete(oldest);
+          }
+          waveformCacheRef.current = next;
+          setWaveformCache(next);
         });
-        // Always clear inFlight so evicted cache entries can be re-fetched
-        inFlightRef.current.delete(cacheKey);
         return;
       }
       // Empty = peaks still generating async; retry after 2s and force a re-render
+      waitingForPeaks = true;
       setTimeout(() => {
-        inFlightRef.current.delete(cacheKey);
+        if (!waveformMountedRef.current || (waveformGenerationRef.current.get(filePath) ?? 0) !== generation) return;
+        release();
         forceRender((n) => n + 1);
       }, 2000);
       return;
     } catch (e) {
       console.error("Failed to fetch waveform:", e);
+    } finally {
+      if (!waitingForPeaks) release();
+      if (!relevant() && waveformMountedRef.current && epoch === getProjectEpoch()) forceRender(n => n + 1);
     }
-    inFlightRef.current.delete(cacheKey);
+    }, relevant);
   };
   // Keep a ref so the pre-fetch interval always calls the latest version
   const fetchWaveformDataRef = useRef(fetchWaveformData);
   fetchWaveformDataRef.current = fetchWaveformData;
+
+  const insertionPreviewY = (clipId: string, sourceTrackId: string) => {
+    if (dragState.type !== "move" || dragState.copyOnDrag || dragState.insertTrackIndex === undefined
+      || !(dragState.clipId === clipId || dragState.multiClipInfo?.some(info => info.clipId === clipId))) return undefined;
+    const row = insertedMoveSourceIds.indexOf(sourceTrackId);
+    return row < 0 ? undefined : (trackYs[dragState.insertTrackIndex] ?? contentHeight) + row * trackHeight;
+  };
 
   // Render individual clip with waveform
   const renderClip = (
@@ -5315,6 +5632,7 @@ export function Timeline({
       }
     }
 
+    visualTrackY = insertionPreviewY(clip.id, trackId) ?? visualTrackY;
     const clipY = visualTrackY + rowMetrics.clipInsetY;
     const waveformScaleView = waveformScaleViews[trackId]
       ?? DEFAULT_TIMELINE_VERTICAL_SCALE_VIEW;
@@ -5331,8 +5649,8 @@ export function Timeline({
 
     // Fetch waveform peaks for the VISIBLE PORTION only (viewport-tiled).
     const fileSR = clip.sampleRate || 44100;
-    const renderSpp = Math.max(1, Math.round(fileSR / pixelsPerSecond));
-    const cacheSpp = quantizeSpp(renderSpp);
+    const renderSpp = Math.max(1, fileSR / pixelsPerSecond);
+    let cacheSpp = quantizeSpp(renderSpp);
 
     // Tile-aligned start sample: snap the visible clip start to TILE_PEAKS boundaries
     // so small scrolls within a tile reuse the same cache entry.
@@ -5340,26 +5658,56 @@ export function Timeline({
     const visibleEndPx   = Math.min(width, dimensions.width - x);
     const clipOffsetSamples = Math.floor((clip.offset || 0) * fileSR);
     const visibleStartSampleInFile = clipOffsetSamples + Math.floor(visibleStartPx / pixelsPerSecond * fileSR);
-    const tileSamples = TILE_PEAKS * cacheSpp;
-    const alignedStartSample = Math.floor(visibleStartSampleInFile / tileSamples) * tileSamples;
-
-    // How many peaks to fetch: visible clip width + extra to cover tile-alignment gap
-    const peakScale = renderSpp / cacheSpp;
-    const alignmentGapPeaks = Math.ceil((visibleStartSampleInFile - alignedStartSample) / cacheSpp);
-    const visiblePeaks = Math.ceil((visibleEndPx - visibleStartPx) / peakScale);
-    const numPeaksToFetch = Math.min(visiblePeaks + alignmentGapPeaks + TILE_PEAKS, 8000);
-
-    const cacheKey = `${clip.filePath}-${cacheSpp}-${alignedStartSample}`;
-    const waveformData = isNarrowClip ? undefined : waveformCache.get(cacheKey);
+    const visibleEndSampleInFile = clipOffsetSamples + Math.ceil(visibleEndPx / pixelsPerSecond * fileSR);
+    let peakScale = renderSpp / cacheSpp;
+    const sourceStart = Math.round((clip.offset || 0) * fileSR);
+    const sourceEnd = Math.round(((clip.offset || 0) + clip.duration) * fileSR);
+    const waveformTiles = planWaveformTiles(clip.filePath ?? "", cacheSpp, visibleStartSampleInFile,
+      visibleEndSampleInFile + cacheSpp * 2, sourceStart, sourceEnd);
+    let alignedStartSample = waveformTiles[0]?.startSample ?? visibleStartSampleInFile;
+    let waveformData = isNarrowClip ? undefined : readWaveformTileWindow(waveformTiles, waveformCache, waveformWindows);
     const previewWaveformData = isNarrowClip ? undefined : waveformPreviewCache.get(clip.filePath);
 
     if (!isNarrowClip && clip.filePath && !waveformData) {
-      fetchWaveformData(clip.filePath, cacheSpp, alignedStartSample, numPeaksToFetch);
+      for (const tile of waveformTiles) {
+        if (!waveformCache.has(tile.key)) void fetchWaveformData(tile);
+      }
+    }
+    // During interaction, keep projecting actual source peaks at their original
+    // resolution until the new window arrives. Never substitute invented peaks.
+    if (!waveformData && !isNarrowClip) {
+      let bestDistance = Infinity;
+      for (const [key, data] of waveformCache) {
+        if (!key.startsWith(`${clip.filePath}-`)) continue;
+        const match = /-(\d+)-(\d+)(?:\|bounds:(\d+):(-?\d+))?$/.exec(key);
+        if (!match) continue;
+        const stride = Number(match[1]);
+        const start = Number(match[2]);
+        const boundedStart = Number(match[3] ?? 0);
+        const boundedEnd = Number(match[4] ?? -1);
+        // A fallback may never reintroduce trimmed source transients or use a
+        // narrower clip's edge aggregate for this clip's retained source.
+        if (start < sourceStart && boundedStart !== sourceStart) continue;
+        if (start + data.length * stride > sourceEnd && boundedEnd !== sourceEnd) continue;
+        if (boundedStart > sourceStart || (boundedEnd >= 0 && boundedEnd < sourceEnd)) continue;
+        if (start >= visibleEndSampleInFile || start + data.length * stride <= visibleStartSampleInFile) continue;
+        const distance = Math.abs(Math.log2(stride / cacheSpp));
+        if (distance >= bestDistance) continue;
+        bestDistance = distance;
+        waveformData = data;
+        alignedStartSample = start;
+        peakScale = renderSpp / stride;
+      }
+      if (waveformData && bestDistance < Infinity) {
+        // peakScale retains the exact source-time mapping for this cached stride.
+        cacheSpp = renderSpp / peakScale;
+      }
     }
 
     // Generate waveform points for Line drawing.
     // Only renders the visible portion of the clip within the viewport,
     // so large clips don't generate tens of thousands of off-screen points.
+    const playbackGainEnvelope = getClipPlaybackGainEnvelope(clip);
     const generateWaveformPoints = (): React.ReactNode[] => {
       if (!waveformData || waveformData.length === 0) return [];
 
@@ -5374,8 +5722,8 @@ export function Timeline({
       // waveformData starts at alignedStartSample (not sample 0).
       // clipStartInData: offset (in peaks) from waveformData[0] to the clip's audio start.
       // Can be negative when alignedStartSample > clipStartSampleInFile (clip starts before tile).
-      const clipStartSampleInFile = Math.floor((clip.offset || 0) * fileSR);
-      const clipStartInData = Math.floor((clipStartSampleInFile - alignedStartSample) / cacheSpp);
+      const clipStartSampleInFile = (clip.offset || 0) * fileSR;
+      const clipStartInData = (clipStartSampleInFile - alignedStartSample) / cacheSpp;
       const totalAvailablePeaks = Math.max(0, waveformData.length - Math.max(0, clipStartInData));
       // When clipStartInData < 0, the fetched data starts this many clip-pixels after pixel 0.
       // totalClipPeaks must account for this offset so visibleEnd is computed correctly.
@@ -5401,48 +5749,56 @@ export function Timeline({
         for (let i = visibleStart; i < visibleEnd; i++) {
           // dataIndex correctly maps pixel i → waveformData entry, accounting for
           // both clip.offset and the tile-alignment gap (clipStartInData can be negative).
-          const dataIndex = clipStartInData + Math.floor(i * peakScale);
+          const dataIndex = Math.floor(clipStartInData + i * peakScale);
           if (dataIndex < 0 || dataIndex >= waveformData.length) continue;
           const channelData = waveformData[dataIndex]?.channels[ch];
           if (!channelData) continue;
+          let maximum = channelData.max;
+          for (let bin = dataIndex + 1; bin < Math.min(waveformData.length, Math.ceil(clipStartInData + (i + 1) * peakScale)); bin++) {
+            maximum = Math.max(maximum, waveformData[bin]?.channels[ch]?.max ?? maximum);
+          }
 
           // Per-pixel fade attenuation
           const timeInClip = i / pixelsPerSecond;
           let fadeMult = 1;
           if (clip.fadeIn > 0 && timeInClip < clip.fadeIn) {
-            fadeMult *= timeInClip / clip.fadeIn;
+            fadeMult *= fadeCurve(timeInClip / clip.fadeIn, clip.fadeInShape ?? 0);
           }
           if (clip.fadeOut > 0 && timeInClip > clip.duration - clip.fadeOut) {
-            fadeMult *= (clip.duration - timeInClip) / clip.fadeOut;
+            fadeMult *= fadeCurve((clip.duration - timeInClip) / clip.fadeOut, clip.fadeOutShape ?? 0);
           }
-          const pixelGain = gainFactor * fadeMult;
+          const pixelGain = gainFactor * fadeMult * interpolateClipGain(playbackGainEnvelope, timeInClip);
 
           const px = x + i;
-          const scaledMax = Math.max(-1, Math.min(1, channelData.max * pixelGain));
+          const scaledMax = Math.max(-1, Math.min(1, maximum * pixelGain));
           const py = centerY - scaledMax * halfHeight;
           points.push(px, py);
         }
 
         // Draw bottom half (min values, reversed) — only visible peaks
         for (let i = visibleEnd - 1; i >= visibleStart; i--) {
-          const dataIndex = clipStartInData + Math.floor(i * peakScale);
+          const dataIndex = Math.floor(clipStartInData + i * peakScale);
           if (dataIndex < 0 || dataIndex >= waveformData.length) continue;
           const channelData = waveformData[dataIndex]?.channels[ch];
           if (!channelData) continue;
+          let minimum = channelData.min;
+          for (let bin = dataIndex + 1; bin < Math.min(waveformData.length, Math.ceil(clipStartInData + (i + 1) * peakScale)); bin++) {
+            minimum = Math.min(minimum, waveformData[bin]?.channels[ch]?.min ?? minimum);
+          }
 
           // Per-pixel fade attenuation
           const timeInClip = i / pixelsPerSecond;
           let fadeMult = 1;
           if (clip.fadeIn > 0 && timeInClip < clip.fadeIn) {
-            fadeMult *= timeInClip / clip.fadeIn;
+            fadeMult *= fadeCurve(timeInClip / clip.fadeIn, clip.fadeInShape ?? 0);
           }
           if (clip.fadeOut > 0 && timeInClip > clip.duration - clip.fadeOut) {
-            fadeMult *= (clip.duration - timeInClip) / clip.fadeOut;
+            fadeMult *= fadeCurve((clip.duration - timeInClip) / clip.fadeOut, clip.fadeOutShape ?? 0);
           }
-          const pixelGain = gainFactor * fadeMult;
+          const pixelGain = gainFactor * fadeMult * interpolateClipGain(playbackGainEnvelope, timeInClip);
 
           const px = x + i;
-          const scaledMin = Math.max(-1, Math.min(1, channelData.min * pixelGain));
+          const scaledMin = Math.max(-1, Math.min(1, minimum * pixelGain));
           const py = centerY - scaledMin * halfHeight;
           points.push(px, py);
         }
@@ -5452,13 +5808,14 @@ export function Timeline({
           waveforms.push(
             <Line
               key={`waveform-${clip.id}-ch${ch}`}
+              perfectDrawEnabled={false}
               points={points}
               fill={waveColor}
               opacity={0.6}
               closed
               stroke={waveColor}
               strokeWidth={1}
-              tension={0.1}
+              tension={0}
               lineCap="round"
               lineJoin="round"
               listening={false}
@@ -5475,7 +5832,7 @@ export function Timeline({
       if (!waveformData || waveformData.length === 0) return [];
       const shapes: React.ReactNode[] = [];
       const wfHeight = waveformHeight;
-      const clipStartPeak = Math.max(0, Math.floor((clip.offset * fileSR) / cacheSpp));
+      const clipStartPeak = ((clip.offset || 0) * fileSR - alignedStartSample) / cacheSpp;
       const totalAvailablePeaks = Math.max(0, waveformData.length - clipStartPeak);
       const totalClipPeaks = Math.min(Math.ceil(width), Math.ceil(totalAvailablePeaks / peakScale));
       const visibleStart = Math.max(0, Math.floor(-x));
@@ -5490,7 +5847,7 @@ export function Timeline({
       });
       const colWidth = Math.max(1, Math.ceil(4 / peakScale));
       for (let i = visibleStart; i < visibleEnd; i += colWidth) {
-        const dataIndex = clipStartPeak + Math.floor(i * peakScale);
+        const dataIndex = Math.floor(clipStartPeak + i * peakScale);
         const peak = waveformData[dataIndex];
         if (!peak) continue;
         const amp = Math.min(1, Math.max(0, Math.abs(peak.channels[0]?.max ?? 0)));
@@ -5524,7 +5881,7 @@ export function Timeline({
     };
 
     const generatePreviewWaveformPoints = (): React.ReactNode[] => {
-      if (!previewWaveformData || previewWaveformData.length === 0) return [];
+      if (!previewWaveformData || previewWaveformData.length === 0 || !clip.sourceLength) return [];
       const numChannels = previewWaveformData[0]?.channels?.length || 1;
       const waveforms: React.ReactNode[] = [];
       const visibleStart = Math.max(0, Math.floor(-x));
@@ -5540,13 +5897,17 @@ export function Timeline({
           + waveformScaleView.verticalOffset * (channelHeight / 2 - 2);
         const halfHeight = channelHeight / 2 - 2;
         for (let i = visibleStart; i < visibleEnd; i += 1) {
-          const dataIndex = Math.min(previewWaveformData.length - 1, Math.floor((i / Math.max(1, width)) * previewWaveformData.length));
+          const sourceDuration = Math.max(clip.sourceLength || 0, (clip.offset || 0) + clip.duration);
+          const dataIndex = Math.min(previewWaveformData.length - 1,
+            Math.floor(((clip.offset || 0) + i / pixelsPerSecond) / sourceDuration * previewWaveformData.length));
           const channelData = previewWaveformData[dataIndex]?.channels[ch];
           if (!channelData) continue;
           points.push(x + i, centerY - Math.max(-1, Math.min(1, channelData.max)) * halfHeight);
         }
         for (let i = visibleEnd - 1; i >= visibleStart; i -= 1) {
-          const dataIndex = Math.min(previewWaveformData.length - 1, Math.floor((i / Math.max(1, width)) * previewWaveformData.length));
+          const sourceDuration = Math.max(clip.sourceLength || 0, (clip.offset || 0) + clip.duration);
+          const dataIndex = Math.min(previewWaveformData.length - 1,
+            Math.floor(((clip.offset || 0) + i / pixelsPerSecond) / sourceDuration * previewWaveformData.length));
           const channelData = previewWaveformData[dataIndex]?.channels[ch];
           if (!channelData) continue;
           points.push(x + i, centerY - Math.max(-1, Math.min(1, channelData.min)) * halfHeight);
@@ -5555,6 +5916,7 @@ export function Timeline({
           waveforms.push(
             <Line
               key={`preview-waveform-${clip.id}-ch${ch}`}
+              perfectDrawEnabled={false}
               points={points}
               fill={clip.color || trackColor}
               opacity={0.38}
@@ -5571,11 +5933,20 @@ export function Timeline({
 
     const isSpectral = tracks.find((t) => t.id === trackId)?.spectralView;
     // Skip expensive waveform generation during active zoom or for narrow clips — just show clip rect
-    const waveformShapes = (isZoomingRef.current || isNarrowClip)
-      ? []
-      : waveformData
-        ? (isSpectral ? generateSpectralView() : generateWaveformPoints())
-        : generatePreviewWaveformPoints();
+    const artworkKey = [x, width, clipY, clipHeight, dimensions.width, cacheSpp, alignedStartSample,
+      waveformScaleView.verticalOffset, waveformScaleView.spectrogramScale, waveformScaleView.spectrogramDbFloor,
+      track?.waveformZoom, isSpectral, isNarrowClip, trackColor].join(":");
+    const artwork = waveformArtworkRef.current.get(clip.id);
+    let waveformShapes: React.ReactNode[];
+    if (artwork?.key === artworkKey && artwork.clip === clip && artwork.data === waveformData
+      && artwork.preview === previewWaveformData) {
+      waveformShapes = artwork.shapes;
+    } else {
+      waveformShapes = isNarrowClip ? [] : waveformData
+        ? (isSpectral ? generateSpectralView() : generateWaveformPoints()) : generatePreviewWaveformPoints();
+      waveformArtworkRef.current.set(clip.id, { key: artworkKey, clip, data: waveformData, preview: previewWaveformData, shapes: waveformShapes });
+      if (waveformArtworkRef.current.size > 256) waveformArtworkRef.current.delete(waveformArtworkRef.current.keys().next().value!);
+    }
 
     const EDGE_THRESHOLD = 8;
 
@@ -5590,7 +5961,7 @@ export function Timeline({
         const pointerPos = stage.getPointerPosition();
         const timeInClip = (pointerPos.x + scrollX) / pixelsPerSecond - clip.startTime;
         if (timeInClip >= 0 && timeInClip <= clip.duration) {
-          const relativeY = pointerPos.y - clipY;
+          const relativeY = pointerPos.y + scrollY - clipY;
           const gain = Math.max(0, Math.min(2, 2 * (1 - relativeY / clipHeight)));
           addClipGainPoint(clip.id, timeInClip, gain);
         }
@@ -5679,7 +6050,7 @@ export function Timeline({
       const pointerPos = stage.getPointerPosition();
       const relativeX = pointerPos.x - x;
       const clipTopY = clipY;
-      const relativeY = pointerPos.y - clipTopY;
+      const relativeY = pointerPos.y + scrollY - clipTopY;
 
       if (toolModeRef.current === "smart") {
         // Smart tool: position-dependent cursor
@@ -5709,6 +6080,7 @@ export function Timeline({
 
     const handleMouseDown = (e: KonvaEvent) => {
       if ((e.evt?.button ?? 0) !== 0) return;
+      if (finalizingTimelineClipGestureRef.current) return;
 
       // Split tool mode: click splits the clip at the clicked position
       if (toolModeRef.current === "split") {
@@ -5733,7 +6105,7 @@ export function Timeline({
       const pointerPos = stage.getPointerPosition();
       const relativeX = pointerPos.x - x;
       const dragType = classifyTimelineClipGesture(relativeX, width, EDGE_THRESHOLD);
-      const relativeY = pointerPos.y - clipY;
+      const relativeY = pointerPos.y + scrollY - clipY;
       const smartFadeType = toolModeRef.current === "smart" && relativeY < 15
         ? relativeX < 15
           ? "resize-left"
@@ -5807,7 +6179,7 @@ export function Timeline({
       // preserve the entire group for both move and copy gestures.
       const currentSelectedIds = useDAWStore.getState().selectedClipIds;
       const isAlreadyInMultiSelection = currentSelectedIds.length > 1 && currentSelectedIds.includes(clip.id);
-      if (!copyOnDrag && !isAlreadyInMultiSelection) {
+      if (!isTimelineClipCopyAction(resolveLiveMouseModifierAction(e.evt || {}, "clip_drag")) && !isAlreadyInMultiSelection) {
         selectClip(clip.id);
       }
 
@@ -5963,11 +6335,11 @@ export function Timeline({
             dragState.type === "resize-left" ||
             dragState.type === "resize-right"
           ) {
-            return { x: 0, y: 0 }; // Lock position - we manage clip position via state
+            return { x: 0, y: -scrollY }; // Lock position - we manage clip position via state
           }
           // For move operations, also return 0,0 because we update state directly
           // and the Group re-renders at the new position
-          return { x: 0, y: 0 };
+          return { x: 0, y: -scrollY };
         }}
       >
         {/* Clip background with gradient-like layering */}
@@ -5994,36 +6366,17 @@ export function Timeline({
             listening={false}
           />
         )}
-        {/* Waveform skeleton — shown while peaks are loading (skip for narrow clips) */}
-        {!clip.muted && !isNarrowClip && clip.filePath && waveformShapes.length === 0 && (() => {
-          const barCount = Math.min(32, Math.max(4, Math.floor(width / 6)));
-          const barSpacing = width / barCount;
-          const barWidth = Math.max(1.5, barSpacing * 0.4);
-          const skeletonBars: React.ReactNode[] = [];
-          // Deterministic pseudo-random heights based on clip id
-          const seed = clip.id.charCodeAt(0) + clip.id.charCodeAt(clip.id.length - 1);
-          for (let i = 0; i < barCount; i++) {
-            const pseudoRand = Math.abs(Math.sin(seed * (i + 1) * 2.654)) * 0.6 + 0.2;
-            const barH = waveformHeight * pseudoRand;
-            const barY = clipY + 5 + (waveformHeight - barH) / 2;
-            skeletonBars.push(
-              <Rect
-                key={`skel-${clip.id}-${i}`}
-                x={x + i * barSpacing + (barSpacing - barWidth) / 2}
-                y={barY}
-                width={barWidth}
-                height={barH}
-                fill={clip.color || trackColor}
-                opacity={0.15}
-                cornerRadius={1}
-                listening={false}
-              />
-            );
-          }
-          return skeletonBars;
-        })()}
+        {/* A neutral loading label never impersonates source waveform peaks. */}
+        {!clip.muted && !isNarrowClip && clip.filePath && waveformShapes.length === 0 && (
+          <Text x={Math.max(0, x) + 8} y={clipY + clipHeight / 2 - 5}
+            text="Loading waveform?" fontSize={10} fill="#9ca3af" listening={false} />
+        )}
         {/* Waveform visualization */}
         {!clip.muted && waveformShapes}
+        {clip.crossfadeLayers?.length ? <Line
+          points={playbackGainEnvelope.flatMap(point => [x + point.time * pixelsPerSecond, clipY + clipHeight * (1 - Math.min(2, point.gain) / 2)])}
+          stroke="#67e8f9" strokeWidth={1.5} opacity={0.85} listening={false}
+        /> : null}
         {/* Clip gain envelope line */}
         {clip.gainEnvelope && clip.gainEnvelope.length >= 2 && (() => {
           const clipH = clipHeight;
@@ -6177,14 +6530,29 @@ export function Timeline({
                 ctx.roundRect(x, clipY, width, clipHeight, 3);
               }}
             >
-              {Array.from({ length: Math.ceil(width / 12) + 1 }).map((_, i) => (
-                <Line
-                  key={`mute-stripe-${i}`}
-                  points={[x + i * 12, clipY, x + i * 12 - clipHeight, clipY + clipHeight]}
-                  stroke={clip.color || trackColor}
-                  strokeWidth={1}
-                />
-              ))}
+              <Shape
+                name="clip-mute-hatch"
+                stroke={clip.color || trackColor}
+                strokeWidth={1}
+                perfectDrawEnabled={false}
+                sceneFunc={(ctx, shape) => {
+                  // A long clip can be hundreds of thousands of pixels wide.
+                  // Keep one node and draw only stripes crossing the viewport,
+                  // retaining their phase relative to the original clip edge.
+                  const left = Math.max(0, x);
+                  const right = Math.min(dimensions.width, x + width);
+                  if (right <= left) return;
+                  const first = Math.max(0, Math.floor((left - x) / 12));
+                  const last = Math.min(Math.ceil(width / 12), Math.ceil((right + clipHeight - x) / 12));
+                  ctx.beginPath();
+                  for (let stripe = first; stripe <= last; stripe++) {
+                    const stripeX = x + stripe * 12;
+                    ctx.moveTo(stripeX, clipY);
+                    ctx.lineTo(stripeX - clipHeight, clipY + clipHeight);
+                  }
+                  ctx.strokeShape(shape);
+                }}
+              />
             </Group>
           </>
         )}
@@ -6263,7 +6631,7 @@ export function Timeline({
               }
               const stage = e.target.getStage();
               const pointerPos = stage.getPointerPosition();
-              const relativeY = pointerPos.y - clipY;
+              const relativeY = pointerPos.y + scrollY - clipY;
               const normalizedY = 1 - relativeY / clipHeight;
               const clampedY = Math.max(0, Math.min(1, normalizedY));
               const newVolumeDB = clampedY * volumeRange - 60;
@@ -6310,7 +6678,7 @@ export function Timeline({
                   onDragEnd={handleVolumeDragEnd}
                   dragBoundFunc={(pos: any) => ({
                     x: x, // Lock horizontal position
-                    y: Math.max(clipY, Math.min(clipY + clipHeight, pos.y)),
+                    y: Math.max(clipY - scrollY, Math.min(clipY + clipHeight - scrollY, pos.y)),
                   })}
                   style={{ cursor: "ns-resize" }}
                 />
@@ -6456,7 +6824,7 @@ export function Timeline({
                   }}
                   dragBoundFunc={(pos: any) => ({
                     x: Math.max(x, Math.min(x + maxFadeWidth, pos.x)),
-                    y: clipY + 5,
+                    y: clipY + 5 - scrollY,
                   })}
                 />
                 {/* Fade out handle - circle at fade position */}
@@ -6491,7 +6859,7 @@ export function Timeline({
                   }}
                   dragBoundFunc={(pos: any) => ({
                     x: Math.max(x + width - maxFadeWidth, Math.min(x + width, pos.x)),
-                    y: clipY + 5,
+                    y: clipY + 5 - scrollY,
                   })}
                 />
               </>
@@ -6537,18 +6905,28 @@ export function Timeline({
     clipColor: string,
     isMuted: boolean,
     activeNotes?: { note: number; startTimestamp: number }[],
+    cacheId = "",
   ) => {
     const safeDuration = Math.max(clipDuration, 0.001);
-    const bars = sampleMIDIThumbnailBars(
-      buildMIDIThumbnailBars(events, safeDuration, activeNotes),
-      width,
-    );
+    let index = midiThumbnailIndicesRef.current.get(cacheId);
+    if (!index) {
+      index = new MIDIThumbnailIndex();
+      midiThumbnailIndicesRef.current.set(cacheId, index);
+      if (midiThumbnailIndicesRef.current.size > 256) {
+        midiThumbnailIndicesRef.current.delete(midiThumbnailIndicesRef.current.keys().next().value!);
+      }
+    }
+    index.update(events);
+    const visibleStart = Math.max(0, -x / pixelsPerSecond);
+    const visibleEnd = Math.min(safeDuration, (dimensions.width - x) / pixelsPerSecond);
+    const bars = index.sampleVisible(visibleStart, visibleEnd, safeDuration, Math.min(dimensions.width, width));
 
     if (bars.length === 0) return null;
 
-    const notes = bars.map((bar) => bar.note);
-    const minNote = Math.min(...notes);
-    const maxNote = Math.max(...notes);
+    // A recording uses a fixed band, so new notes and growing width can never
+    // move historical notes. Completed clips use their entire source range.
+    const minNote = activeNotes ? 0 : index.pitchRange.min;
+    const maxNote = activeNotes ? 127 : index.pitchRange.max;
     const noteRange = Math.max(1, maxNote - minNote);
     const isNarrowMidi = width < 60;
 
@@ -6578,152 +6956,6 @@ export function Timeline({
     });
   };
 
-  // Render recording clip with live waveform
-  const renderRecordingClip = (
-    clip: RecordingClip,
-    trackY: number,
-    trackColor: string,
-  ) => {
-    const track = tracks.find((candidate) => candidate.id === clip.trackId);
-    const isMIDIRecordingTrack =
-      track?.type === "midi" || track?.type === "instrument";
-    const rowMetrics = getTimelineRowMetrics(
-      track ?? {
-        type: "audio",
-        showAutomation: false,
-        automationLanes: [],
-      },
-      trackHeight,
-    );
-    const clipY = trackY + rowMetrics.clipInsetY;
-    const clipHeight = rowMetrics.clipHeight;
-    const x = clip.startTime * pixelsPerSecond - scrollX;
-    const width = (recordingRenderTime - clip.startTime) * pixelsPerSecond;
-    const previewHeight = Math.max(8, clipHeight - 10);
-
-    if (width <= 0) return null;
-
-    // Get recording waveform data if available
-    const recordingData = recordingWaveformCache.get(clip.trackId);
-    const midiPreview = recordingMIDIPreviews[clip.trackId];
-
-    // Generate waveform visualization from recording peaks
-    const renderRecordingWaveform = (): React.ReactNode[] => {
-      if (!recordingData || recordingData.peaks.length === 0) return [];
-
-      if (recordingData.recordingStartTime !== clip.startTime) return [];
-      const { peaks: recordingPeaks } = recordingData;
-      const numChannels = recordingPeaks[0]?.channels?.length || 1;
-      const waveforms: React.ReactNode[] = [];
-      const waveformHeight = Math.max(8, clipHeight - 10);
-      const pixelsPerPeak = recordingData.samplesPerPixel / recordingData.sampleRate * pixelsPerSecond;
-      const waveformX = recordingPeakX(recordingData, 0, pixelsPerSecond, scrollX);
-      const firstVisiblePeak = Math.max(
-        0,
-        Math.floor((-waveformX) / Math.max(pixelsPerPeak, 0.001)) - 1,
-      );
-      const lastVisiblePeak = Math.min(
-        recordingPeaks.length,
-        Math.ceil((dimensions.width - waveformX) / Math.max(pixelsPerPeak, 0.001)) + 1,
-      );
-
-      for (let ch = 0; ch < numChannels; ch++) {
-        const points: number[] = [];
-        const channelHeight = waveformHeight / numChannels;
-        const channelY = clipY + 5 + ch * channelHeight;
-        const centerY = channelY + channelHeight / 2;
-        const halfHeight = channelHeight / 2 - 2;
-
-        // Reproject source sample bins at the current zoom, even while a new
-        // resolution is pending. Cached peaks never retain obsolete pixel widths.
-        for (let i = firstVisiblePeak; i < lastVisiblePeak; i++) {
-          const channelData = recordingPeaks[i].channels[ch];
-          if (!channelData) continue;
-
-          const px = waveformX + i * pixelsPerPeak;
-          const py = centerY - channelData.max * halfHeight;
-          points.push(px, py);
-        }
-
-        // Draw bottom half (min values, reversed)
-        for (let i = lastVisiblePeak - 1; i >= firstVisiblePeak; i--) {
-          const channelData = recordingPeaks[i].channels[ch];
-          if (!channelData) continue;
-
-          const px = waveformX + i * pixelsPerPeak;
-          const py = centerY - channelData.min * halfHeight;
-          points.push(px, py);
-        }
-
-        if (points.length > 0) {
-          waveforms.push(
-            <Line
-              key={`recording-waveform-${clip.trackId}-ch${ch}`}
-              points={points}
-              fill={trackColor}
-              opacity={0.8}
-              closed
-              stroke={trackColor}
-              strokeWidth={0.5}
-              listening={false}
-            />,
-          );
-        }
-      }
-
-      return waveforms;
-    };
-
-    return (
-      <Group key={`recording-${clip.trackId}`}>
-        {/* Background */}
-        <Rect
-          x={x}
-          y={clipY}
-          width={width}
-          height={clipHeight}
-          fill={trackColor}
-          opacity={0.3}
-          cornerRadius={3}
-          stroke={trackColor}
-          strokeWidth={1}
-        />
-        {/* Live waveform or MIDI preview visualization */}
-        {isMIDIRecordingTrack
-          ? renderCompactMIDIThumbnail(
-              midiPreview?.events || [],
-              Math.max(0.001, recordingRenderTime - clip.startTime),
-              x,
-              width,
-              clipY,
-              previewHeight,
-              trackColor,
-              !!track?.muted,
-              midiPreview?.activeNotes,
-            )
-          : renderRecordingWaveform()}
-        {/* Recording indicator text */}
-        <Text
-          x={x + 5}
-          y={clipY + 3}
-          text="REC"
-          fontSize={10}
-          fill="#fff"
-          fontStyle="bold"
-          listening={false}
-        />
-        {/* Recording indicator dot (pulsing effect via opacity) */}
-        <Circle
-          x={x + 35}
-          y={clipY + 8}
-          radius={4}
-          fill="#ff3333"
-          listening={false}
-        />
-      </Group>
-    );
-  };
-
   // Render MIDI clip
   const renderMIDIClip = (
     clip: MIDIClip,
@@ -6748,10 +6980,12 @@ export function Timeline({
     const isNarrowMidi = width < 60;
     let visualTrackY = trackY;
 
-    // Visual offset for multi-clip drag
-    if (!isCopyPreview && !dragState.copyOnDrag && dragState.type === "move" && dragState.multiClipInfo && dragState.multiClipInfo.length > 1 && dragState.targetTrackIndex != null) {
-      const info = dragState.multiClipInfo.find(m => m.clipId === clip.id);
-      if (info) {
+    // The anchor follows the destination for single and multi-clip gestures.
+    if (!isCopyPreview && !dragState.copyOnDrag && dragState.type === "move" && dragState.targetTrackIndex != null) {
+      const info = dragState.multiClipInfo?.find(m => m.clipId === clip.id);
+      if (dragState.clipId === clip.id) {
+        visualTrackY = trackYs[dragState.targetTrackIndex] ?? visualTrackY;
+      } else if (info) {
         const trackDelta = dragState.targetTrackIndex - (dragState.trackIndex ?? 0);
         const visualTrackIdx = info.trackIndex + trackDelta;
         if (visualTrackIdx !== _trackIndex) {
@@ -6759,12 +6993,17 @@ export function Timeline({
         }
       }
     }
+    visualTrackY = insertionPreviewY(clip.id, track?.id ?? "") ?? visualTrackY;
     const clipY = visualTrackY + rowMetrics.clipInsetY;
 
     // Skip if clip is outside visible area
     if (x + width < 0 || x > dimensions.width) return null;
 
-    const visibleEvents = getVisibleMIDIEventsForClip(clip);
+    let visibleEvents = midiVisibleEventsRef.current.get(clip);
+    if (!visibleEvents) {
+      visibleEvents = getVisibleMIDIEventsForClip(clip);
+      midiVisibleEventsRef.current.set(clip, visibleEvents);
+    }
     const sourceLoopLength = getMIDIClipSourceLoopLength(clip);
     const showLoopNotches = sourceLoopLength > 0 && clip.duration > sourceLoopLength + 0.000001;
     const loopPhase = showLoopNotches
@@ -6818,6 +7057,7 @@ export function Timeline({
     };
 
     const handleMIDIClipMouseDown = (e: KonvaEvent) => {
+      if (finalizingTimelineClipGestureRef.current) return;
       if ((e.evt?.button ?? 0) !== 0) return;
 
       if (toolModeRef.current === "split") {
@@ -6862,7 +7102,7 @@ export function Timeline({
         && shouldStartTimelineCopyDrag(true, dragType, clipEditLocked);
       const currentSelectedIds = useDAWStore.getState().selectedClipIds;
       const isAlreadyInMultiSelection = currentSelectedIds.length > 1 && currentSelectedIds.includes(clip.id);
-      if (!copyOnDrag && !isAlreadyInMultiSelection) {
+      if (!isTimelineClipCopyAction(resolveLiveMouseModifierAction(e.evt || {}, "clip_drag")) && !isAlreadyInMultiSelection) {
         selectClip(clip.id);
       }
 
@@ -7024,7 +7264,7 @@ export function Timeline({
         onDragStart={handleMIDIClipDragStart}
         onDragMove={handleMIDIClipDragMove}
         onDragEnd={handleMIDIClipDragEnd}
-        dragBoundFunc={() => ({ x: 0, y: 0 })}
+        dragBoundFunc={() => ({ x: 0, y: -scrollY })}
       >
         {/* Clip background */}
         <Rect
@@ -7047,6 +7287,8 @@ export function Timeline({
           previewHeight,
           clip.color || trackColor,
           isMuted,
+          undefined,
+          clip.id,
         )}
         {loopNotches}
         {/* Clip border */}
@@ -7100,7 +7342,7 @@ export function Timeline({
           <Text
             x={x + 6}
             y={clipY + clipHeight - 14}
-            text={`Slip +${(clip.offset || 0).toFixed(2)}s`}
+            text={`Source offset +${(clip.offset || 0).toFixed(2)}s`}
             fontSize={9}
             fill="rgba(255,255,255,0.72)"
             listening={false}
@@ -7565,7 +7807,7 @@ export function Timeline({
                   useDAWStore.getState().addMasterAutomationPoint(
                     lane.id,
                     (pointer.x + scrollX) / pixelsPerSecond,
-                    Math.max(0, Math.min(1, 1 - (pointer.y - laneTop) / laneH)),
+                    Math.max(0, Math.min(1, 1 - (pointer.y + scrollY - laneTop) / laneH)),
                   );
                 }}
               />
@@ -7866,15 +8108,17 @@ export function Timeline({
   const renderGhostTrack = () => {
     if (!showGhostTrack) return null;
 
-    const ghostY = contentHeight;
+    const ghostY = dragState.insertTrackIndex === undefined ? contentHeight
+      : trackYs[dragState.insertTrackIndex] ?? contentHeight;
 
     return (
       <Group>
+        <Line points={[0, ghostY, dimensions.width, ghostY]} stroke="#38bdf8" strokeWidth={3} listening={false} />
         <Rect
           x={0}
           y={ghostY}
           width={dimensions.width}
-          height={Math.max(trackHeight, copyGhostHeight)}
+          height={Math.max(trackHeight * insertedMoveSourceIds.length, trackHeight, copyGhostHeight)}
           fill="#ffffff"
           opacity={0.05}
           listening={false}
@@ -7882,7 +8126,7 @@ export function Timeline({
         <Text
           x={10}
           y={ghostY + 10}
-          text={copyPreviewPlan?.newTracks.length ? `+ Create ${copyPreviewPlan.newTracks.length} Track${copyPreviewPlan.newTracks.length === 1 ? "" : "s"}` : "+ Create New Track"}
+          text={copyPreviewPlan?.newTracks.length || insertedMoveSourceIds.length > 1 ? `+ Create ${copyPreviewPlan?.newTracks.length || insertedMoveSourceIds.length} Tracks` : "+ Create New Track"}
           fill="#ffffff"
           opacity={0.5}
           listening={false}
@@ -7896,13 +8140,13 @@ export function Timeline({
     const maxClipEnd = getTimelineVisibleContentEnd(
       tracks,
       recordingClips.length > 0
-        ? useDAWStore.getState().transport.currentTime
+        ? recordingExtentTime
         : undefined,
     );
 
     // Timeline length = last clip end + the shared five-minute editing tail.
     return (maxClipEnd + TIMELINE_SCROLL_PADDING_SECONDS) * pixelsPerSecond;
-  }, [tracks, recordingClips, pixelsPerSecond]);
+  }, [tracks, recordingClips, pixelsPerSecond, recordingExtentTime]);
 
   const totalTimelineWidth = calculateTotalWidth();
   const scrollbarOverview = useMemo(() => {
@@ -7946,31 +8190,10 @@ export function Timeline({
     };
 
     const exportMIDIClip = () => {
-      if (!clip || !isMidi) return;
-      const midiClip = clip as MIDIClip;
-      void (async () => {
-        const filePath = await nativeBridge.showSaveDialog(
-          `${midiClip.name || "MIDI Clip"}.mid`,
-          "Export MIDI Clip",
-          "*.mid;*.midi",
-        );
-        if (!filePath) return;
-        const exportClip = { ...midiClip, startTime: 0 };
-        const exported = serializeMIDIClipsForBackend([exportClip], track?.midiEffects || [])[0];
-        const success = await nativeBridge.exportProjectMIDI(filePath, [{
-          name: track?.name || "MIDI Track",
-          clips: [{
-            startTime: 0,
-            duration: exported?.duration ?? midiClip.duration,
-            events: exported?.events ?? getVisibleMIDIEventsForClip(midiClip),
-          }],
-        }]);
-        useDAWStore.getState().showToast(
-          success ? "MIDI clip exported" : "Failed to export MIDI clip",
-          success ? "success" : "error",
-        );
-      })();
+      if (clip && isMidi && track) void exportMIDISelection(state, [{ track, clip: clip as MIDIClip }], "single");
     };
+    const joinSelection = midiJoinSelection(state);
+    const exportSelection = selectedMIDIExportEntries(state);
     const getMIDIContentEnd = () => {
       if (!clip || !isMidi) return 0.01;
       const midiClip = clip as MIDIClip;
@@ -7985,6 +8208,42 @@ export function Timeline({
     };
 
     return [
+      {
+        label: "Detect Tempo...",
+        onClick: () => useDAWStore.getState().openTempoDetection(menu.trackId, menu.clipId),
+      },
+      ...(isMidi ? [{
+        label: `Join Selected MIDI Clips${joinSelection.count > 1 ? ` (${joinSelection.count})` : ""}`,
+        shortcut: shortcut("clip.joinSelectedMidi", "Ctrl+J"),
+        disabled: Boolean(joinSelection.disabledReason),
+        disabledReason: joinSelection.disabledReason,
+        onClick: () => useDAWStore.getState().joinSelectedMIDIClips(),
+      }, {
+        label: `Export Selected MIDI Clips${exportSelection.length > 1 ? ` (${exportSelection.length})` : ""}...`,
+        shortcut: shortcut("clip.exportSelectedMidi", ""),
+        disabled: exportSelection.length === 0,
+        onClick: () => { void exportMIDISelection(state, exportSelection); },
+      }] : [{
+        label: "Crossfade Selected Audio Clips",
+        shortcut: shortcut("clip.crossfadeSelected", "Shift+X"),
+        disabled: selectedCrossfadePairs(state).length === 0,
+        onClick: () => useDAWStore.getState().crossfadeSelectedClips(),
+      }, {
+        label: "Edit Selected Crossfade...",
+        disabled: !canEditSelectedCrossfade(state),
+        onClick: () => useDAWStore.getState().editSelectedCrossfade(),
+      }, {
+        label: audioConversionJobs[menu.clipId]
+          ? `Cancel ${audioConversionJobs[menu.clipId].targetRate / 1000} kHz Audio Copy`
+          : `Create ${state.projectSampleRate / 1000} kHz Project-Rate Copy`,
+        disabled: audioConversionJobs[menu.clipId]
+          ? audioConversionJobs[menu.clipId].stage !== "converting"
+          : Boolean(clip && ((clip as AudioClip).sampleRate === state.projectSampleRate || isClipEditLocked(state, clip))),
+        onClick: () => audioConversionJobs[menu.clipId]
+          ? useDAWStore.getState().cancelProjectRateCopy(menu.clipId)
+          : void useDAWStore.getState().createProjectRateCopy(menu.trackId, menu.clipId),
+      }]),
+      { divider: true, label: "" },
       ...(isMidi
         ? [{
             label: "Open in Piano Roll",
@@ -8207,7 +8466,7 @@ export function Timeline({
               ],
             },
             {
-              label: "Export MIDI Clip...",
+              label: "Export This MIDI Clip...",
               onClick: exportMIDIClip,
             },
             { divider: true, label: "" },
@@ -8281,6 +8540,18 @@ export function Timeline({
       onFocusCapture={() => activateShortcutContext({ kind: "timeline" })}
       data-shortcut-context="timeline"
     >
+      {(timeSelection || dragState.dragActivated || slipFeedbackActive) && (
+        <div className="absolute bottom-3 left-3 z-20 flex max-w-[calc(100%-24px)] flex-wrap items-center gap-2 rounded border border-daw-border bg-daw-panel/95 px-2 py-1 text-xs text-daw-text shadow" aria-label="Timeline gesture feedback">
+          <span>{slipFeedbackActive ? "Slip contents"
+            : dragState.dragActivated ? (dragState.copyOnDrag ? "Copy clips" : dragState.type === "move" ? "Move clips" : "Resize clip")
+            : timeSelection ? `Time selection: ${timeSelection.start.toFixed(2)} to ${timeSelection.end.toFixed(2)} s (${Math.abs(timeSelection.end - timeSelection.start).toFixed(2)} s)` : ""}</span>
+          {timeSelection && !timeSelectionDrag?.active && !dragState.dragActivated && !slipFeedbackActive && <>
+            <button type="button" className="rounded px-1.5 py-1 hover:bg-daw-dark focus-visible:outline-2 focus-visible:outline-daw-accent" onClick={() => executeAvailableRegisteredAction("edit.selectClipsInTimeSelection")}>Select clips inside</button>
+            <button type="button" className="rounded px-1.5 py-1 hover:bg-daw-dark focus-visible:outline-2 focus-visible:outline-daw-accent" onClick={() => useDAWStore.getState().setLoopToSelection()}>Set loop</button>
+            <button type="button" aria-label="Clear time selection" className="rounded px-1.5 py-1 hover:bg-daw-dark focus-visible:outline-2 focus-visible:outline-daw-accent" onClick={clearTimeSelection}>Clear</button>
+          </>}
+        </div>
+      )}
       {showRuler && (
         <div className="sticky top-0 z-10 bg-[#0a0a0a]" data-wheel-subtarget="ruler">
           <Stage
@@ -8405,11 +8676,19 @@ export function Timeline({
         </div>
       )}
 
+      {/* Native scrolling retains the full track extent while canvases stay
+          viewport-sized. Layer offsets translate world track coordinates. */}
+      <div className="timeline-canvas-spacer relative flex-none" style={{
+        "--timeline-content-height": `${stageHeight}px`,
+        "--timeline-viewport-height": `${Math.max(1, availableHeight)}px`,
+        "--timeline-sticky-top": `${dimensions.stickyHeaderHeight + rulerOffset}px`,
+      } as React.CSSProperties}>
+      <div className="timeline-canvas-viewport sticky z-[1]">
       {/* Main Timeline Stage */}
       <Stage
         ref={timelineStageRef}
         width={dimensions.width}
-        height={stageHeight}
+        height={Math.max(1, availableHeight)}
         pixelRatio={window.devicePixelRatio || 1}
         onMouseMove={handleStageMouseMove}
         onMouseUp={handleStageMouseUp}
@@ -8548,7 +8827,7 @@ export function Timeline({
           const clipHit = findTimelineClipHit(
             timelineClipHitMap,
             pointerPos.x,
-            pointerPos.y,
+            pointerPos.y + scrollY,
           );
           if (clipHit) {
             openTimelineClipContextMenu({
@@ -8573,7 +8852,7 @@ export function Timeline({
       >
         {/* Static Layer: grid, track backgrounds, overlays — only redraws on zoom/scroll.
             listening={false} skips Konva hit-testing for every child, reducing event overhead. */}
-        <Layer listening={false}>
+        <Layer listening={false} offsetY={scrollY}>
           {/* Background fill */}
           <Rect
             width={dimensions.width}
@@ -8668,7 +8947,7 @@ export function Timeline({
         </Layer>
 
         {/* Dynamic Layer: clips, playhead, selection rects, automation — changes during playback/editing */}
-        <Layer>
+        <Layer offsetY={scrollY}>
           {/* Invisible full-stage rect for click/drag event detection */}
           <Rect
             name="timeline-bg"
@@ -8823,13 +9102,6 @@ export function Timeline({
                     renderMIDIClip(clip, i, trackY, track.color, track.id),
                   )}
 
-                  {/* Recording Clip (if this track is recording) */}
-                  {recordingClips.find((rc) => rc.trackId === track.id) &&
-                    renderRecordingClip(
-                      recordingClips.find((rc) => rc.trackId === track.id)!,
-                      trackY,
-                      track.color,
-                    )}
 
                   {mouseBehaviorProfileId === "audacity" && track.type === "audio" && (() => {
                     const scaleView = waveformScaleViews[track.id]
@@ -8959,8 +9231,9 @@ export function Timeline({
           {/* Marquee selection rectangle */}
           {marqueeRect && (
             <Rect
+              name="timeline-marquee"
               x={marqueeRect.x - scrollX}
-              y={marqueeRect.y - scrollY + rulerOffset}
+              y={marqueeRect.y}
               width={marqueeRect.width}
               height={marqueeRect.height}
               fill="rgba(0, 120, 212, 0.15)"
@@ -9005,7 +9278,15 @@ export function Timeline({
 
         </Layer>
 
-        <Layer listening={false}>
+        <RecordingClipsLayer
+          tracks={tracks} trackYs={trackYs} trackHeight={trackHeight}
+          pixelsPerSecond={pixelsPerSecond} scrollX={scrollX} scrollY={scrollY}
+          viewportWidth={dimensions.width} viewportHeight={dimensions.height}
+          waveforms={recordingWaveformStore}
+          renderCompactMIDIThumbnail={renderCompactMIDIThumbnail}
+        />
+
+        <Layer listening={false} offsetY={scrollY}>
           {externalMediaPreview && (() => {
             const target = externalMediaPreview.target;
             const targetTrack = target.kind === "existingTrack" ? tracks[target.trackIndex] : undefined;
@@ -9317,11 +9598,13 @@ export function Timeline({
             type="main"
             pixelsPerSecond={pixelsPerSecond}
             scrollX={scrollX}
-            stageHeight={stageHeight}
+            stageHeight={Math.max(1, availableHeight)}
             viewportWidth={dimensions.width}
           />
         </Layer>
       </Stage>
+      </div>
+      </div>
 
       {/* Custom Horizontal Scrollbar */}
       <HorizontalScrollbar

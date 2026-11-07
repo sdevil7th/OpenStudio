@@ -20,6 +20,7 @@ import { _editSnapshots, syncAutomationLaneToBackend } from "./storeHelpers";
 import { createAutomationPointId } from "./automation";
 import { isClipEditLocked } from "../../utils/clipEditLock";
 import { createTimelineClipCopyAction } from "./timelineClipCopy";
+import { cloneCrossfadeLayers, forkCopiedCrossfades, reconcileCrossfadeMembers, reconcileCrossfadeTracks, scaleCrossfadeLayers, windowCrossfadeLayers } from "../../utils/clipCrossfades";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SetFn = (...args: any[]) => void;
@@ -237,6 +238,7 @@ function cloneAudioClipDeep(clip: any, regenerateNestedTakeIds = false): any {
   return {
     ...clip,
     gainEnvelope: clip.gainEnvelope?.map((point: any) => ({ ...point })),
+    crossfadeLayers: cloneCrossfadeLayers(clip.crossfadeLayers),
     takes: clip.takes?.map((take: any) => ({
       ...cloneAudioClipDeep(take, regenerateNestedTakeIds),
       ...(regenerateNestedTakeIds ? { id: crypto.randomUUID() } : {}),
@@ -255,7 +257,7 @@ export function cloneTimelineClipDeep(clip: any, regenerateNestedTakeIds = false
 }
 
 export function cloneTracksForTimelineUndo(tracks: any[]) {
-  return tracks.map((track) => ({
+  return reconcileCrossfadeTracks(tracks.map((track) => ({
     ...track,
     clips: track.clips.map((clip: any) => cloneAudioClipDeep(clip)),
     midiClips: track.midiClips.map((clip: any) => cloneTimelineClipDeep(clip)),
@@ -263,7 +265,7 @@ export function cloneTracksForTimelineUndo(tracks: any[]) {
       ...lane,
       points: (lane.points || []).map((point: any) => ({ ...point })),
     })),
-  }));
+  })));
 }
 
 export function cloneClipboardAutomationTracks(tracks: any[], trackIds?: ReadonlySet<string>) {
@@ -1001,6 +1003,7 @@ function splitAudioTakes(
         fadeIn: Math.min(fadeIn, leftDuration),
         fadeOut: hasRightContent ? 0 : Math.min(fadeOut, leftDuration),
         gainEnvelope: envelopes.left,
+        crossfadeLayers: windowCrossfadeLayers(take.crossfadeLayers, 0, leftDuration),
       },
       right: {
         ...take,
@@ -1014,6 +1017,7 @@ function splitAudioTakes(
         fadeIn: 0,
         fadeOut: Math.min(fadeOut, boundedRightDuration),
         gainEnvelope: envelopes.right,
+        crossfadeLayers: windowCrossfadeLayers(take.crossfadeLayers, takeSplitOffset, boundedRightDuration),
       },
     };
   });
@@ -1072,6 +1076,7 @@ function createTimelineSplit(entry: any, splitTime: number) {
       fadeIn: Math.min(fadeIn, splitOffset),
       fadeOut: 0,
       gainEnvelope: envelopes.left,
+      crossfadeLayers: windowCrossfadeLayers(clip.crossfadeLayers, 0, splitOffset),
       takes: splitTakes?.map((take: any) => take.left),
     },
     rightClip: {
@@ -1086,6 +1091,7 @@ function createTimelineSplit(entry: any, splitTime: number) {
       fadeIn: 0,
       fadeOut: Math.min(fadeOut, rightDuration),
       gainEnvelope: envelopes.right,
+      crossfadeLayers: windowCrossfadeLayers(clip.crossfadeLayers, splitOffset, rightDuration),
       takes: splitTakes?.map((take: any) => take.right),
     },
   };
@@ -1126,10 +1132,10 @@ function buildSplitTrackSnapshots(tracks: any[], splitData: any[]) {
     snapshots.set(track.id, {
       beforeClips: [...track.clips],
       beforeMIDIClips: [...track.midiClips],
-      afterClips: track.clips.flatMap((clip: any) => {
+      afterClips: reconcileCrossfadeMembers(track.clips.flatMap((clip: any) => {
         const split = replacements.get(clip.id);
         return split?.kind === "audio" ? getReplacementClips(split) : [clip];
-      }),
+      })),
       afterMIDIClips: track.midiClips.flatMap((clip: any) => {
         const split = replacements.get(clip.id);
         return split?.kind === "midi" ? getReplacementClips(split) : [clip];
@@ -1510,6 +1516,7 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         startTime: found.clip.startTime,
         duration: found.clip.duration,
         offset: found.clip.offset || 0,
+        ...(!isMidi ? { crossfadeLayers: cloneCrossfadeLayers(found.clip.crossfadeLayers) } : {}),
         ...(isMidi ? { loopLength: found.clip.loopLength, sourceLength: found.clip.sourceLength } : {}),
       };
       const midiLoopLength = isMidi
@@ -1519,6 +1526,8 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         startTime: Math.max(0, newStartTime),
         duration: Math.max(0.01, newDuration),
         offset: Math.max(0, newOffset || 0),
+        ...(!isMidi ? { crossfadeLayers: windowCrossfadeLayers(found.clip.crossfadeLayers,
+          Math.max(0, newStartTime) - found.clip.startTime, Math.max(0.01, newDuration)) } : {}),
         ...(isMidi ? { loopLength: midiLoopLength, sourceLength: midiLoopLength } : {}),
       };
 
@@ -1633,6 +1642,7 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         : {
             ...clip,
             gainEnvelope: clip.gainEnvelope?.map((point) => ({ ...point })),
+            crossfadeLayers: cloneCrossfadeLayers(clip.crossfadeLayers),
           };
 
       const oldClip = cloneClip(found.clip);
@@ -1698,6 +1708,7 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
             time: Math.max(0, point.time * timeScale),
           })),
           sampleRate: stretchResult.sampleRate || oldClip.sampleRate,
+          crossfadeLayers: scaleCrossfadeLayers(oldClip.crossfadeLayers, timeScale),
           // Subsequent graphical pitch edits must use the stretched audio as
           // their immutable source, not pre-stretch material.
           pitchCorrectionSourceFilePath: undefined,
@@ -2591,6 +2602,9 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
       const remainingCutEntries = clipboard.isCut
         ? clipboard.clips.filter((entry) => !originalIds.has(entry.clip.id))
         : clipboard.clips;
+      const pastedAudio = forkCopiedCrossfades(pastedEntries.filter(entry => !entry.isMidi).map(entry => entry.clip));
+      const pastedAudioById = new Map(pastedAudio.map(clip => [clip.id, clip]));
+      for (const entry of pastedEntries) if (!entry.isMidi) entry.clip = pastedAudioById.get(entry.clip.id)!;
       const nextClipboard = clipboard.isCut
         ? {
             clip: remainingCutEntries[0]?.clip || null,
@@ -3201,6 +3215,7 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         id: newClipId,
         startTime: foundClip.startTime + foundClip.duration,
       };
+      if (!isMidi) newClip.crossfadeLayers = forkCopiedCrossfades([newClip])[0].crossfadeLayers;
       const oldTracks = cloneTracksForTimelineUndo(state.tracks);
       let newTracks = oldTracks.map((track: any) => track.id === foundTrackId
         ? isMidi
@@ -3272,6 +3287,9 @@ export const clipEditingActions = (set: SetFn, get: GetFn) => ({
         },
       }));
       const newIds = duplicates.map((entry: any) => entry.clip.id);
+      const copiedAudio = forkCopiedCrossfades(duplicates.filter(entry => entry.kind === "audio").map(entry => entry.clip));
+      const copiedAudioById = new Map(copiedAudio.map(clip => [clip.id, clip]));
+      for (const entry of duplicates) if (entry.kind === "audio") entry.clip = copiedAudioById.get(entry.clip.id)!;
       const touchedAudio = duplicates.some((entry: any) => entry.kind === "audio");
       const touchedMIDI = duplicates.some((entry: any) => entry.kind === "midi");
       const oldTracks = cloneTracksForTimelineUndo(state.tracks);

@@ -76,6 +76,9 @@ function midiNumber(event: RecordValue, key: string, min: number, max: number, r
 function validateMIDI(owner: RecordValue) {
   for (const value of list(owner, "events", 1_000_000)) {
     const event = object(value, "MIDI event");
+    if (event.notePairId !== undefined && (typeof event.notePairId !== "string"
+      || event.notePairId.length === 0 || event.notePairId.length > 1024))
+      throw new Error("Invalid MIDI note pair identity");
     midiNumber(event, "timestamp", 0, 1e9, true);
     if (!["noteOn", "noteOff", "cc", "pitchBend", "programChange", "channelPressure", "polyPressure"].includes(String(event.type)))
       throw new Error("Invalid MIDI event type");
@@ -135,6 +138,27 @@ export function parseValidatedProject(json: string): RecordValue & { tracks: Rec
     if (unique) clipIds.add(clipId);
     timing(clip, "startTime"); timing(clip, "duration"); timing(clip, "offset");
     optionalText(clip, "filePath"); optionalText(clip, "name");
+    for (const value of list(clip, "crossfadeLayers", 256)) {
+      const layer = object(value, "Clip crossfade layer");
+      optionalText(layer, "id", 1_000_000);
+      if (typeof layer.id !== "string" || !layer.id) throw new Error("Invalid crossfade layer ID");
+      for (const member of list(layer, "memberClipIds", 4096)) id(member, "crossfade member");
+      if (layer.offset !== undefined && (typeof layer.offset !== "number" || !Number.isFinite(layer.offset) || Math.abs(layer.offset) > 1e9))
+        throw new Error("Invalid crossfade layer offset");
+      let previousTime = -1;
+      for (const value of list(layer, "points", 16384)) {
+        const point = object(value, "Crossfade gain point");
+        timing(point, "time"); midiNumber(point, "gain", 0, 1, true);
+        if ((point.time as number) <= previousTime) throw new Error("Crossfade points must increase in time");
+        previousTime = point.time as number;
+      }
+      if (!(layer.points as unknown[])?.length) throw new Error("Crossfade gain points are missing");
+      const settings = object(layer.settings, "Crossfade settings");
+      midiNumber(settings, "fadeInShape", 0, 4); midiNumber(settings, "fadeOutShape", 0, 4);
+      if (settings.transitionLength !== undefined) {
+        midiNumber(settings, "transitionLength", Number.MIN_VALUE, 1e9, true);
+      }
+    }
     if (clip.sampleRate != null) bounded(clip, "sampleRate", 44100, 8000, 384000);
     if (clip.playbackRate != null) bounded(clip, "playbackRate", 1, 0.01, 100);
     validateMIDI(clip);

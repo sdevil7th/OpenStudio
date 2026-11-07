@@ -1,5 +1,8 @@
+import type { ClipSourceDescriptor } from "../utils/clipSourceDescriptor";
+import { withAIExecutionPreference } from "./aiExecutionPreferences";
 import { parseFXStageState, type FXStageSlotState } from "./fxStageState";
 import { getProjectEpoch } from "../utils/projectLifetime";
+import { decodeLegacyWaveformPeaks, decodePackedWaveformPeaks } from "../utils/packedWaveformPeaks";
 export interface PracticeTimerState { status: "idle" | "running" | "paused" | "finished" | "interrupted"; duration: number; elapsed: number; }
 export interface MetronomeSoundInfo {
   selection?: string;
@@ -1472,9 +1475,25 @@ export interface StemSepProgress {
   progress: number;
   stemFiles?: Array<{ name: string; filePath: string }>;
   error?: string;
-  backend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+  backend?: "cuda" | "rocm" | "xpu" | "directml" | "coreml" | "mps" | "cpu";
   accelerationMode?: "auto" | "cpu-only";
   threadCap?: number;
+  fallbackReason?: string;
+  resources?: AIResourceState;
+  diagnostics?: {
+    phase?: string;
+    memoryPlan?: { backend: string; chunk_duration: number; memory_mode?: "whole" | "sections" | "streaming"; reason: string; estimated_host_bytes?: number | null; estimated_gpu_bytes?: number | null };
+    performancePolicy?: { requested: string; profile: string; precision: string; reason: string };
+    executionDetails?: { deviceReceipt?: { cudaDeviceName?: string; parameterBytesByDevice?: Record<string, number> } };
+    telemetry?: { elapsedSeconds: number; peakRssBytes: number | null; stages: Record<string, { seconds: number; calls: number }> };
+  };
+}
+
+export interface AIResourceState {
+  owner: "idle" | "generation" | "separation" | "installation" | "releasing-idle-memory";
+  jobToken: number;
+  generationWorkerWarm: boolean;
+  lastMeasurements?: Record<string, unknown>;
 }
 
 export interface ActiveRecordingMIDIPreviewRequest {
@@ -1584,6 +1603,7 @@ export interface AiHardwareStatus {
   systemRamGb?: number;
   gpuBackend?: "cuda" | "rocm" | "directml" | "mps" | "none" | string;
   gpuName?: string;
+  gpuArchitecture?: string;
   gpuMemoryMb?: number;
   gpuMemoryGb?: number;
   gpuMemoryDetected?: boolean;
@@ -1596,6 +1616,7 @@ export interface AiHardwareStatus {
 }
 
 export interface AiMusicModelStatus {
+  optimizations?: { compile?: { ready: boolean; runtimePath?: string } };
   variants?: { int8?: { installed: boolean; ready: boolean; modelPath?: string } };
   id: AiMusicModelId;
   label?: string;
@@ -1615,6 +1636,7 @@ export interface AiMusicModelStatus {
 }
 
 export interface AiToolsStatus {
+  resources?: AIResourceState;
     state:
       | "idle"
       | "installing"
@@ -1665,12 +1687,12 @@ export interface AiToolsStatus {
      downloadHint?: string;
      supportedBackends?: string[];
      activityLines?: string[];
-     selectedBackend?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+     selectedBackend?: "cuda" | "rocm" | "directml" | "coreml" | "mps" | "cpu";
     runtimeVersion?: string;
     modelVersion?: string;
     verificationMode?: "in-process" | "subprocess";
     runtimeCandidate?: string;
-    backendRequested?: "cuda" | "directml" | "coreml" | "mps" | "cpu";
+    backendRequested?: "cuda" | "rocm" | "directml" | "coreml" | "mps" | "cpu";
     installSessionId?: string;
     lastPhase?: string;
     terminalReason?: string;
@@ -1770,6 +1792,8 @@ export function withAIExecutionNote(progress: AIGenerationProgress): AIGeneratio
 }
 
 export interface InstallAiToolsOptions {
+  prepareOptimization?: "compile";
+  repairRuntime?: boolean;
   modelVariant?: "original" | "int8";
   userConfirmedDownload?: boolean;
   selectedFeatures?: AiFeatureId[];
@@ -2111,6 +2135,8 @@ export interface AudioDebugSnapshot {
     maxMs: number;
     histogramOverflowCount: number;
   }>;
+  audioCallbackTimingAvailable?: boolean;
+  audioCallbackTimingStatus?: string;
   audioCallbackDeadlineMissCount?: number;
   lifetimeAudioCallbackDeadlineMissCount?: number;
   oversizedAudioCallbackCount?: number;
@@ -2128,7 +2154,15 @@ export interface AudioDebugSnapshot {
   audioCallbackDeadlineMissBurstCount?: number;
   lastAudioCallbackDeadlineMissProcessMs?: number;
   lastAudioCallbackDeadlineMissWhileRecording?: boolean;
+  /** Legacy combined manager count = driver overloads plus JUCE host deadlines. */
   audioDeviceXRunCount?: number;
+  audioDeviceXRunTelemetrySupported?: boolean;
+  /** Driver-reported count; negative means unsupported. */
+  audioDriverXRunCount?: number;
+  audioDriverXRunTelemetrySupported?: boolean;
+  /** Derived host count; -1 when a concurrent change prevents a reliable split. */
+  audioHostXRunCount?: number;
+  audioXRunSplitSnapshotConsistent?: boolean;
   trackExecution?: AudioTrackExecutionDiagnostics;
   audioCallbackTrackBufferResizeCount?: number;
   audioCallbackPitchScrubBufferResizeCount?: number;
@@ -2281,6 +2315,39 @@ export interface MIDIImportResult {
   error?: string;
   numTracks?: number;
   ticksPerQuarterNote?: number;
+  sourceTempoInfo?: MIDIExportOptions;
+}
+
+export interface ClipTempoPreviewData {
+  wavBase64?: string; sampleRate?: number; numChannels?: number; durationSeconds?: number;
+  rangeStartSeconds?: number; filePath?: string; sourceOffsetSeconds?: number; clipDurationSeconds?: number; error?: string;
+}
+
+export interface ProjectRateCopyResult {
+  success: boolean; filePath?: string; originalSourceFilePath?: string; sampleRate?: number;
+  duration?: number; numChannels?: number; sourceIdentity?: string; cacheHit?: boolean; quality?: string;
+  cancelled?: boolean; error?: string;
+}
+
+export interface ClipTempoAnalysis {
+  analysisStartSeconds?: number;
+  analysisDurationSeconds?: number;
+  analyzedDurationSeconds?: number;
+  tempoSpreadBpm?: number;
+  segments?: Array<{startSeconds: number; durationSeconds: number; bpm: number; confidence: number}>;
+  bpm: number;
+  confidence: number;
+  beatOffsetSeconds: number;
+  candidates: Array<{ bpm: number; confidence: number }>;
+  source: "audio" | "midi-metadata" | "midi-estimate";
+  warning?: string;
+  error?: string;
+}
+
+export interface MIDIExportOptions {
+  tempo: number;
+  tempoMarkers: Array<{ time: number; bpm: number }>;
+  timeSignature: { numerator: number; denominator: number };
 }
 
 function coerceNativeArray<T = any>(value: any): T[] {
@@ -2374,7 +2441,7 @@ declare global {
         // Transport (Phase 2)
         setTransportPlaying?: (playing: boolean) => Promise<boolean>;
         setTransportRecording?: (recording: boolean) => Promise<boolean>;
-        setTransportStateWithToken?: (action: "position" | "playing" | "recording", value: number | boolean, token: string) => Promise<boolean | { success: boolean; parameterEdits?: unknown[] }>;
+        setTransportStateWithToken?: (action: "position" | "playing" | "recording" | "preparedRecording", value: number | boolean, token: string) => Promise<boolean | { success: boolean; parameterEdits?: unknown[] }>;
         acknowledgeAutomationEditorFlush?: (token: string, success: boolean) => Promise<boolean>;
         setTempo?: (bpm: number) => Promise<boolean>;
         getTempo?: () => Promise<number>;
@@ -2498,11 +2565,21 @@ declare global {
         bypassMonitoringFX?: (fxIndex: number, bypassed: boolean) => Promise<boolean>;
 
         // Waveform Visualization
+        getWaveformPeaksPacked?: (
+          filePath: string,
+          samplesPerPixel: number,
+          startSample: number,
+          numPixels: number,
+          sourceRangeStartSample?: number,
+          sourceRangeEndSample?: number,
+        ) => Promise<unknown>;
         getWaveformPeaks?: (
           filePath: string,
           samplesPerPixel: number,
           startSample: number,
           numPixels: number,
+          sourceRangeStartSample?: number,
+          sourceRangeEndSample?: number,
         ) => Promise<WaveformPeak[]>;
         getAudioPeakAmplitude?: (
           filePath: string,
@@ -2524,6 +2601,8 @@ declare global {
           clipId: string,
           pitchCorrectionSourceFilePath?: string,
           pitchCorrectionSourceOffset?: number,
+          fadeInCurve?: number,
+          fadeOutCurve?: number,
         ) => Promise<boolean>;
         addPlaybackClipsBatch?: (clipsJSON: string) => Promise<boolean>;
         removePlaybackClip?: (
@@ -2795,6 +2874,12 @@ declare global {
         // Media Import (F10)
         importMediaFile?: (filePath: string) => Promise<MediaFileInfo>;
         probeMediaFile?: (filePath: string) => Promise<MediaFileInfo>;
+        analyzeClipTempo?: (trackId: string, clipId: string, rangeStartSeconds?: number, rangeDurationSeconds?: number, source?: ClipSourceDescriptor, requestId?: string) => Promise<ClipTempoAnalysis>;
+        cancelClipTempoAnalysis?: (requestId: string) => Promise<boolean>;
+        getClipTempoPreviewData?: (trackId: string, clipId: string, rangeStartSeconds: number, durationSeconds: number, source?: ClipSourceDescriptor) => Promise<ClipTempoPreviewData>;
+        createProjectRateCopy?: (filePath: string, sampleRate: number, projectPath: string, jobId: string, originalSourceFilePath: string) => Promise<ProjectRateCopyResult>;
+        cancelProjectRateCopy?: (jobId: string) => Promise<boolean>;
+        replacePlaybackClipSource?: (trackId: string, clipId: string, expectedFilePath: string, replacementFilePath: string, immutableSourceFilePath: string, immutableOffset: number) => Promise<boolean>;
         requestWaveformPreview?: (
           filePath: string,
           requestId: string,
@@ -2886,7 +2971,7 @@ declare global {
           totalSize: number;
         }>;
         deleteFiles?: (filePaths: string[]) => Promise<{ deleted: number; errors: string[] }>;
-        exportProjectMIDI?: (filePath: string, midiTracks: any[]) => Promise<boolean>;
+        exportProjectMIDI?: (filePath: string, midiTracks: any[], options?: MIDIExportOptions) => Promise<boolean>;
         convertAudioFile?: (inputPath: string, outputPath: string, format: string, sampleRate: number, bitDepth: number, channels: number) => Promise<boolean>;
         getHomeDirectory?: () => Promise<string>;
 
@@ -3027,7 +3112,7 @@ declare global {
         // Sprint 19: MIDI Import/Export
         importMIDIFile?: (filePath: string) => Promise<MIDIImportResult | any>;
         exportMIDIFile?: (filePath: string, tracksJSON: string) => Promise<boolean>;
-        prepareExternalMIDIFileDrag?: (defaultFileName: string, midiTracks: any[]) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+        prepareExternalMIDIFileDrag?: (defaultFileName: string, midiTracks: any[], options?: MIDIExportOptions) => Promise<{ success: boolean; filePath?: string; error?: string }>;
         beginExternalFileDrag?: (filePath: string) => Promise<boolean>;
 
         // Sprint 19: A/B Plugin Comparison
@@ -3089,6 +3174,7 @@ declare global {
         refreshAiToolsStatus?: () => Promise<AiToolsStatus>;
         installAiTools?: (optionsJsonOrConfirmed?: string | boolean) => Promise<InstallAiToolsResponse>;
         resetAiTools?: () => Promise<ResetAiToolsResponse>;
+        releaseIdleAIMemory?: () => Promise<{ success: boolean; released?: boolean; error?: string; resources?: AIResourceState }>;
         separateStemsAsync?: (trackId: string, clipId: string, optionsJSON: string) => Promise<{ started: boolean; error?: string; cached?: boolean }>;
         getStemSeparationProgress?: () => Promise<StemSepProgress>;
         cancelStemSeparation?: () => Promise<void>;
@@ -4595,6 +4681,14 @@ class NativeBridge {
     }
   }
 
+  async startPreparedRecording(): Promise<boolean> {
+    if (!this.isNative) return true;
+    // Older binaries must fail closed; two independent IPC calls would restore
+    // the timeline-before-writer race this operation is designed to remove.
+    if (!this.getBackend()?.setTransportStateWithToken) return false;
+    return this.changeTransport("preparedRecording", true, async () => false);
+  }
+
   // Punch In/Out (Phase 3.1)
   async setPunchRange(startTime: number, endTime: number, enabled: boolean): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.setPunchRange) {
@@ -4667,7 +4761,7 @@ class NativeBridge {
     return this.transportRequestsPending === 0;
   }
 
-  private async changeTransport(action: "position" | "playing" | "recording", value: number | boolean, legacy: () => Promise<boolean>): Promise<boolean> {
+  private async changeTransport(action: "position" | "playing" | "recording" | "preparedRecording", value: number | boolean, legacy: () => Promise<boolean>): Promise<boolean> {
     const epoch = getProjectEpoch();
     const previous = this.transportRequestToken;
     const token = `${this.transportTokenPrefix}:${++this.transportRequestSequence}`;
@@ -5743,15 +5837,31 @@ class NativeBridge {
     samplesPerPixel: number,
     startSample: number,
     numPixels: number,
+    sourceRangeStartSample = 0,
+    sourceRangeEndSample = -1,
   ): Promise<WaveformPeak[]> {
+    if (this.isNative && window.__JUCE__?.backend.getWaveformPeaksPacked) {
+      try {
+        return decodePackedWaveformPeaks(await window.__JUCE__.backend.getWaveformPeaksPacked(
+          filePath, samplesPerPixel, startSample, numPixels, sourceRangeStartSample, sourceRangeEndSample,
+        ));
+      } catch (error) {
+        // Older or malformed packed responses may use the exact legacy data.
+        // A missing fallback propagates the failure instead of inventing peaks.
+        if (!window.__JUCE__?.backend.getWaveformPeaks) throw error;
+        console.warn("Packed waveform unavailable; retrying legacy waveform response", error);
+      }
+    }
     if (this.isNative && window.__JUCE__?.backend.getWaveformPeaks) {
       const flat = await window.__JUCE__.backend.getWaveformPeaks(
         filePath,
         samplesPerPixel,
         startSample,
         numPixels,
+        sourceRangeStartSample,
+        sourceRangeEndSample,
       );
-      return parseFlatPeaks(flat as unknown as number[]);
+      return decodeLegacyWaveformPeaks(flat);
     } else {
       // Mock: generate fake waveform data for testing
       const peaks: WaveformPeak[] = [];
@@ -5804,6 +5914,43 @@ class NativeBridge {
     return true;
   }
 
+  async getClipTempoPreviewData(trackId: string, clipId: string, rangeStartSeconds = 0, durationSeconds = 4, source?: ClipSourceDescriptor): Promise<ClipTempoPreviewData> {
+    if (this.isNative && window.__JUCE__?.backend.getClipTempoPreviewData)
+      return await window.__JUCE__.backend.getClipTempoPreviewData(trackId, clipId, rangeStartSeconds, durationSeconds, source);
+    return {error: "Audio preview requires the native application."};
+  }
+
+  async createProjectRateCopy(filePath: string, sampleRate: number, projectPath: string | null, jobId: string, originalSourceFilePath = ""): Promise<ProjectRateCopyResult> {
+    if (this.isNative && window.__JUCE__?.backend.createProjectRateCopy)
+      return await window.__JUCE__.backend.createProjectRateCopy(filePath, sampleRate, projectPath ?? "", jobId, originalSourceFilePath);
+    return {success: false, error: "Project-rate copies require the native application."};
+  }
+
+  async cancelProjectRateCopy(jobId: string): Promise<boolean> {
+    return this.isNative && !!window.__JUCE__?.backend.cancelProjectRateCopy
+      ? await window.__JUCE__.backend.cancelProjectRateCopy(jobId) : false;
+  }
+
+  async replacePlaybackClipSource(trackId: string, clipId: string, expectedFilePath: string, replacementFilePath: string, immutableSourceFilePath: string, immutableOffset: number): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.replacePlaybackClipSource)
+      return await window.__JUCE__.backend.replacePlaybackClipSource(trackId, clipId, expectedFilePath, replacementFilePath, immutableSourceFilePath, immutableOffset);
+    return !this.isNative;
+  }
+
+  async cancelClipTempoAnalysis(requestId: string): Promise<boolean> {
+    if (this.isNative && window.__JUCE__?.backend.cancelClipTempoAnalysis)
+      return await window.__JUCE__.backend.cancelClipTempoAnalysis(requestId);
+    return !this.isNative;
+  }
+
+  async analyzeClipTempo(trackId: string, clipId: string, rangeStartSeconds = 0, rangeDurationSeconds = -1, source?: ClipSourceDescriptor, requestId?: string): Promise<ClipTempoAnalysis> {
+    if (this.isNative && window.__JUCE__?.backend.analyzeClipTempo) {
+      return await window.__JUCE__.backend.analyzeClipTempo(trackId, clipId, rangeStartSeconds, rangeDurationSeconds, source, requestId);
+    }
+    return { bpm: 0, confidence: 0, beatOffsetSeconds: 0, candidates: [], source: "audio",
+      error: "Audio tempo analysis requires the native OpenStudio app." };
+  }
+
   // Playback clip management
   async addPlaybackClip(
     trackId: string,
@@ -5817,6 +5964,8 @@ class NativeBridge {
     clipId: string = "",
     pitchCorrectionSourceFilePath?: string,
     pitchCorrectionSourceOffset?: number,
+    fadeInCurve = 0,
+    fadeOutCurve = 0,
   ): Promise<boolean> {
     if (this.isNative && window.__JUCE__?.backend.addPlaybackClip) {
       console.log("[audio.playback] NativeBridge.addPlaybackClip", {
@@ -5839,6 +5988,8 @@ class NativeBridge {
         clipId,
         pitchCorrectionSourceFilePath,
         pitchCorrectionSourceOffset,
+        fadeInCurve,
+        fadeOutCurve,
       );
     }
     return !this.isNative;
@@ -5896,6 +6047,8 @@ class NativeBridge {
       clipId?: string;
       pitchCorrectionSourceFilePath?: string;
       pitchCorrectionSourceOffset?: number;
+      fadeInCurve?: number;
+      fadeOutCurve?: number;
     }>,
   ): Promise<boolean> {
     if (clips.length === 0) return true;
@@ -5929,6 +6082,8 @@ class NativeBridge {
           clip.clipId ?? "",
           clip.pitchCorrectionSourceFilePath,
           clip.pitchCorrectionSourceOffset,
+          clip.fadeInCurve ?? 0,
+          clip.fadeOutCurve ?? 0,
         ),
       ),
     );
@@ -7290,10 +7445,10 @@ class NativeBridge {
     return { deleted: filePaths.length, errors: [] };
   }
 
-  async exportProjectMIDI(filePath: string, midiTracks: any[]): Promise<boolean> {
+  async exportProjectMIDI(filePath: string, midiTracks: any[], options?: MIDIExportOptions): Promise<boolean> {
     const outputPath = ensureMIDIFileExtension(filePath);
     if (this.isNative && window.__JUCE__?.backend.exportProjectMIDI) {
-      return await window.__JUCE__.backend.exportProjectMIDI(outputPath, midiTracks);
+      return await window.__JUCE__.backend.exportProjectMIDI(outputPath, midiTracks, options);
     }
     console.log("[NativeBridge] Mock exportProjectMIDI:", outputPath);
     return true;
@@ -9235,6 +9390,12 @@ class NativeBridge {
         error: typeof raw.error === "string" ? raw.error : undefined,
         numTracks: typeof raw.numTracks === "number" ? raw.numTracks : tracks.length,
         ticksPerQuarterNote: typeof raw.ticksPerQuarterNote === "number" ? raw.ticksPerQuarterNote : undefined,
+        sourceTempoInfo: raw.sourceTempoInfo && Number.isFinite(raw.sourceTempoInfo.tempo) && raw.sourceTempoInfo.tempo > 0
+          ? { tempo: raw.sourceTempoInfo.tempo,
+              tempoMarkers: coerceNativeArray<{ time: number; bpm: number }>(raw.sourceTempoInfo.tempoMarkers)
+                .filter(marker => Number.isFinite(marker.time) && marker.time >= 0 && Number.isFinite(marker.bpm) && marker.bpm > 0),
+              timeSignature: { numerator: Number(raw.sourceTempoInfo.timeSignature?.numerator) || 4,
+                denominator: Number(raw.sourceTempoInfo.timeSignature?.denominator) || 4 } } : undefined,
       };
       return result;
     }
@@ -9250,10 +9411,10 @@ class NativeBridge {
     return true;
   }
 
-  async prepareExternalMIDIFileDrag(defaultFileName: string, midiTracks: any[]): Promise<{ success: boolean; filePath?: string; error?: string }> {
+  async prepareExternalMIDIFileDrag(defaultFileName: string, midiTracks: any[], options?: MIDIExportOptions): Promise<{ success: boolean; filePath?: string; error?: string }> {
     const outputName = ensureMIDIFileExtension(defaultFileName || "MIDI Clip.mid");
     if (this.isNative && window.__JUCE__?.backend.prepareExternalMIDIFileDrag) {
-      return await window.__JUCE__.backend.prepareExternalMIDIFileDrag(outputName, midiTracks);
+      return await window.__JUCE__.backend.prepareExternalMIDIFileDrag(outputName, midiTracks, options);
     }
     return { success: false, error: "External MIDI drag is available in the native app only." };
   }
@@ -9727,9 +9888,16 @@ class NativeBridge {
     };
   }
 
+  async releaseIdleAIMemory(): Promise<{ success: boolean; released?: boolean; error?: string; resources?: AIResourceState }> {
+    if (this.isNative && window.__JUCE__?.backend.releaseIdleAIMemory) {
+      return await window.__JUCE__.backend.releaseIdleAIMemory();
+    }
+    return { success: false, error: "AI memory management is unavailable in the web preview." };
+  }
+
   // ==================== Phase 10: Stem Separation Workflow ====================
 
-  async separateStemsAsync(trackId: string, clipId: string, options: { stems: string[]; filePath?: string; accelerationMode?: "auto" | "cpu-only" }): Promise<{ started: boolean; error?: string; cached?: boolean }> {
+  async separateStemsAsync(trackId: string, clipId: string, options: { stems: string[]; filePath?: string; accelerationMode?: "auto" | "cpu-only"; chunkDuration?: 0 | 30; memoryMode?: "automatic" | "streaming-preview"; performanceMode?: "standard" | "qualified-fast" }): Promise<{ started: boolean; error?: string; cached?: boolean }> {
     if (this.isNative && window.__JUCE__?.backend.separateStemsAsync)
       return await window.__JUCE__.backend.separateStemsAsync(trackId, clipId, JSON.stringify(options));
     console.log("[NativeBridge] Mock separateStemsAsync:", trackId, clipId, options);
@@ -9754,7 +9922,7 @@ class NativeBridge {
 
   async getAIGenerationPreflight(modelId: string, workflowId: string, params: Record<string, unknown>): Promise<AIGenerationPreflight> {
     if (this.isNative && window.__JUCE__?.backend.getAIGenerationPreflight) {
-      const report = await window.__JUCE__.backend.getAIGenerationPreflight(modelId, workflowId, JSON.stringify(params));
+      const report = await window.__JUCE__.backend.getAIGenerationPreflight(modelId, workflowId, JSON.stringify(withAIExecutionPreference(modelId, params)));
       if (report?.status && Array.isArray(report.memory) && Array.isArray(report.notes)) return report;
     }
     return { status: "unavailable", memory: [], notes: ["Hardware checks are available in the desktop app with an installed model runtime."] };
@@ -9791,7 +9959,7 @@ class NativeBridge {
         trackId,
         modelId,
         workflowId,
-        JSON.stringify(normalizedParams),
+        JSON.stringify(withAIExecutionPreference(modelId, normalizedParams)),
       );
     }
     console.log("[NativeBridge] Mock startAIGeneration:", trackId, modelId, workflowId, normalizedParams);

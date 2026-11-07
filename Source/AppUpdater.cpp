@@ -120,10 +120,13 @@ bool AppUpdater::rejectUnsupportedInstallerUpdate(const Completion& completion)
     const auto packageFormat = OpenStudioRuntime::nativePackageFormat();
     if (packageFormat.isNotEmpty())
     {
+        const bool snapManaged = packageFormat == "snap";
         auto result = makeStatus("manual-update",
-            "This installation uses a ." + packageFormat + " package. Download the matching installer for your distribution and open it with your software installer to update OpenStudio.");
-        result.getDynamicObject()->setProperty("updateSource", "linux-package");
-        result.getDynamicObject()->setProperty("releasePageUrl", juce::String(OPENSTUDIO_RELEASES_PAGE_URL));
+            snapManaged ? "This installation is updated by the Snap Store. Use Ubuntu App Center or snap refresh to update OpenStudio."
+                        : "This installation uses a ." + packageFormat + " package. Download the matching installer for your distribution and open it with your software installer to update OpenStudio.");
+        result.getDynamicObject()->setProperty("updateSource", snapManaged ? "snap-store" : "linux-package");
+        result.getDynamicObject()->setProperty("releasePageUrl", snapManaged ? juce::String("https://snapcraft.io/openstudio")
+                                                                          : juce::String(OPENSTUDIO_RELEASES_PAGE_URL));
         publishStatus(result);
         if (completion) completion(result);
         return true;

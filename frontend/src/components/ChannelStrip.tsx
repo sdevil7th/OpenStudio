@@ -3,6 +3,7 @@ import classNames from "classnames";
 import { ChevronDown, Power } from "lucide-react";
 import { PeakMeter } from "./PeakMeter";
 import { MasterPeakMeterCluster } from "./MasterPeakMeterCluster";
+import { MixerLevelInput } from "./MixerLevelInput";
 import { resolveTrackMeterPresentation } from "../utils/trackMeterPresentation";
 import {
   useDAWStore,
@@ -828,7 +829,13 @@ export const ChannelStrip = React.memo(function ChannelStrip({
               : undefined
           }
         >
-          {formatVolume(effectiveVolumeDB)} dB
+          <MixerLevelInput
+            value={effectiveVolumeDB}
+            name={track.name}
+            onBeginEdit={beginVolumeEdit}
+            onChange={handleVolumeChange}
+            onCommitEdit={commitVolumeEdit}
+          />
         </div>
 
         {/* M/S/R Buttons for tracks */}

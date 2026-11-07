@@ -106,11 +106,25 @@ juce::String computeScriptVersion(const juce::File& script)
 
     if (script.getFileName() == "stable_audio3_generate.py" || script.getFileName() == "generate_music.py")
     {
-        for (const auto* module : { "diffusers_audio_pipeline.py", "ai_execution_policy.py",
-                                    "ai_attention_policy.py", "ai_partial_offload.py", "ai_disk_store.py", "ai_model_variants.py" })
+        const auto manifestFile = script.getSiblingFile("ai-worker-modules.json");
+        juce::MemoryBlock manifestBytes;
+        if (manifestFile.getSize() > 32768 || ! manifestFile.loadFileAsData(manifestBytes)) return {};
+        const auto manifest = juce::JSON::parse(manifestBytes.toString());
+        const auto moduleList = manifest.getProperty("modules", juce::var());
+        const auto* modules = moduleList.getArray();
+        if (static_cast<int>(manifest.getProperty("schemaVersion", 0)) != 1 || modules == nullptr
+            || modules->isEmpty() || modules->size() > 32) return {};
+        scriptBytes.append(manifestBytes.getData(), manifestBytes.getSize());
+        juce::StringArray seen;
+        for (const auto& module : *modules)
         {
+            const auto name = module.toString();
+            if (! module.isString() || name.length() > 100 || ! name.endsWith(".py")
+                || name.contains("..") || name.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.") != name
+                || seen.contains(name)) return {};
+            seen.add(name);
             juce::MemoryBlock adapterBytes;
-            if (! script.getSiblingFile(module).loadFileAsData(adapterBytes))
+            if (! script.getSiblingFile(name).loadFileAsData(adapterBytes))
                 return {};
             scriptBytes.append(adapterBytes.getData(), adapterBytes.getSize());
         }
@@ -250,6 +264,7 @@ AITrackEngine::~AITrackEngine()
 
 juce::File AITrackEngine::getUserDataRoot() const
 {
+    if (qualificationDataRoot != juce::File()) return qualificationDataRoot;
    #if JUCE_WINDOWS
     const auto localAppData = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
     if (localAppData.isNotEmpty())
@@ -285,6 +300,8 @@ juce::File AITrackEngine::getStableAudioRuntimeRoot() const
 
 juce::File AITrackEngine::getMusicGenerationCheckpointRoot() const
 {
+    const auto overridePath = qualificationModelRoots["ace-step-v15-xl-turbo"].toString();
+    if (overridePath.isNotEmpty()) return juce::File(overridePath);
     return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
         .getChildFile(".cache")
         .getChildFile("ace-step")
@@ -293,6 +310,8 @@ juce::File AITrackEngine::getMusicGenerationCheckpointRoot() const
 
 juce::File AITrackEngine::getStableAudioModelRoot(const juce::String& modelId) const
 {
+    const auto overridePath = qualificationModelRoots[juce::Identifier(modelId)].toString();
+    if (overridePath.isNotEmpty()) return juce::File(overridePath);
     return getUserDataRoot()
         .getChildFile("models")
         .getChildFile(modelId);
@@ -300,6 +319,8 @@ juce::File AITrackEngine::getStableAudioModelRoot(const juce::String& modelId) c
 
 juce::File AITrackEngine::findPython() const
 {
+    const auto overridePath = qualificationPythonPaths["ace-step-v15-xl-turbo"].toString();
+    if (overridePath.isNotEmpty()) return juce::File(overridePath);
     auto runtimePython = findPythonInRuntimeRoot(getUserRuntimeRoot());
     if (runtimePython.existsAsFile())
         return runtimePython;
@@ -341,6 +362,8 @@ juce::File AITrackEngine::findPython() const
 
 juce::File AITrackEngine::findStableAudioPython() const
 {
+    const auto overridePath = qualificationPythonPaths["stable-audio-3-medium"].toString();
+    if (overridePath.isNotEmpty()) return juce::File(overridePath);
     auto runtimePython = findPythonInRuntimeRoot(getStableAudioRuntimeRoot());
     if (runtimePython.existsAsFile())
         return runtimePython;
@@ -373,8 +396,17 @@ juce::File AITrackEngine::qualifiedMiniMaxPython(const juce::File& candidateRoot
 
 juce::File AITrackEngine::findMiniMaxPython() const
 {
+    const auto overridePath = qualificationPythonPaths["minimax-music-3"].toString();
+    if (overridePath.isNotEmpty()) return juce::File(overridePath);
     const auto candidate = qualifiedMiniMaxPython(getUserDataRoot().getChildFile("ai-candidates"));
     return candidate.existsAsFile() ? candidate : findStableAudioPython();
+}
+
+juce::File AITrackEngine::findCompilerPython() const
+{
+    const auto root = AIManagedRuntime::getActiveCompilerRuntimeRoot(getUserDataRoot(),
+        findStableAudioScript().getSiblingFile("ai-compiler-runtime-requirements-windows.txt"));
+    return root.isDirectory() ? findPythonInRuntimeRoot(root) : juce::File();
 }
 
 juce::File AITrackEngine::findScript() const
@@ -433,13 +465,16 @@ juce::var AITrackEngine::getGenerationPreflight(const juce::String& modelId,
         return unavailable("Hardware check does not support this model.");
     const bool stable = modelId != "ace-step-v15-xl-turbo";
     const bool int8 = juce::JSON::parse(paramsJson).getProperty("modelVariant", "").toString() == "int8";
-    const auto python = int8 ? findStableAudioPython() : modelId == "minimax-music-3" ? findMiniMaxPython()
+    const bool compilation = !int8 && modelId == "stable-audio-3-medium"
+        && juce::JSON::parse(paramsJson).getProperty("generationOptimization", "standard").toString() == "compile";
+    const auto python = compilation ? findCompilerPython() : int8 ? findStableAudioPython() : modelId == "minimax-music-3" ? findMiniMaxPython()
         : stable ? findStableAudioPython() : findPython();
     const auto worker = stable ? findStableAudioScript() : findScript();
     const auto script = worker.getSiblingFile("ai_generation_preflight.py");
     const auto root = stable ? getStableAudioModelRoot(modelId) : getMusicGenerationCheckpointRoot();
     if (!python.existsAsFile() || !script.existsAsFile())
-        return unavailable("Install the model runtime to check hardware requirements.");
+        return unavailable(compilation ? "Prepare optional compilation in AI Tools Setup."
+            : "Install the model runtime to check hardware requirements.");
     const auto params = juce::JSON::parse(paramsJson);
     if (!params.isObject() || paramsJson.getNumBytesAsUTF8() > 256 * 1024)
         return unavailable("Invalid generation parameters.");
@@ -451,6 +486,12 @@ juce::var AITrackEngine::getGenerationPreflight(const juce::String& modelId,
         return unavailable("Could not prepare the hardware check.");
     OwnedChildProcess process;
     auto environment = OpenStudioAI::runtimeEnvironment();
+    if (compilation)
+    {
+        environment.set("PYTHONNOUSERSITE", "1");
+        environment.set("PYTHONPATH", "");
+        environment.set("PYTHONHOME", "");
+    }
     environment.set("HF_HUB_OFFLINE", "1");
     environment.set("TRANSFORMERS_OFFLINE", "1");
     if (cancelled() || !process.start({ python.getFullPathName(), script.getFullPathName(),
@@ -576,7 +617,6 @@ void AITrackEngine::joinGenerationThread()
 void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bool keepGenerationActive)
 {
     std::thread readerThreadToJoin;
-    bool shouldKillProcess = false;
     OwnedChildProcess* processToKill = nullptr;
 
     {
@@ -590,16 +630,15 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
         workerPort_ = 0;
         processToKill = workerProcess_.get();
 
-        if (workerProcess_ != nullptr && workerProcess_->isRunning())
-            shouldKillProcess = true;
-
         if (readerThread_.joinable())
             readerThreadToJoin = std::move(readerThread_);
     }
 
-    if (shouldKillProcess && processToKill != nullptr && processToKill->isRunning())
+    bool retired = true;
+    if (processToKill != nullptr)
     {
-        if (!processToKill->kill())
+        retired = processToKill->terminateAndWait();
+        if (!retired)
             juce::Logger::writeToLog("AITrackEngine: owned process-tree termination failed.");
     }
 
@@ -607,6 +646,11 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
         readerThreadToJoin.join();
 
     const juce::ScopedLock sl(lock_);
+    if (! retired)
+    {
+        setProgressErrorLocked("worker_retirement_pending", "The AI worker has not stopped yet. Its memory budget remains reserved.", "worker_retirement");
+        return;
+    }
     workerProcess_.reset();
     resetProcessStateLocked();
 
@@ -618,12 +662,19 @@ void AITrackEngine::stopWorkerSession(bool clearProgress, bool userCancelled, bo
     }
 }
 
-bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId)
+bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::File& script, const juce::String& modelId,
+                                         const juce::String& optimization)
 {
     if (stopRequested_.load(std::memory_order_acquire)) return false;
     const auto isStableAudio = isDiffusersAudioModel(modelId);
     const auto modelLabel = audioModelLabel(modelId);
     const auto expectedScriptVersion = computeScriptVersion(script);
+    if (expectedScriptVersion.isEmpty())
+    {
+        const juce::ScopedLock sl(lock_);
+        setProgressErrorLocked("worker_dependency_manifest", "AI worker files are missing or inconsistent. Repair AI Tools before generating.", "worker_protocol");
+        return false;
+    }
     {
         const juce::ScopedLock sl(lock_);
         if (workerProcess_ != nullptr
@@ -634,11 +685,12 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             && workerScriptVersion_ == expectedScriptVersion
             && workerPython_ == python
             && juce::File(workerScriptPath_) == script
-            && workerModelId_ == modelId)
+            && workerModelId_ == modelId && workerOptimization_ == optimization)
             return true;
     }
 
     stopWorkerSession(false, false, true);
+    if (hasUnretiredWorker()) return false;
 
     for (int launchAttempt = 0; launchAttempt < 2; ++launchAttempt)
     {
@@ -648,6 +700,8 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
         command.add(python.getFullPathName());
         command.add(script.getFullPathName());
         command.add("--worker");
+        command.add("--optimization");
+        command.add(optimization);
         if (isStableAudio)
         {
             command.add("--model-root");
@@ -675,6 +729,7 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             const juce::ScopedLock sl(lock_);
             resetProcessStateLocked();
             workerPython_ = python;
+            workerOptimization_ = optimization;
             readerShouldExit_ = false;
             expectedProcessExit_ = false;
             workerReady_ = false;
@@ -709,7 +764,14 @@ bool AITrackEngine::ensureWorkerAvailable(const juce::File& python, const juce::
             currentProgress_.failureDetail.clear();
         }
 
-        if (! nextWorker->start(command, 3, OpenStudioAI::runtimeEnvironment()))
+        auto environment = OpenStudioAI::runtimeEnvironment();
+        if (optimization == "compile")
+        {
+            environment.set("PYTHONNOUSERSITE", "1");
+            environment.set("PYTHONPATH", "");
+            environment.set("PYTHONHOME", "");
+        }
+        if (! nextWorker->start(command, 3, environment))
         {
             const juce::ScopedLock sl(lock_);
             workerProcess_.reset();
@@ -885,7 +947,8 @@ void AITrackEngine::launchGenerationTask(const juce::File& python,
 {
     const auto modelLabel = audioModelLabel(modelId);
 
-    if (! ensureWorkerAvailable(python, script, modelId))
+    const auto optimization = juce::JSON::parse(paramsJson).getProperty("generationOptimization", "standard").toString();
+    if (! ensureWorkerAvailable(python, script, modelId, optimization))
     {
         const juce::ScopedLock sl(lock_);
         generationActive_ = false;
@@ -969,7 +1032,9 @@ bool AITrackEngine::startGeneration(const juce::String& modelId,
 
     const auto isStableAudio = isDiffusersAudioModel(modelId);
     const bool int8 = juce::JSON::parse(paramsJson).getProperty("modelVariant", "").toString() == "int8";
-    const auto python = int8 ? findStableAudioPython() : modelId == kMiniMaxModelId ? findMiniMaxPython()
+    const bool compilation = !int8 && modelId == "stable-audio-3-medium"
+        && juce::JSON::parse(paramsJson).getProperty("generationOptimization", "standard").toString() == "compile";
+    const auto python = compilation ? findCompilerPython() : int8 ? findStableAudioPython() : modelId == kMiniMaxModelId ? findMiniMaxPython()
         : isStableAudio ? findStableAudioPython() : findPython();
     const auto script = isStableAudio ? findStableAudioScript() : findScript();
     const auto modelLabel = audioModelLabel(modelId);
@@ -1493,6 +1558,7 @@ void AITrackEngine::resetProcessStateLocked()
     firstOutputByteAtMs_ = 0;
     firstOutputLineAtMs_ = 0;
     workerScriptVersion_.clear();
+    workerOptimization_.clear();
     workerScriptPath_.clear();
     workerPython_ = juce::File();
 }
@@ -1612,5 +1678,17 @@ bool AITrackEngine::releaseIdleWorker()
     if (isRunning())
         return false;
     stopWorker(false, false);
-    return true;
+    return !hasUnretiredWorker();
+}
+
+bool AITrackEngine::hasIdleWorker() const
+{
+    const juce::ScopedLock guard(lock_);
+    return ! expectedProcessExit_ && ! generationActive_ && workerProcess_ && workerProcess_->isRunning();
+}
+
+bool AITrackEngine::hasUnretiredWorker() const
+{
+    const juce::ScopedLock guard(lock_);
+    return expectedProcessExit_ && workerProcess_ && ! workerProcess_->retirementConfirmed();
 }

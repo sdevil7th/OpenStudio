@@ -1,0 +1,58 @@
+[
+  {
+    "workflow": "lyrics-style",
+    "params": {
+      "duration": 30,
+      "prompt": "A mellow acoustic song with a clear solo vocal and gentle guitar.",
+      "lyrics": "[verse]\nMorning light upon the sea\nA quiet song comes back to me\nWe walk along the shore today\nAnd watch the shadows drift away\n[chorus]\nSing the song and let it shine\nYour melody will stay with mine",
+      "steps": 30,
+      "seed": 123,
+      "modelVariant": "original"
+    },
+    "expectedDuration": 30
+  },
+  {
+    "workflow": "structured-song",
+    "params": {
+      "prompt": "A warm acoustic folk song with a solo singer, guitar, piano, bass and a gentle drum groove.",
+      "verse": "Morning light upon the sea\nA quiet song comes back to me\nWe walk along the shore today\nAnd watch the shadows drift away\nThe silver moon will guide us home\nWe never have to walk alone\nThe roads will turn and seasons change\nOur melody will stay the same",
+      "chorus": "Sing the song and let it shine\nYour melody will stay with mine\nAcross the hills and through the rain\nWe find our way back home again",
+      "bridge": "When the lights are fading low\nThere is still a way to go\nHold the note and take my hand\nWe will reach the morning land",
+      "vocals": "Clear solo singing with natural dynamics.",
+      "arrangement": "Intro, verse, chorus, verse, chorus, instrumental bridge, final chorus, gentle outro.",
+      "steps": 30,
+      "seed": 123,
+      "modelVariant": "original",
+      "duration": 60
+    },
+    "expectedDuration": 60
+  },
+  {
+    "workflow": "structured-song",
+    "params": {
+      "prompt": "A warm acoustic folk song with a solo singer, guitar, piano, bass and a gentle drum groove.",
+      "verse": "Morning light upon the sea\nA quiet song comes back to me\nWe walk along the shore today\nAnd watch the shadows drift away\nThe silver moon will guide us home\nWe never have to walk alone\nThe roads will turn and seasons change\nOur melody will stay the same",
+      "chorus": "Sing the song and let it shine\nYour melody will stay with mine\nAcross the hills and through the rain\nWe find our way back home again",
+      "bridge": "When the lights are fading low\nThere is still a way to go\nHold the note and take my hand\nWe will reach the morning land",
+      "vocals": "Clear solo singing with natural dynamics.",
+      "arrangement": "Intro, verse, chorus, verse, chorus, instrumental bridge, final chorus, gentle outro.",
+      "steps": 30,
+      "seed": 123,
+      "modelVariant": "original",
+      "duration": 300
+    },
+    "expectedDuration": 300
+  },
+  {
+    "workflow": "lyrics-style",
+    "params": {
+      "duration": 30,
+      "prompt": "A mellow acoustic song with a clear solo vocal and gentle guitar.",
+      "lyrics": "[verse]\nMorning light upon the sea\nA quiet song comes back to me\nWe walk along the shore today\nAnd watch the shadows drift away\n[chorus]\nSing the song and let it shine\nYour melody will stay with mine",
+      "steps": 30,
+      "seed": 123,
+      "modelVariant": "original"
+    },
+    "expectedDuration": 30
+  }
+]

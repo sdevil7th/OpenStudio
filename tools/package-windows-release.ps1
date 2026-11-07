@@ -175,6 +175,11 @@ if ($RequireSignedPayload) {
     Assert-OpenStudioSigningFiles -Directory $resolvedSourceDir -Version $Version -RequireSignature
 }
 
+& python (Join-Path $PSScriptRoot 'validate-support-tool.py') --bundle $resolvedSourceDir --version $Version
+if ($LASTEXITCODE -ne 0) { throw 'Offline support package failed validation.' }
+& python (Join-Path $PSScriptRoot 'release_build_policy.py') --bundle $resolvedSourceDir --version $Version
+if ($LASTEXITCODE -ne 0) { throw 'Production callback instrumentation policy failed validation.' }
+
 if ((-not (Test-Path $webView2Bootstrapper)) -or (-not (Test-Path $vcRedistInstaller))) {
     Write-Host "Windows prerequisite installers were not found. Fetching them now..."
     & (Join-Path $repoRoot "tools/setup-windows-prereqs.ps1")

@@ -233,6 +233,14 @@ constexpr OpenStudioIIRCoefficientSet kIdentityBiquad {
 OpenStudioIIRCoefficientSet normaliseBiquad(
     const std::array<float, 6>& coefficients) noexcept
 {
+    // Equal numerator/denominator polynomials are exactly unity. Retaining
+    // cancelling recursive terms lets fused multiply-add rounding excite the
+    // otherwise cancelled poles on ARM, even with every EQ gain at zero.
+    if (std::isfinite(coefficients[0]) && std::isfinite(coefficients[1])
+        && std::isfinite(coefficients[2]) && std::abs(coefficients[3]) > 1.0e-12f
+        && coefficients[0] == coefficients[3] && coefficients[1] == coefficients[4]
+        && coefficients[2] == coefficients[5])
+        return kIdentityBiquad;
     const float inverseA0 = std::abs(coefficients[3]) > 1.0e-12f
         ? 1.0f / coefficients[3]
         : 0.0f;
@@ -1198,6 +1206,37 @@ void OpenStudioEQ::captureMatchOutput(const juce::AudioBuffer<float>& buffer) no
 }
 
 void OpenStudioEQ::processEQAudioBlock(juce::AudioBuffer<float>& fullBuffer)
+{
+    // An embedded strip with no audible/analysis transition needs only the
+    // existing output meter. Detector scratch is refreshed by the general
+    // path before it can be consumed on the next enabled/requested block.
+    // Standalone/key/phase EQs always retain their complete processing path.
+    const int numSamples = fullBuffer.getNumSamples();
+    if (bandCount == numBands
+        && !powerEnabled.load(std::memory_order_acquire)
+        && !smoothedPowerMix.isSmoothing()
+        && smoothedPowerMix.getCurrentValue() <= 1.0e-6f
+        && fullBuffer.getNumChannels() == 2 && numSamples > 0
+        && getMainBusNumInputChannels() == 2 && !supportsExternalKey()
+        && !linearPhase && !spectralEQ && !matchCapture
+        && !draftPreview.requested()
+        && spectrumDemandSamplesRemaining.load(std::memory_order_acquire) <= 0
+        && spectrumCaptureSlot < 0
+        && !modeTransitionPending
+        && pendingProcessingMode == juce::jlimit(0, 2,
+            static_cast<int>(std::round(stereoMode.load(std::memory_order_relaxed))))
+        && dryScratch.getNumChannels() >= 2
+        && dryScratch.getNumSamples() >= numSamples
+        && bandScratch.getNumSamples() >= numSamples)
+    {
+        ++embeddedDryFastBlocks;
+        publishOutputPeaks(fullBuffer);
+        return;
+    }
+    processEQAudioBlockGeneral(fullBuffer);
+}
+
+void OpenStudioEQ::processEQAudioBlockGeneral(juce::AudioBuffer<float>& fullBuffer)
 {
     captureDetectorKey(fullBuffer);
     const int mainChannels = juce::jmin(getMainBusNumInputChannels(), fullBuffer.getNumChannels());

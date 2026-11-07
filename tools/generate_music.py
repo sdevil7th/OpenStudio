@@ -916,7 +916,7 @@ def build_diffusers_kwargs(
 class DiffusersAcePipelineManager:
     def __init__(self, *, model_id: str, cache_root: Path, enable_group_offload: bool,
                  requested_device: str | None = None, attention: str = "native", quantization: str = "none",
-                 placement: str = "auto") -> None:
+                 placement: str = "auto", compilation: bool = False, rocm_fast_startup: bool = False) -> None:
         self.model_id = model_id
         self.cache_root = cache_root
         self.enable_group_offload = enable_group_offload
@@ -926,7 +926,7 @@ class DiffusersAcePipelineManager:
         self.requested_device = requested_device
         self.attention = attention
         self.quantization = quantization
-        if placement not in {"auto", "resident", "model-offload", "group-offload"}:
+        if placement not in {"auto", "resident", "model-offload", "group-offload", "group-offload-disk"}:
             raise ValueError(f"Unsupported ACE-Step placement: {placement}")
         self.placement = placement
         if quantization != "none" and placement != "resident":
@@ -939,6 +939,15 @@ class DiffusersAcePipelineManager:
         self.execution_details = {}
         self._streaming = False
         self._low_cpu_memory = False
+        self._group_owner = None
+        self.compilation = compilation
+        self.rocm_fast_startup = rocm_fast_startup
+        self.startup_details = None
+        if rocm_fast_startup and (quantization != "none" or compilation or attention != "native" or placement != "auto"):
+            raise ValueError("Faster AMD startup requires Automatic placement, native attention and Original precision")
+        self._compiled = False
+        self._compilation_details = None
+        self.snapshot_root = None
 
     def load(self, reporter: ProgressReporter | None = None):
         if self.pipe is not None:
@@ -976,6 +985,12 @@ class DiffusersAcePipelineManager:
             local_snapshot = Path(self.model_id) if Path(self.model_id).is_dir() else resolve_music_gen_snapshot(self.cache_root, self.model_id)
             if local_snapshot is None:
                 raise ValueError("ACE-Step model files are missing or incomplete. Run Audio Generation setup.")
+            self.snapshot_root = Path(local_snapshot)
+            if self.rocm_fast_startup:
+                if saved_int8:
+                    raise ValueError("Faster AMD startup requires Original model files")
+                from ai_rocm_startup import configure_rocm_startup
+                self.startup_details = configure_rocm_startup(torch, self.device, self.snapshot_root)
             if dtype == torch.float32:
                 from ai_execution_policy import check_host_capacity
                 check_host_capacity(local_snapshot, float_bytes=4)
@@ -1003,7 +1018,7 @@ class DiffusersAcePipelineManager:
             return pipe
 
     def configure_memory(self, duration: float, reporter) -> None:
-        from diffusers_audio_pipeline import plan_audio_memory, module_weight_bytes, available_host_memory, GIB
+        from ai_memory_manager import plan_audio_memory, module_weight_bytes, available_host_memory, GIB
         import torch
         from ai_execution_policy import device_budget
         components = list(self.pipe.components.values())
@@ -1012,7 +1027,11 @@ class DiffusersAcePipelineManager:
         device = getattr(self, "device", "cuda")
         accelerated = device.split(":")[0] in {"cuda", "xpu"}
         budget = device_budget(torch, device, include_allocated=True)
-        mode = (plan_audio_memory(budget, weights, largest, duration, self.conservative)
+        startup_reserve = None
+        if self.rocm_fast_startup:
+            from ai_rocm_startup import rocm_startup_reserve
+            startup_reserve = rocm_startup_reserve(duration)
+        mode = (plan_audio_memory(budget, weights, largest, duration, self.conservative, reserve_bytes=startup_reserve)
                 if accelerated else "resident")
         if not self.enable_group_offload and not self.conservative:
             mode = "resident"
@@ -1021,8 +1040,23 @@ class DiffusersAcePipelineManager:
                 raise ValueError(f"ACE-Step {device} currently supports resident placement only.")
             mode = self.placement
         free, ram = budget, available_host_memory()
+        if getattr(self, "rocm_fast_startup", False) and mode != "resident":
+            raise ValueError("Faster AMD startup currently requires resident placement; choose Automatic for offloading")
+        automatic_disk = (self.placement == "auto" and mode != "resident" and self.backend == "cuda"
+            and sys.platform == "win32" and str(torch.__version__).startswith("2.11.")
+            and self.quantization == "none" and self.pipe.transformer.dtype == torch.bfloat16
+            and type(self.pipe.transformer).__name__ == "AceStepTransformer1DModel"
+            and ram is not None and ram < 2*largest+3*GIB)
+        if automatic_disk or self.placement == "auto" and self._placement == "group-offload-disk":
+            # Keep a bounded warm policy until unloading instead of alternating
+            # with whole-component copies whenever the file cache is reclaimed.
+            mode = "group-offload-disk"
+        blocks = list(getattr(self.pipe.transformer, "layers", []))
+        largest_group = max((module_weight_bytes([block]) for block in blocks), default=largest)
+        staging = 2 * largest_group
         stream = (mode == "group-offload" and not self.conservative
-                  and free is not None and free >= 8 * GIB and ram is not None and ram >= 3 * GIB)
+                  and free is not None and free >= 8 * GIB
+                  and ram is not None and ram >= staging + 3 * GIB)
         # Full-model pre-pinning can exhaust host RAM under WDDM even when
         # parameter bytes appear to fit: driver/staging storage also consumes
         # the host budget. Keep pinning bounded to each on-demand transfer.
@@ -1042,10 +1076,16 @@ class DiffusersAcePipelineManager:
             else:
                 # ACE reads condition tensors outside forward(); keep those
                 # resident and group-offload only the transformer.
-                self.pipe.transformer.enable_group_offload(
-                    onload_device=torch.device(device), offload_device=torch.device("cpu"),
-                    offload_type="leaf_level", use_stream=stream,
-                    low_cpu_mem_usage=low_cpu_memory)
+                if mode == "group-offload-disk":
+                    from ai_group_offload import GroupPlacement
+                    from ai_execution_policy import model_storage_identity
+                    self._group_owner = GroupPlacement({"transformer": self.pipe.transformer}, device,
+                        disk=True, identity=model_storage_identity(self.snapshot_root), disk_backend="mapped")
+                else:
+                    self.pipe.transformer.enable_group_offload(
+                        onload_device=torch.device(device), offload_device=torch.device("cpu"),
+                        offload_type="leaf_level", use_stream=stream,
+                        low_cpu_mem_usage=low_cpu_memory)
                 for name, component in self.pipe.components.items():
                     if name != "transformer" and hasattr(component, "to"):
                         component.to(device)
@@ -1056,20 +1096,40 @@ class DiffusersAcePipelineManager:
             "device": self.backend, "offload": mode, "weightsBytes": weights,
             "precision": str(self.pipe.transformer.dtype), "attentionPolicy": "automatic SDPA",
             "streaming": stream, "lowCpuMemory": low_cpu_memory,
+            "prefetchStagingBytes": staging if stream else 0,
+            "memoryPlanReason": "Disk backing bounds host copies for automatic placement" if automatic_disk else "Observed device and host memory budget",
+            "offloadBacking": "disk" if self._group_owner else "host-memory",
             "attention": self.attention_details, "quantization": self.quantization,
             "modelVariant": "int8" if self.quantization == "int8" else "original"}
         from ai_execution_policy import model_execution_capabilities
         self.execution_details["capabilities"] = model_execution_capabilities("ace-step-v15-xl-turbo", self.backend)
+        if self.startup_details:
+            self.execution_details["startupPolicy"] = self.startup_details
+            self.execution_details["activationReserveBytes"] = startup_reserve
+        if self.compilation and not self._compiled:
+            if self.backend != "cuda" or mode not in {"resident", "group-offload-disk"} or self.quantization != "none":
+                raise ValueError("ACE-Step compilation requires Original NVIDIA CUDA with resident or disk group placement")
+            from ai_execution_policy import compile_components
+            self._compilation_details = compile_components(self.pipe.components, device)
+            self._compiled = True
+        if self._compilation_details is not None:
+            self.execution_details["compilation"] = self._compilation_details
         precision_note = " / INT8 diffusion transformer" if self.quantization == "int8" else ""
+        startup_note = " · faster AMD convolution selection" if self.startup_details else ""
         reporter.update("generating", 0, phase="preparing_audio", phaseProgress=-1,
             message="Preparing ACE-Step audio.",
-            statusNote=f"{physical} · {self.pipe.transformer.dtype} · {mode} · {self.attention} attention",
+            statusNote=f"{physical} · {self.pipe.transformer.dtype} · {mode} · {self.attention} attention{startup_note}",
             generationDetails={"execution": self.execution_details})
 
     def unload(self):
         import gc
+        if self._group_owner is not None:
+            self._group_owner.close()
+            self._group_owner = None
         self.pipe = None
         self._placement = None
+        self._compiled = False
+        self._compilation_details = None
         gc.collect()
         if "torch" in sys.modules:
             from ai_execution_policy import accelerator_api
@@ -1182,8 +1242,10 @@ class DiffusersAcePipelineManager:
                 def phase_update(phase, message, fraction):
                     reporter.update("generating", max(0, fraction), phase=phase,
                                     message=message, phaseProgress=fraction)
-                with observe_generation(pipe, "ace-step", spec.duration, spec.steps, phase_update) as (_, timings):
-                    with torch.inference_mode():
+                from contextlib import nullcontext
+                with (self._group_owner.lease() if self._group_owner else nullcontext()), observe_generation(pipe, "ace-step", spec.duration, spec.steps, phase_update) as (_, timings):
+                    from ai_compilation import compilation_proof
+                    with torch.inference_mode(), compilation_proof(self._compilation_details):
                         result = pipe(**kwargs)
                 break
             except torch.OutOfMemoryError as exc:
@@ -1278,14 +1340,22 @@ def summarize_diffusers_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 class WorkerSession:
-    def __init__(self, *, ui_model_id: str, diffusers_model_id: str, cache_root: Path, enable_group_offload: bool) -> None:
+    def __init__(self, *, ui_model_id: str, diffusers_model_id: str, cache_root: Path, enable_group_offload: bool,
+                 optimization: str = "standard") -> None:
         self.ui_model_id = ui_model_id
         self.diffusers_model_id = diffusers_model_id
         self.cache_root = cache_root
+        self.optimization = optimization
+        options = ({"compilation":True, "placement":"group-offload-disk"} if optimization == "compile" else
+                   {"placement":"group-offload-disk"} if optimization == "disk-offload" else
+                   {"quantization":"torchao-int8", "placement":"resident"} if optimization == "torchao-int8" else
+                   {"rocm_fast_startup":True} if optimization == "rocm-fast-startup" else {})
+        self.optimization_options = options
         self.manager = DiffusersAcePipelineManager(
             model_id=diffusers_model_id,
             cache_root=cache_root,
             enable_group_offload=enable_group_offload,
+            **options,
         )
         self._busy = False
 
@@ -1341,6 +1411,10 @@ class WorkerSession:
 
             from ai_model_variants import requested_variant, variant_root, validate_variant
             variant = requested_variant(raw_params)
+            from ai_compilation import validate_optimization
+            validate_optimization(self.optimization, self.ui_model_id, variant)
+            if raw_params.get("generationOptimization", self.optimization) != self.optimization:
+                raise ValueError("Generation optimization changed; restart this worker")
             selected_model = self.diffusers_model_id
             if variant == "int8":
                 root = variant_root(self.ui_model_id)
@@ -1349,7 +1423,7 @@ class WorkerSession:
             if self.manager.model_id != selected_model:
                 self.manager.unload()
                 self.manager = DiffusersAcePipelineManager(model_id=selected_model,
-                    cache_root=self.cache_root, enable_group_offload=True)
+                    cache_root=self.cache_root, enable_group_offload=True, **self.optimization_options)
 
             reporter.update(
                 "loading",
@@ -1467,12 +1541,14 @@ def run_worker_server(
     diffusers_model_id: str,
     cache_root: Path,
     enable_group_offload: bool,
+    optimization: str = "standard",
 ) -> None:
     session = WorkerSession(
         ui_model_id=ui_model_id,
         diffusers_model_id=diffusers_model_id,
         cache_root=cache_root,
         enable_group_offload=enable_group_offload,
+        optimization=optimization,
     )
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1537,6 +1613,7 @@ def run_worker_server(
                 request_protocol_version = normalize_int(request.get("protocolVersion"), WORKER_PROTOCOL_VERSION)
                 request_script_version = normalize_text(request.get("scriptVersion"))
                 if command == "shutdown":
+                    session.manager.unload()
                     send_framed_json(
                         connection,
                         {
@@ -1706,25 +1783,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-id", default=DEFAULT_DIFFUSERS_MODEL_ID, help="Diffusers ACE-Step model repo id")
     parser.add_argument("--session-mode", default="oneshot", help="Session mode label to include in progress payloads")
     parser.add_argument("--disable-group-offload", action="store_true", help="Disable Diffusers transformer group offload")
+    parser.add_argument("--optimization", choices=["standard", "compile", "torchao-int8", "disk-offload", "rocm-fast-startup"], default="standard")
     return parser.parse_args()
 
 
 def main() -> None:
     install_stream_mirrors()
     args = parse_args()
+    from ai_compilation import validate_optimization, prepare_worker_optimization
+    validate_optimization(args.optimization, args.music_gen_model)
+    compilation_workspace = prepare_worker_optimization(args.optimization)
     cache_root = resolve_cache_root(args)
     enable_group_offload = (
         not args.disable_group_offload
         and normalize_bool(os.environ.get("OPENSTUDIO_ACE_ENABLE_GROUP_OFFLOAD"), True)
     )
     if args.worker:
-        run_worker_server(
-            ui_model_id=args.music_gen_model,
-            diffusers_model_id=args.model_id,
-            cache_root=cache_root,
-            enable_group_offload=enable_group_offload,
-        )
+        try:
+            run_worker_server(ui_model_id=args.music_gen_model, diffusers_model_id=args.model_id,
+                cache_root=cache_root, enable_group_offload=enable_group_offload, optimization=args.optimization)
+        finally:
+            if compilation_workspace is not None:
+                compilation_workspace.close()
         return
+    if args.optimization != "standard":
+        raise SystemExit("Additional optimization options require a persistent worker")
     raise SystemExit(run_one_shot(args))
 
 
