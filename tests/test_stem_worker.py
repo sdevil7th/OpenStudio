@@ -27,18 +27,23 @@ class StemWorkerTests(unittest.TestCase):
                 with self.subTest(qualified=qualified), patch.object(sys, "argv", args + flags), \
                         patch.dict(sys.modules, {"audio_separator.separator": SimpleNamespace(Separator=object)}), \
                         patch.object(worker, "configure_process"), patch.object(worker, "install_tqdm_hook"), \
+                        patch.object(worker, "runtime_versions", return_value={"python": "test"}) as versions, \
                         patch.object(worker, "probe_runtime_capabilities", side_effect=RuntimeError("test fault")), \
                         patch("ai_telemetry.WorkerTelemetry") as profiler, contextlib.redirect_stdout(output), \
                         contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     profiler.return_value.snapshot.return_value = {"peakRssBytes": 123}
                     worker.main()
-                error = json.loads(output.getvalue().splitlines()[-1])
+                events = [json.loads(line) for line in output.getvalue().splitlines()]
+                error = events[-1]
                 self.assertIn("test fault", error["error"])
+                self.assertEqual("versions" in events[0], qualified)
                 if qualified:
+                    versions.assert_called_once()
                     profiler.return_value.start.assert_called_once()
                     profiler.return_value.stop.assert_called_once()
                     self.assertEqual(error["telemetry"]["peakRssBytes"], 123)
                 else:
+                    versions.assert_not_called()
                     profiler.assert_not_called()
                     self.assertNotIn("telemetry", error)
 

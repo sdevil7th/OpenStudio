@@ -339,7 +339,8 @@ def main():
     # An explicit CPU request takes precedence over the legacy --gpu alias.
     acceleration_mode = args.acceleration_mode
     configure_process(acceleration_mode)
-    emit("loading", phase="startup", versions=runtime_versions(),
+    startup = {"versions": runtime_versions()} if args.qualification_telemetry else {}
+    emit("loading", phase="startup", **startup,
          accelerationMode=acceleration_mode, chunkDuration=args.chunk_duration)
 
     # Validate input
@@ -513,7 +514,6 @@ def main():
 
         # Load model
         if selected_backend in {"cuda", "rocm"}:
-            torch.cuda.reset_peak_memory_stats(separator.torch_device)
             if args.qualification_gpu_fraction:
                 if not 0 < args.qualification_gpu_fraction <= .25:
                     raise ValueError("Invalid qualification allocator limit")
@@ -536,19 +536,22 @@ def main():
         model_run = getattr(loaded, "model_run", None)
         from ai_execution_policy import configure_roformer_precision
         precision_details = configure_roformer_precision(model_run, args.precision)
-        receipt = model_execution_receipt(torch, model_run, separator.torch_device)
-        if selected_backend in {"cuda", "rocm"} and not any(
-                device.startswith("cuda:") and size > 0
-                for device, size in receipt["parameterBytesByDevice"].items()):
+        using_gpu = selected_backend in {"cuda", "rocm"}
+        if using_gpu and (model_run is None or not any(
+                tensor.is_cuda and tensor.numel() > 0 for tensor in model_run.parameters())):
             raise RuntimeError("GPU backend selected but RoFormer parameters were not loaded into GPU memory")
-        if telemetry and selected_backend in {"cuda", "rocm"}:
-            EMIT_CONTEXT["gpuResidentBaselineBytes"] = receipt["cudaAllocatedBytes"]
-            torch.cuda.reset_peak_memory_stats(separator.torch_device)
+        measurements = {}
+        if telemetry:
+            receipt = model_execution_receipt(torch, model_run, separator.torch_device)
+            measurements = {"deviceReceipt": receipt, "modelStorage": module_storage_bytes([model_run])}
+            if using_gpu:
+                EMIT_CONTEXT["gpuResidentBaselineBytes"] = receipt["cudaAllocatedBytes"]
+                torch.cuda.reset_peak_memory_stats(separator.torch_device)
         emit("loading", 0.2, executionDetails={
             "hardware": runtime_capabilities(torch), "effectiveBackend": selected_backend,
             "capabilities": model_execution_capabilities("bs-roformer", selected_backend),
             "attention": attention_details,
-            "memoryPlan": asdict(memory_plan), "deviceReceipt": receipt, "modelStorage": module_storage_bytes([model_run]),
+            "memoryPlan": asdict(memory_plan), **measurements,
             "precision": args.precision, "precisionQualification": "existing_default" if args.precision == "default" else "explicit_experiment_not_promoted",
             "precisionDetails": precision_details,
             "performancePolicy": performance,
