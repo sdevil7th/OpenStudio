@@ -124,6 +124,9 @@ jobs:
             .cache/stem-models
             ~\AppData\Local\pip\Cache
           key: windows-stem-flow-${{ hashFiles('tools/ai-runtime-install-plan*.json', 'tools/qualify_stem_installation.py') }}
+      - name: Stage the app's pinned FFmpeg runtime for the source worker
+        shell: pwsh
+        run: ./tools/setup-ffmpeg.ps1
       - name: Install from the public base and separate non-silent audio
         run: >-
           python tools/qualify_stem_installation.py
@@ -141,6 +144,8 @@ jobs:
             output/stem-installation-ci/*.log
             output/stem-installation-ci/separation/report.json
             output/stem-installation-ci/separation/*.log
+            output/stem-installation-ci/streaming-separation/report.json
+            output/stem-installation-ci/streaming-separation/*.log
           if-no-files-found: error
 
   verify-ai-policy:

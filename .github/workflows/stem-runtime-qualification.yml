@@ -50,6 +50,10 @@ jobs:
       QA_MODELS: ${{ inputs.models_dir }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Stage the app's pinned Windows FFmpeg runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/setup-ffmpeg.ps1
       - name: Install through the real CLI, then separate on this hardware
         shell: python {0}
         run: |
