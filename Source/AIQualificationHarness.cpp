@@ -4,6 +4,7 @@
 #include "AITrackEngine.h"
 #include "AIResourceCoordinator.h"
 #include "AudioEngine.h"
+#include <algorithm>
 #include <cmath>
 
 int AIQualificationHarness::run(const juce::File& configuration)
@@ -133,7 +134,7 @@ int AIQualificationHarness::run(const juce::File& configuration)
             juce::AudioBuffer<float> samples(2,8192);
             for (juce::int64 offset=0;offset<reader->lengthInSamples;offset+=samples.getNumSamples())
             {
-                const int count=static_cast<int>(juce::jmin<juce::int64>(samples.getNumSamples(),reader->lengthInSamples-offset));
+                const auto count = static_cast<int>(std::min<juce::int64>(samples.getNumSamples(), reader->lengthInSamples - offset));
                 if (!reader->read(&samples,0,count,offset,true,true)) return save(1,"Generated audio is unreadable");
                 for (int channel=0;channel<2;++channel)
                     for (int index=0;index<count;++index)
@@ -383,7 +384,7 @@ int AIQualificationHarness::run(const juce::File& configuration)
         juce::AudioBuffer<float> samples(2, 8192);
         for (juce::int64 offset = 0; offset < reader->lengthInSamples; offset += samples.getNumSamples())
         {
-            const int count = static_cast<int>(juce::jmin<juce::int64>(samples.getNumSamples(), reader->lengthInSamples - offset));
+            const auto count = static_cast<int>(std::min<juce::int64>(samples.getNumSamples(), reader->lengthInSamples - offset));
             if (! reader->read(&samples, 0, count, offset, true, true)) return save(1, "Stem read failed");
             for (int channel = 0; channel < 2; ++channel)
                 for (int i = 0; i < count; ++i)
