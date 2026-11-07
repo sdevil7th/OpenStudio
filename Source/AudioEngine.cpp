@@ -9,7 +9,7 @@
 #include "BuiltInInstrumentPreviewBindings.h"
 #include "RuntimeLocation.h"
 #include "AudioEngine.h"
-#include "AIRuntimeMaintenance.h"
+#include "AIRuntimeSession.h"
 #include "ClipSourceDescriptor.h"
 #include "AudioXRunTelemetry.h"
 #include "ClipTempoAnalyzer.h"
@@ -83548,16 +83548,6 @@ void AudioEngine::reconcileAIResources()
 juce::var AudioEngine::getAiToolsStatus()
 {
     reconcileAIResources();
-    // Called by the main-window status timer. Never launch maintenance from
-    // the realtime callback, during transport/render, or beside another AI job.
-    if ((deviceStartupMode == DeviceStartup::openHardware || qualificationAutomaticRuntimeMaintenance)
-        && AIRuntimeMaintenance::canStart(isPlaying.load(), isRecordMode.load(), isRendering.load(),
-            aiResources.snapshot().getProperty("owner", "idle").toString() != "idle"))
-    {
-        stemSeparator.checkAutomaticRuntimeRepair();
-        const auto options = stemSeparator.automaticRuntimeRepairOptions();
-        if (options.isObject()) (void) installAiTools(juce::JSON::toString(options));
-    }
     auto status = stemSeparator.getAiToolsStatus();
     if (auto* object = status.getDynamicObject()) object->setProperty("resources", aiResources.snapshot());
     return status;
@@ -83577,8 +83567,34 @@ juce::var AudioEngine::installAiTools(bool userConfirmedDownload)
 
 juce::var AudioEngine::installAiTools(const juce::String& optionsJSON)
 {
-    if (! static_cast<bool>(juce::JSON::parse(optionsJSON).getProperty("userConfirmedDownload", false)))
+    const auto options = juce::JSON::parse(optionsJSON);
+    const bool compiler = options.getProperty("prepareOptimization", "").toString() == "compile";
+    if (compiler || static_cast<bool>(options.getProperty("repairRuntime", false)) || static_cast<bool>(options.getProperty("automaticRepair", false)))
+    {
+        auto response = std::make_unique<juce::DynamicObject>();
+        response->setProperty("started", false);
+        if (!static_cast<bool>(options.getProperty("userConfirmedDownload", false))
+            || static_cast<bool>(options.getProperty("automaticRepair", false)))
+            response->setProperty("error", "Request AI repair explicitly in AI Tools Setup.");
+        else if (isRecordMode.load() || isPlaying.load() || isRendering.load())
+            response->setProperty("error", "Stop recording, playback or export before requesting AI repair.");
+        else
+        {
+            const auto queued = AIRuntimeMaintenance::requestOnNextLaunch(AIRuntimeMaintenance::dataRoot(), compiler);
+            if (queued.failed()) response->setProperty("error", queued.getErrorMessage());
+            else response->setProperty("message", "AI maintenance is scheduled. Save your work, close all OpenStudio windows and reopen OpenStudio to continue.");
+        }
+        return juce::var(response.release());
+    }
+    if (! static_cast<bool>(options.getProperty("userConfirmedDownload", false)))
         return stemSeparator.installAiTools(optionsJSON);
+    if (isRecordMode.load())
+    {
+        auto response = std::make_unique<juce::DynamicObject>();
+        response->setProperty("started", false);
+        response->setProperty("error", "Stop recording before starting AI setup.");
+        return juce::var(response.release());
+    }
     reconcileAIResources();
     const auto token = aiResources.begin(AIResourceCoordinator::Owner::installation);
     if (token == 0)

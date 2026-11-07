@@ -230,9 +230,54 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         check("runtime_update_leaves_compatible_cuda_alone", AIRuntimeMaintenance::evaluate(context, probe, plan, attempted).getProperty("state", "").toString() == "current");
         probe.getDynamicObject()->setProperty("runtimeReady", false);
         check("runtime_update_repairs_broken_imports", AIRuntimeMaintenance::evaluate(context, probe, plan, {}).getProperty("state", "").toString() == "needed");
-        check("runtime_update_defers_while_audio_or_ai_is_busy", ! AIRuntimeMaintenance::canStart(true, false, false, false)
-            && ! AIRuntimeMaintenance::canStart(false, true, false, false) && ! AIRuntimeMaintenance::canStart(false, false, true, false)
-            && ! AIRuntimeMaintenance::canStart(false, false, false, true) && AIRuntimeMaintenance::canStart(false, false, false, false));
+        using Lease = AIRuntimeMaintenance::SessionLease;
+        const auto sessionRoot = directory.getChildFile("runtime-sessions");
+        check("runtime_update_scheduling_coalesces_requests_and_preserves_the_original_kind",
+              AIRuntimeMaintenance::requestOnNextLaunch(sessionRoot, false).wasOk()
+              && AIRuntimeMaintenance::requestOnNextLaunch(sessionRoot, false).wasOk()
+              && AIRuntimeMaintenance::requestOnNextLaunch(sessionRoot, true).failed()
+              && AIRuntimeMaintenance::requestFile(sessionRoot).loadFileAsString().trim() == "stems");
+        StemSeparator ordinarySession;
+        ordinarySession.qualificationDataRoot = sessionRoot;
+        const auto directCompiler = ordinarySession.installAiTools(juce::String(R"({"userConfirmedDownload":true,"prepareOptimization":"compile"})"));
+        check("runtime_update_compiler_cannot_bypass_maintenance_by_omitting_repair_flag",
+              !static_cast<bool>(directCompiler.getProperty("started", true))
+              && directCompiler.getProperty("error", "").toString().contains("schedule maintenance")
+              && ordinarySession.qualificationHardwareProbeCount == 0);
+        const auto otherSessionResult = [&] (const juce::String& mode)
+        {
+            OwnedChildProcess contender;
+            const std::atomic<bool> keepRunning { true };
+            if (!contender.start({ OpenStudioRuntime::executableFile().getFullPathName(), "--owned-worker-fixture",
+                                   sessionRoot.getFullPathName(), "--owned-ai-session", mode })
+                || !contender.waitForProcessToFinish(10000, keepRunning))
+                return -1;
+            return static_cast<int>(contender.getExitCode());
+        };
+        {
+            Lease recording, secondProject, repair;
+            check("runtime_update_cannot_begin_in_any_workstation_session",
+                recording.acquire(sessionRoot, Lease::Mode::workstation).wasOk()
+                && secondProject.acquire(sessionRoot, Lease::Mode::workstation).wasOk()
+                && repair.acquire(sessionRoot, Lease::Mode::maintenance).failed()
+                && otherSessionResult("workstation") == 0 && otherSessionResult("maintenance") == 3);
+        }
+        OwnedChildProcess installer;
+        {
+            Lease repair, recording, duplicate;
+            check("runtime_update_excludes_recording_and_other_repairs",
+                repair.acquire(sessionRoot, Lease::Mode::maintenance).wasOk()
+                && recording.acquire(sessionRoot, Lease::Mode::workstation).failed()
+                && duplicate.acquire(sessionRoot, Lease::Mode::maintenance).failed()
+                && otherSessionResult("workstation") == 3 && otherSessionResult("maintenance") == 3);
+            check("runtime_update_worker_inherits_session", installer.start({ OpenStudioRuntime::executableFile().getFullPathName(),
+                "--owned-worker-fixture", sessionRoot.getFullPathName(), "--owned-worker-leaf" }, 0, {}, repair.workerInput()));
+        }
+        Lease restored;
+        check("runtime_update_orphaned_worker_still_excludes_recording",
+              installer.isRunning() && restored.acquire(sessionRoot, Lease::Mode::workstation).failed());
+        check("runtime_update_recording_available_after_worker_retirement",
+              installer.terminateAndWait() && restored.acquire(sessionRoot, Lease::Mode::workstation).wasOk());
         const auto receipt = directory.getChildFile("automatic-runtime-state.json");
         check("runtime_update_receipt_round_trip", AIRuntimeMaintenance::writeDocument(receipt, attempted)
             && AIRuntimeMaintenance::readDocument(receipt).getProperty("contractKey", "").toString() == attempted.getProperty("contractKey", "").toString());
@@ -245,6 +290,7 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         StemSeparator maintenance;
         maintenance.qualificationDataRoot = directory.getChildFile("automatic-result-reconciliation");
         maintenance.runtimeMaintenance = juce::JSON::parse(R"({"contractKey":"fixture","expectedBackend":"cpu"})");
+        maintenance.runtimeMaintenance.getDynamicObject()->setProperty("sourceRuntime", maintenance.getUserRuntimeRoot().getFullPathName());
         maintenance.automaticRuntimeRepairActive = true;
         maintenance.automaticRuntimeTerminalState = "error";
         maintenance.lastAiToolsStatus.state = "ready"; // The retained CPU runtime refreshed successfully.
@@ -257,6 +303,12 @@ int RuntimeSafetyRegression::run(const juce::File& directory)
         maintenance.finishAutomaticRuntimeRepair();
         check("runtime_update_refresh_cannot_erase_cancellation",
             maintenance.runtimeMaintenance.getProperty("state", "").toString() == "cancelled");
+        maintenance.automaticRuntimeRepairActive = true;
+        maintenance.runtimeMaintenance.getDynamicObject()->setProperty("sourceRuntime",
+            maintenance.getUserDataRoot().getChildFile("previous-slot").getFullPathName());
+        maintenance.finishAutomaticRuntimeRepair();
+        check("runtime_update_late_cancel_reports_committed_activation",
+            maintenance.runtimeMaintenance.getProperty("state", "").toString() == "current");
        #if JUCE_WINDOWS
         const auto selectedPython = maintenance.qualificationDataRoot.getChildFile("stem-runtime/python/python.exe");
        #else

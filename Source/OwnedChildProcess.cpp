@@ -39,7 +39,7 @@ struct OwnedChildProcess::Impl
 };
 
 bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlags,
-                              const juce::StringPairArray& environmentOverrides)
+                              const juce::StringPairArray& environmentOverrides, std::intptr_t inputHandle)
 {
     if (arguments.isEmpty() || isRunning()) return false;
     impl.reset(); // A stopped owned job can be explicitly restarted; never replace a live child.
@@ -53,7 +53,12 @@ bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlag
     if (streamFlags == 0)
         outputWrite = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     else if (!CreatePipe(&next->outputRead, &outputWrite, &security, 0)) return false;
-    HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE input = INVALID_HANDLE_VALUE;
+    if (inputHandle == -1)
+        input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    else if (!DuplicateHandle(GetCurrentProcess(), reinterpret_cast<HANDLE>(inputHandle), GetCurrentProcess(),
+                              &input, GENERIC_READ, TRUE, 0))
+    { closeOwnedHandle(outputWrite); return false; }
     if (input == INVALID_HANDLE_VALUE || outputWrite == INVALID_HANDLE_VALUE
         || (next->outputRead && !SetHandleInformation(next->outputRead, HANDLE_FLAG_INHERIT, 0)))
     { closeOwnedHandle(outputWrite); closeOwnedHandle(input); return false; }
@@ -211,7 +216,7 @@ struct OwnedChildProcess::Impl
     }
 };
 bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlags,
-                              const juce::StringPairArray& environmentOverrides)
+                              const juce::StringPairArray& environmentOverrides, std::intptr_t inputHandle)
 {
     if (arguments.isEmpty() || isRunning()) return false;
     impl.reset();
@@ -241,7 +246,8 @@ bool OwnedChildProcess::start(const juce::StringArray& arguments, int streamFlag
     {
         const bool capture = target == STDOUT_FILENO ? (streamFlags & 1) != 0
                            : target == STDERR_FILENO && (streamFlags & 2) != 0;
-        const int source = capture ? resources.pipeEnds[1] : resources.nullDevice;
+        const int source = target == STDIN_FILENO && inputHandle != -1 ? static_cast<int>(inputHandle)
+                         : capture ? resources.pipeEnds[1] : resources.nullDevice;
         if (posix_spawn_file_actions_adddup2(&resources.actions, source, target) != 0) return false;
     }
     std::vector<std::string> storage;

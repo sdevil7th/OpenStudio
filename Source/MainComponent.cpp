@@ -17756,7 +17756,6 @@ void MainComponent::timerCallback()
                     + "|" + obj->getProperty("statusWarningCode").toString()
                     + "|" + obj->getProperty("installSessionId").toString()
                     + "|" + juce::String(installInProgress ? 1 : 0)
-                    + "|" + obj->getProperty("runtimeMaintenance").getProperty("state", "").toString()
                     + "|" + juce::String(static_cast<double>(obj->getProperty("elapsedMs")));
             }
             lastAiToolsInstallInProgress =

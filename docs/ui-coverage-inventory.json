@@ -2478,6 +2478,14 @@
       "coverage": []
     },
     {
+      "id": "feature:39a0405fab0a726a",
+      "kind": "feature",
+      "section": "AI / Assisted Audio",
+      "description": "Explicit pre-session repair for installed stem runtimes with accelerator validation, retained models and CPU-only setup preservation",
+      "source": "docs/implemented_features.md",
+      "coverage": []
+    },
+    {
       "id": "feature:425fba37265cd708",
       "kind": "feature",
       "section": "AI / Assisted Audio",

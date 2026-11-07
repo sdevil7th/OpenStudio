@@ -3,6 +3,7 @@
 #include <thread>
 #include <string>
 #include "OwnedChildProcess.h"
+#include "AIRuntimeSession.h"
 
 /**
  * StemSeparator — Source separation via Python subprocess (BS-RoFormer).
@@ -21,6 +22,7 @@ class StemSeparator
 {
 public:
     StemSeparator();
+    explicit StemSeparator(AIRuntimeMaintenance::SessionLease&&, bool rebuild);
     ~StemSeparator();
 
     struct AiToolsStatus
@@ -101,9 +103,9 @@ public:
     /** Schedule a background AI tools status refresh and return the current cached status. */
     juce::var refreshAiToolsStatus();
 
-    /** Check a previously installed managed runtime once, off the audio thread. */
-    void checkAutomaticRuntimeRepair();
-    juce::var automaticRuntimeRepairOptions() const;
+    juce::Result beginRuntimeMaintenance(bool rebuild = false);
+    juce::var pollRuntimeMaintenance();
+    void cancelRuntimeMaintenance();
 
     /** Start installing the optional AI tools into the user's app-data directory after explicit user confirmation. */
     juce::var installAiTools (bool userConfirmedDownload);
@@ -172,6 +174,11 @@ public:
 private:
     friend class RuntimeSafetyRegression;
     friend class AIQualificationHarness;
+    // Destroyed after the installer, its probes, and all background tasks.
+    AIRuntimeMaintenance::SessionLease maintenanceLease;
+    bool rebuildRequested = false;
+    void checkAutomaticRuntimeRepair();
+    juce::var automaticRuntimeRepairOptions() const;
     juce::File qualificationDataRoot;
     juce::String qualificationManifestUrl;
     double qualificationGpuFraction = 0;

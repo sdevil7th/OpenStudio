@@ -243,6 +243,11 @@ bool isLikelyRocmLinuxMachine()
 }
 
 StemSeparator::StemSeparator() = default;
+StemSeparator::StemSeparator(AIRuntimeMaintenance::SessionLease&& lease, bool rebuild)
+    : maintenanceLease(std::move(lease)), rebuildRequested(rebuild)
+{
+    jassert(maintenanceLease.isMaintenance());
+}
 
 StemSeparator::~StemSeparator()
 {
@@ -257,30 +262,7 @@ StemSeparator::~StemSeparator()
 juce::File StemSeparator::getUserDataRoot() const
 {
     if (qualificationDataRoot != juce::File()) return qualificationDataRoot;
-   #if JUCE_WINDOWS
-    const auto localAppData = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
-    if (localAppData.isNotEmpty())
-        return juce::File(localAppData).getChildFile("OpenStudio");
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("OpenStudio");
-   #elif JUCE_MAC
-    return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
-        .getChildFile("Library")
-        .getChildFile("Application Support")
-        .getChildFile("OpenStudio");
-   #elif JUCE_LINUX
-    // XDG Base Directory spec: use $XDG_DATA_HOME or the default ~/.local/share
-    const auto xdgDataHome = juce::SystemStats::getEnvironmentVariable("XDG_DATA_HOME", {});
-    if (xdgDataHome.isNotEmpty())
-        return juce::File(xdgDataHome).getChildFile("OpenStudio");
-    return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
-        .getChildFile(".local")
-        .getChildFile("share")
-        .getChildFile("OpenStudio");
-   #else
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-        .getChildFile("OpenStudio");
-   #endif
+    return AIRuntimeMaintenance::dataRoot();
 }
 
 juce::File StemSeparator::getUserRuntimeRoot() const
@@ -652,13 +634,13 @@ StemSeparator::RuntimeCapabilities StemSeparator::probeRuntimeCapabilities (cons
         return capabilities;
     }
 
-    const juce::StringArray command { python.getFullPathName(), probeScript.getFullPathName(),
+    juce::StringArray command { python.getFullPathName(), probeScript.getFullPathName(),
         "--models-dir", modelsDir.getFullPathName(), "--model", modelName,
         "--music-gen-checkpoint-root", getMusicGenerationCheckpointRoot().getFullPathName(),
-        "--music-gen-model", kPinnedMusicGenerationModelId, "--acceleration-mode", accelerationMode,
-        "--include-installed-features" };
+        "--music-gen-model", kPinnedMusicGenerationModelId, "--acceleration-mode", accelerationMode };
+    if (maintenanceLease.isMaintenance()) command.add("--include-installed-features");
     juce::String output;
-    if (! OpenStudioAI::readCommandOutput(command, output, OpenStudioAI::runtimeEnvironment(), 30000.0)
+    if (! OpenStudioAI::readCommandOutput(command, output, OpenStudioAI::runtimeEnvironment(), 30000.0, maintenanceLease.workerInput())
         || output.trim().isEmpty())
     {
         appendAiToolsLogLine(makeAiLogEvent("host", "probe", "probe_failed", "",
@@ -903,12 +885,12 @@ StemSeparator::HardwareStatus StemSeparator::probeHardwareStatus() const
     {
         juce::String output;
         juce::int64 memoryMb = 0;
-        if (OpenStudioAI::readCommandOutput({ "rocminfo" }, output))
+        if (OpenStudioAI::readCommandOutput({ "rocminfo" }, output, {}, 8000.0, maintenanceLease.workerInput()))
         {
             memoryMb = OpenStudioAI::rocmGpuPoolMemoryMb(output);
             hardware.gpuArchitecture = OpenStudioAI::rocmGpuArchitecture(output);
         }
-        if (memoryMb == 0 && OpenStudioAI::readCommandOutput({ "rocm-smi", "--showmeminfo", "vram" }, output))
+        if (memoryMb == 0 && OpenStudioAI::readCommandOutput({ "rocm-smi", "--showmeminfo", "vram" }, output, {}, 8000.0, maintenanceLease.workerInput()))
             for (const auto& line : juce::StringArray::fromLines(output))
                 if (line.contains("VRAM Total Memory (B):"))
                     memoryMb = juce::jmax(memoryMb, line.fromLastOccurrenceOf(":", false, false).trim().getLargeIntValue() / (1024 * 1024));
@@ -1516,7 +1498,7 @@ void StemSeparator::scheduleStatusRefresh()
             refreshedStatus.statusWarningCode.clear();
         }
 
-        const auto maintenance = evaluateRuntimeMaintenance(runtimeCapabilities, refreshedHardware);
+        const auto maintenance = maintenanceLease.isMaintenance() ? evaluateRuntimeMaintenance(runtimeCapabilities, refreshedHardware) : juce::var();
         publishStatusRefresh(refreshedStatus, revision, maintenance);
     });
 }
@@ -1832,7 +1814,11 @@ bool StemSeparator::extractRuntimeArchive (const juce::File& archiveFile,
 juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status) const
 {
     auto obj = std::make_unique<juce::DynamicObject>();
-    { const juce::ScopedLock lock(aiToolsStatusLock); obj->setProperty("runtimeMaintenance", runtimeMaintenance.clone()); }
+    if (maintenanceLease.isMaintenance())
+    {
+        const juce::ScopedLock lock(aiToolsStatusLock);
+        obj->setProperty("runtimeMaintenance", runtimeMaintenance.clone());
+    }
     juce::Array<juce::var> supportedBackends;
     for (const auto& backend : status.supportedBackends)
         supportedBackends.add(backend);
@@ -2012,7 +1998,6 @@ juce::var StemSeparator::aiToolsStatusToVar(const AiToolsStatus& status) const
 
 juce::var StemSeparator::getAiToolsStatus()
 {
-    finishAutomaticRuntimeRepair();
     {
         const juce::ScopedLock lock (aiToolsStatusLock);
         if (! initialStatusPrepared)
@@ -2039,10 +2024,12 @@ juce::var StemSeparator::evaluateRuntimeMaintenance(const RuntimeCapabilities& c
         return juce::var(changed.release());
     }
     const auto preference = AIRuntimeMaintenance::readDocument(getUserDataRoot().getChildFile("ai-runtime-preference.json"));
-    const auto backend = hardware.gpuBackend == "cuda" || hardware.gpuBackend == "rocm" ? hardware.gpuBackend : juce::String("cpu");
+    const bool pinnedCpu = static_cast<bool>(preference.getProperty("cpuOnly", false));
+    const auto backend = !pinnedCpu && (hardware.gpuBackend == "cuda" || hardware.gpuBackend == "rocm")
+        ? hardware.gpuBackend : juce::String("cpu");
     context->setProperty("managedRuntimePresent", root.isDirectory());
     context->setProperty("stemModelInstalled", hasRequiredModel(getUserModelsDir()));
-    context->setProperty("explicitCpuOnly", preference.getProperty("cpuOnly", false));
+    context->setProperty("explicitCpuOnly", pinnedCpu && !rebuildRequested);
     context->setProperty("appVersion", ProjectInfo::versionString);
     context->setProperty("expectedBackend", backend);
     context->setProperty("gpuName", hardware.gpuName);
@@ -2054,7 +2041,54 @@ juce::var StemSeparator::evaluateRuntimeMaintenance(const RuntimeCapabilities& c
         AIRuntimeMaintenance::readDocument(getUserDataRoot().getChildFile("ai-runtime-maintenance.json")));
     result.getDynamicObject()->setProperty("installedRuntimeFeatures", probe.getProperty("installedRuntimeFeatures", {}));
     result.getDynamicObject()->setProperty("sourceRuntime", root.getFullPathName());
+    result.getDynamicObject()->setProperty("cpuOnly", pinnedCpu);
     return result;
+}
+
+juce::Result StemSeparator::beginRuntimeMaintenance(bool rebuild)
+{
+    const auto result = maintenanceLease.acquire(getUserDataRoot(), AIRuntimeMaintenance::SessionLease::Mode::maintenance);
+    if (result.wasOk()) rebuildRequested = rebuild;
+    return result;
+}
+
+void StemSeparator::cancelRuntimeMaintenance()
+{
+    if (!maintenanceLease.isMaintenance()) return;
+    cancelAiToolsInstall();
+    backgroundTasks.removeAllJobs(true, -1);
+    cancelAiToolsInstall();
+    finishAutomaticRuntimeRepair();
+}
+
+juce::var StemSeparator::pollRuntimeMaintenance()
+{
+    jassert(maintenanceLease.isMaintenance());
+    if (!maintenanceLease.isMaintenance()) return {};
+    finishAutomaticRuntimeRepair();
+    checkAutomaticRuntimeRepair();
+    if (rebuildRequested && automaticRuntimeRepairAttempts == 0)
+    {
+        const juce::ScopedLock lock(aiToolsStatusLock);
+        const auto state = runtimeMaintenance.getProperty("state", "").toString();
+        if (state == "current" || state == "failed" || state == "cancelled" || state == "interrupted")
+            runtimeMaintenance.getDynamicObject()->setProperty("state", "needed");
+    }
+    const auto options = automaticRuntimeRepairOptions();
+    if (options.isObject())
+    {
+        const auto result = installAiTools(juce::JSON::toString(options));
+        if (!static_cast<bool>(result.getProperty("started", false)) && result.getProperty("error", "").toString().isNotEmpty())
+        {
+            const juce::ScopedLock lock(aiToolsStatusLock);
+            if (runtimeMaintenance.getProperty("state", "").toString() == "needed")
+            {
+                runtimeMaintenance.getDynamicObject()->setProperty("state", "failed");
+                runtimeMaintenance.getDynamicObject()->setProperty("message", result.getProperty("error", ""));
+            }
+        }
+    }
+    return getAiToolsStatus();
 }
 
 void StemSeparator::checkAutomaticRuntimeRepair()
@@ -2062,13 +2096,20 @@ void StemSeparator::checkAutomaticRuntimeRepair()
     const auto active = getUserRuntimeRoot();
     {
         const juce::ScopedLock lock(aiToolsStatusLock);
-        if (shuttingDown.load() || automaticRuntimeRepairActive
+        if (shuttingDown.load() || automaticRuntimeRepairActive || automaticRuntimeRepairAttempts != 0
             || (automaticRuntimeCheckRequested && automaticRuntimeCheckedRoot == active.getFullPathName())) return;
         automaticRuntimeCheckRequested = true;
         automaticRuntimeCheckedRoot = active.getFullPathName();
     }
     // No first-use downloads or probes for users who never installed this tool.
     if (active.isDirectory() && hasRequiredModel(getUserModelsDir())) scheduleStatusRefresh();
+    else
+    {
+        const juce::ScopedLock lock(aiToolsStatusLock);
+        runtimeMaintenance = juce::var(new juce::DynamicObject());
+        runtimeMaintenance.getDynamicObject()->setProperty("state", "not_installed");
+        runtimeMaintenance.getDynamicObject()->setProperty("message", "No installed stem runtime and model were found.");
+    }
 }
 
 juce::var StemSeparator::automaticRuntimeRepairOptions() const
@@ -2081,6 +2122,8 @@ juce::var StemSeparator::automaticRuntimeRepairOptions() const
     options->setProperty("automaticRepair", true);
     options->setProperty("maintenanceKey", runtimeMaintenance.getProperty("contractKey", ""));
     options->setProperty("requiredBackend", runtimeMaintenance.getProperty("expectedBackend", "cpu"));
+    options->setProperty("accelerationMode", static_cast<bool>(runtimeMaintenance.getProperty("cpuOnly", false))
+        ? "cpu-only" : "auto");
     options->setProperty("repairRuntime", true);
     options->setProperty("requestedFeature", kFeatureStemSeparation);
     juce::Array<juce::var> features { juce::var(kFeatureStemSeparation) };
@@ -2100,13 +2143,18 @@ void StemSeparator::finishAutomaticRuntimeRepair()
     if (lastAiToolsStatus.state != "ready" && lastAiToolsStatus.state != "error"
         && lastAiToolsStatus.state != "cancelled" && lastAiToolsStatus.state != "pythonMissing") return;
     const bool cancelled = aiToolsCancelRequested.load() || automaticRuntimeTerminalState == "cancelled";
-    const bool succeeded = ! cancelled && automaticRuntimeTerminalState == "ready" && lastAiToolsStatus.selectedBackend
-        == runtimeMaintenance.getProperty("expectedBackend", "cpu").toString();
+    // Cancellation can arrive after the verified candidate's atomic activation.
+    const bool switched = getUserRuntimeRoot().getFullPathName() != runtimeMaintenance.getProperty("sourceRuntime", "").toString();
+    const bool succeeded = switched && (cancelled || (automaticRuntimeTerminalState == "ready" && lastAiToolsStatus.selectedBackend
+        == runtimeMaintenance.getProperty("expectedBackend", "cpu").toString()));
     runtimeMaintenance.getDynamicObject()->setProperty("state", succeeded ? "current"
         : cancelled ? "cancelled" : "failed");
-    runtimeMaintenance.getDynamicObject()->setProperty("message", succeeded
-        ? "Installed AI tools were updated automatically." : "Automatic AI update did not complete. Your previous runtime was retained.");
-    (void) AIRuntimeMaintenance::writeDocument(getUserDataRoot().getChildFile("ai-runtime-maintenance.json"), runtimeMaintenance);
+    runtimeMaintenance.getDynamicObject()->setProperty("message", succeeded ? "The verified replacement AI runtime is active."
+        : switched ? "The active runtime changed. Check its status in AI Tools Setup."
+                   : "AI repair did not complete. Your previous runtime was retained.");
+    if (!AIRuntimeMaintenance::writeDocument(getUserDataRoot().getChildFile("ai-runtime-maintenance.json"), runtimeMaintenance))
+        runtimeMaintenance.getDynamicObject()->setProperty("message", runtimeMaintenance.getProperty("message", "").toString()
+            + " The maintenance result could not be saved.");
     automaticRuntimeRepairActive = false;
 }
 
@@ -2130,6 +2178,18 @@ juce::var StemSeparator::installAiTools (bool userConfirmedDownload)
 
 juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 {
+    auto installOptions = parseInstallOptions(optionsJson, false);
+    const bool compilerRequested = installOptions.prepareOptimization == "compile";
+    const bool existingStemSetup = installOptions.userConfirmedDownload && !maintenanceLease.isMaintenance()
+        && installOptions.selectedFeatures.size() == 1 && installOptions.selectedFeatures.contains(kFeatureStemSeparation)
+        && getUserRuntimeRoot().isDirectory() && hasRequiredModel(getUserModelsDir());
+    if ((compilerRequested || installOptions.automaticRepair || installOptions.repairRuntime || existingStemSetup) && !maintenanceLease.isMaintenance())
+    {
+        auto error = std::make_unique<juce::DynamicObject>();
+        error->setProperty("started", false);
+        error->setProperty("error", "Choose Repair Stem Separation or Prepare optional compilation in AI Tools Setup to schedule maintenance.");
+        return juce::var(error.release());
+    }
     if (installWorkerActive.load() || shuttingDown.load())
     {
         auto busy = std::make_unique<juce::DynamicObject>();
@@ -2145,7 +2205,6 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
         ++aiToolsStatusRevision;
     }
 
-    auto installOptions = parseInstallOptions(optionsJson, false);
     auto cachedStatus = getCachedAiToolsStatusSnapshot();
     const bool musicGenerationFullyReady = cachedStatus.musicGenerationReady
         && cachedStatus.musicGenerationLayoutValid
@@ -2153,7 +2212,6 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
 
     auto result = std::make_unique<juce::DynamicObject>();
 
-    const bool compilerRequested = installOptions.prepareOptimization == "compile";
     if (installOptions.prepareOptimization.isNotEmpty() && !compilerRequested)
     {
         result->setProperty("started", false);
@@ -2450,7 +2508,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                 auto environment = OpenStudioAI::runtimeEnvironment();
                 if (downloadCommand && accessToken.isNotEmpty()) environment.set("HF_TOKEN", accessToken);
                 environment.set("PYTHONUNBUFFERED", "1");
-                if (! process->start(command, 3, environment))
+                if (! process->start(command, 3, environment, maintenanceLease.workerInput()))
                 {
                     clearStableCommandProcess();
                     error = label + " could not be started.";
@@ -3023,7 +3081,8 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
             result->setProperty("started", false);
             return juce::var(result.release());
         }
-        const auto claim = AIRuntimeMaintenance::claim(getUserDataRoot().getChildFile("ai-runtime-maintenance.json"), receipt);
+        const auto claim = AIRuntimeMaintenance::claim(getUserDataRoot().getChildFile("ai-runtime-maintenance.json"), receipt,
+                                                       rebuildRequested && automaticRuntimeRepairAttempts == 0);
         if (claim == AIRuntimeMaintenance::Claim::busy)
         {
             result->setProperty("started", false);
@@ -3883,7 +3942,7 @@ juce::var StemSeparator::installAiTools (const juce::String& optionsJson)
                                             }));
 
         auto nextInstallProcess = std::make_shared<OwnedChildProcess>();
-        if (! nextInstallProcess->start(arguments, 3, OpenStudioAI::runtimeEnvironment()))
+        if (! nextInstallProcess->start(arguments, 3, OpenStudioAI::runtimeEnvironment(), maintenanceLease.workerInput()))
         {
             finishWithStatus("error", 0.0f,
                              "Failed to start the AI tools installer.",

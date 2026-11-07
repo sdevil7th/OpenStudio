@@ -21,14 +21,14 @@ inline juce::var readDocument(const juce::File& file)
 
 enum class Claim { started, busy, previousAttempt, writeFailed };
 
-inline Claim claim(const juce::File& file, const juce::var& receipt)
+inline Claim claim(const juce::File& file, const juce::var& receipt, bool explicitRetry = false)
 {
     const auto path = file.getFullPathName();
     juce::InterProcessLock gate("OpenStudio-AI-update-" + juce::SHA256(path.toRawUTF8(), path.getNumBytesAsUTF8()).toHexString());
     if (! gate.enter(0)) return Claim::busy;
     struct Release { juce::InterProcessLock& lock; ~Release() { lock.exit(); } } release { gate };
     const auto previous = readDocument(file);
-    if (previous.getProperty("contractKey", "").toString() == receipt.getProperty("contractKey", "").toString())
+    if (!explicitRetry && previous.getProperty("contractKey", "").toString() == receipt.getProperty("contractKey", "").toString())
     {
         const auto state = previous.getProperty("state", "").toString();
         if (state == "attempting" || state == "failed" || state == "cancelled") return Claim::previousAttempt;
@@ -62,9 +62,7 @@ inline juce::var evaluate(const juce::var& context, const juce::var& probe,
         return finish("unavailable", "No reviewed runtime update is available for this platform.");
 
     bool compatible = static_cast<bool>(probe.getProperty("runtimeReady", false));
-    const auto selected = probe.getProperty("selectedBackend", "cpu").toString();
-    if (backend == "cuda" || backend == "rocm") compatible = compatible && selected == backend;
-    else compatible = compatible && selected != "directml";
+    compatible = compatible && probe.getProperty("selectedBackend", "").toString() == backend;
     juce::StringPairArray fields;
     fields.set("torch", "torchVersion");
     fields.set("torchvision", "torchvisionVersion");
@@ -105,8 +103,4 @@ inline juce::var evaluate(const juce::var& context, const juce::var& probe,
         : "Updating installed AI tools for this version of OpenStudio.");
 }
 
-inline bool canStart(bool playing, bool recording, bool rendering, bool aiBusy)
-{
-    return ! playing && ! recording && ! rendering && ! aiBusy;
-}
 }

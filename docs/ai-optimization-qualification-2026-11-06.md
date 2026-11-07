@@ -638,6 +638,8 @@ reproductions of the reporter's original 0xC0000409 crash.
 
 ### Both-feature automatic repair and CI regression driver
 
+The idle-time trigger in these historical runs was replaced by explicit, exclusive maintenance before recording devices open. The installer results apply to the recorded builds.
+
 **pass**: the same `qualify_automatic_repair` function used by the new CI option
 was run against a separately copied, real installer-qualified runtime containing
 both stem and generation libraries. Its owned audio-separator metadata was
@@ -770,3 +772,12 @@ hashes. Release CI now executes fresh native setup, automatic repair and real
 separation on both Windows and Linux; remote CI results must be checked at the
 pushed PR head. This work does not publish an app release or qualify NVIDIA Linux,
 macOS migration, arbitrary drivers or every possible GPU.
+
+### Explicit maintenance and recording exclusion
+
+The release candidate moved compatibility checking out of the workstation status timer. AI Tools Setup saves a request for the next launch. The maintenance window owns exclusive access before probing, downloading or activating a runtime. Each DAW session holds shared access from startup through shutdown.
+
+- Windows Debug passed 451 native safety checks. Linux Debug passed 402. Separate processes exercised both launch orders, two simultaneous workstations, and a live installer retaining the lock after its owner released its handle.
+- During a four-second Windows capture, a second process attempted maintenance and was refused. The native recorder wrote all 192,000 stereo frames at 48 kHz with eight-sample blocks. Every frame matched the synthetic source within 16-bit quantization, with zero writer lock misses, FIFO overflows or disk errors. Maintenance was admitted after the recording process exited. Hardware latency and listening quality for this capture were **not_asserted**.
+- On the Windows RTX 4080, a real CPU-to-CUDA replacement produced six stems. A bad checksum and cancellation each retained the prior runtime and model. Separate repeat sessions for the successful, failed and cancelled cases did not start an installation. The CPU-only preference was preserved.
+- On Linux, an isolated graphical launch consumed a saved request, displayed the maintenance confirmation and refused a separate workstation while the window was open. The empty-install case completed without downloading models. Eleven Chromium scenarios passed, including scheduling stem and compiler repair without starting an installer in the DAW.

@@ -22,10 +22,7 @@ int AIQualificationHarness::run(const juce::File& configuration)
     const auto input = juce::File(config.getProperty("input", "").toString());
     if (! input.existsAsFile()) return 2;
     const bool automaticMaintenance = static_cast<bool>(config.getProperty("automaticRuntimeMaintenance", false));
-    std::unique_ptr<AudioEngine> maintenanceAudio;
-    if (automaticMaintenance) maintenanceAudio = std::make_unique<AudioEngine>(AudioEngine::DeviceStartup::offline);
-    StemSeparator standaloneSeparator;
-    auto& separator = maintenanceAudio ? maintenanceAudio->stemSeparator : standaloneSeparator;
+    StemSeparator separator;
     separator.qualificationDataRoot = root.getChildFile("user-data");
     separator.qualificationDataRoot.createDirectory();
     separator.qualificationManifestUrl = config.getProperty("manifestUrl", "").toString();
@@ -54,10 +51,9 @@ int AIQualificationHarness::run(const juce::File& configuration)
         reportFile.replaceWithText(juce::JSON::toString(juce::var(report.release()), true));
         return code;
     };
-    if (maintenanceAudio)
+    if (automaticMaintenance)
     {
         report->setProperty("scope", "automatic app-update runtime compatibility check, staged repair, backend validation and real stem separation");
-        maintenanceAudio->qualificationAutomaticRuntimeMaintenance = true;
         const auto before = AIManagedRuntime::getActiveStemRuntimeRoot(separator.qualificationDataRoot);
         const auto marker = separator.qualificationDataRoot.getChildFile("stem-runtime-active.txt");
         const auto markerBefore = marker.loadFileAsString();
@@ -69,26 +65,42 @@ int AIQualificationHarness::run(const juce::File& configuration)
         const auto modelBefore = hash(separator.getUserModelsDir().getChildFile("BS-Roformer-SW.ckpt"));
         if (static_cast<bool>(config.getProperty("testBusyDeferral", false)))
         {
-            maintenanceAudio->isPlaying.store(true); (void) maintenanceAudio->getAiToolsStatus(); maintenanceAudio->isPlaying.store(false);
-            maintenanceAudio->isRecordMode.store(true); (void) maintenanceAudio->getAiToolsStatus(); maintenanceAudio->isRecordMode.store(false);
-            maintenanceAudio->isRendering.store(true); (void) maintenanceAudio->getAiToolsStatus(); maintenanceAudio->isRendering.store(false);
-            const auto busy = maintenanceAudio->aiResources.begin(AIResourceCoordinator::Owner::generation);
-            (void) maintenanceAudio->getAiToolsStatus(); maintenanceAudio->aiResources.finish(busy);
-            if (! busy || separator.automaticRuntimeCheckRequested) return save(1, "Automatic check ran during active audio/AI work");
+            AIRuntimeMaintenance::SessionLease recordingSession;
+            if (recordingSession.acquire(separator.qualificationDataRoot, AIRuntimeMaintenance::SessionLease::Mode::workstation).failed()
+                || separator.beginRuntimeMaintenance().wasOk() || separator.automaticRuntimeCheckRequested
+                || separator.qualificationHardwareProbeCount.load() != 0)
+                return save(1, "Maintenance was admitted while a recording session held the runtime");
+            AudioEngine workstation(AudioEngine::DeviceStartup::offline);
+            workstation.stemSeparator.qualificationDataRoot = separator.qualificationDataRoot;
+            (void) workstation.getAiToolsStatus();
+            workstation.isRecordMode.store(true);
+            const auto request = workstation.installAiTools(juce::String(R"({"repairRuntime":true,"userConfirmedDownload":true})"));
+            (void) workstation.getAiToolsStatus();
+            workstation.isRecordMode.store(false);
+            if (request.getProperty("error", "").toString().isEmpty()
+                || workstation.stemSeparator.automaticRuntimeCheckRequested
+                || workstation.stemSeparator.automaticRuntimeRepairAttempts != 0)
+                return save(1, "Recording status or a live repair request started maintenance");
             report->setProperty("busyDeferral", "pass");
         }
+        const auto admitted = separator.beginRuntimeMaintenance();
+        if (admitted.failed()) return save(1, admitted.getErrorMessage());
+        AIRuntimeMaintenance::SessionLease competingWorkstation;
+        if (competingWorkstation.acquire(separator.qualificationDataRoot, AIRuntimeMaintenance::SessionLease::Mode::workstation).wasOk())
+            return save(1, "A recording session was admitted during maintenance");
+        report->setProperty("recordingExcludedThroughoutRepair", true);
         const auto expected = config.getProperty("expectAutomaticState", "current").toString();
         const auto timeout = juce::jlimit(30.0, 10800.0, static_cast<double>(config.getProperty("timeoutSeconds", 1800))) * 1000;
         bool observedInstall = false, cancelled = false;
         juce::var status;
         while (juce::Time::getMillisecondCounterHiRes() - started < timeout)
         {
-            status = maintenanceAudio->getAiToolsStatus();
+            status = separator.pollRuntimeMaintenance();
             const bool installing = static_cast<bool>(status.getProperty("installInProgress", false));
             observedInstall = observedInstall || installing || separator.automaticRuntimeRepairAttempts > 0;
             if (installing && ! cancelled && static_cast<bool>(config.getProperty("cancelAutomaticUpdate", false)))
             {
-                maintenanceAudio->cancelAiToolsInstall(); cancelled = true;
+                separator.cancelAiToolsInstall(); cancelled = true;
             }
             const auto state = status.getProperty("runtimeMaintenance", {}).getProperty("state", "").toString();
             if (! installing && ! separator.installWorkerActive.load() && state == expected) break;
@@ -112,11 +124,17 @@ int AIQualificationHarness::run(const juce::File& configuration)
             return save(1, "Automatic activation/rollback did not match the expected result");
         // Terminal failure/cancellation/healthy checks must not launch again.
         for (int poll = 0; poll < 5; ++poll)
-            if (static_cast<bool>(maintenanceAudio->getAiToolsStatus().getProperty("installInProgress", false)))
+            if (static_cast<bool>(separator.pollRuntimeMaintenance().getProperty("installInProgress", false)))
                 return save(1, "Automatic repair repeated after its terminal result");
         report->setProperty("automaticRetryLoop", "absent");
         report->setProperty("activeRuntime", after.getFullPathName());
         if (static_cast<bool>(config.getProperty("skipSeparation", false))) return save(0, {});
+    }
+    if (!automaticMaintenance && (static_cast<bool>(config.getProperty("repairRuntime", false))
+        || static_cast<bool>(config.getProperty("compilerSetup", false))))
+    {
+        const auto admitted = separator.beginRuntimeMaintenance();
+        if (admitted.failed()) return save(1, admitted.getErrorMessage());
     }
     if (const auto* workloads = config.getProperty("generationMemorySequence", {}).getArray())
     {

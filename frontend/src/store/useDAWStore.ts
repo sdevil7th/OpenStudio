@@ -3916,7 +3916,26 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           ? options.selectedFeatures
           : [options.requestedFeature ?? "stemSeparation"];
         const selectedFeaturesReady = selectedFeatures.every((featureId) => isAiFeatureReady(currentStatus, featureId));
-        if (currentStatus.installInProgress || (!isStableAudioImport && selectedFeaturesReady && !options.repairRuntime)) return undefined;
+        if (currentStatus.installInProgress || (!isStableAudioImport && selectedFeaturesReady && !options.repairRuntime && !isCompilerSetup)) return undefined;
+        if (!options.userConfirmedDownload) {
+          get().openAiToolsSetup(options.requestedFeature);
+          get().showToast("Confirm the selected AI feature download before setup starts.", "info");
+          return undefined;
+        }
+
+        if (options.repairRuntime || isCompilerSetup) {
+          try {
+            const result = await nativeBridge.installAiTools({ ...options, selectedFeatures });
+            if (result.status) get().applyAiToolsStatusUpdate(result.status);
+            const message = result.error ?? result.message;
+            if (message) get().showToast(message, result.error ? "error" : "info");
+            return result;
+          } catch (error) {
+            get().showToast(error instanceof Error ? error.message : "Could not request AI maintenance.", "error");
+            return undefined;
+          }
+        }
+
         if (!isStableAudioImport && currentStatus.state === "checking") {
           get().openAiToolsSetup(options.requestedFeature);
           get().showToast("Wait for the current AI runtime check to finish before setup.", "info");
@@ -3934,20 +3953,15 @@ export const useDAWStore = create<DAWState & DAWActions>()(
           return undefined;
         }
 
-        if (!options.userConfirmedDownload) {
-          get().openAiToolsSetup(options.requestedFeature);
-          get().showToast("Confirm the selected AI feature download before setup starts.", "info");
-          return undefined;
-        }
 
       get().showToast(
-        isCompilerSetup ? "Optional compilation setup is starting in the background." : isStableAudioImport
+        isStableAudioImport
           ? "Diffusers audio setup is starting in the background."
           : "Selected AI features are being installed in the background.",
         "info",
       );
 
-      const pendingMessage = isCompilerSetup ? "Preparing optional compilation runtime..." : isStableAudioImport
+      const pendingMessage = isStableAudioImport
         ? "Preparing Diffusers audio model setup..."
         : currentStatus.buildRuntimeMode === "downloaded-runtime"
           ? "Checking OpenStudio AI runtime downloads..."

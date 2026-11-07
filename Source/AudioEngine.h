@@ -782,7 +782,6 @@ public:
 private:
     friend class AIQualificationHarness;
     juce::File qualificationGeneratedAudioRoot;
-    bool qualificationAutomaticRuntimeMaintenance = false;
     struct RealtimeResolvedSend
     {
         TrackProcessor::RealtimeSendInfo config;

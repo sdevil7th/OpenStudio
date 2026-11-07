@@ -80,11 +80,11 @@ lives in [Testing](testing.md) and the
   Stable Audio optional compiler setup now stages a separate runtime and validates
   real compiled forwards before activation; its paired preview passed audition.
   Broader hardware coverage remains open.
-    Installed managed stem runtimes now have automatic compatibility maintenance
-    in development: idle-time checks stage a replacement, require real execution
-    on the expected accelerator before activation, preserve CPU-only setup choices
-    and retain the old runtime on failure. Qualification includes startup repair
-    without the manual Repair action; coverage limits remain in the report.
+    Installed managed stem runtimes can be repaired in an explicitly requested
+    pre-session maintenance window. The updater validates the replacement on
+    the expected accelerator and keeps downloaded models and CPU-only choices.
+    Qualification covers recording-session exclusion and runtime migration.
+    Hardware coverage is documented in the qualification report.
   The new TorchAO INT8 Stable Audio preview failed audition and is blocked.
   Continue optional attention-package and platform qualification. MiniMax measures actual input tokens, exposes
   selected precision, and stops unqualified INT8 requests before silently

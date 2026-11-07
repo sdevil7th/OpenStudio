@@ -355,6 +355,7 @@ export default function AiToolsSetupModal() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [memoryReleasePending, setMemoryReleasePending] = useState(false);
   const [memoryReleaseMessage, setMemoryReleaseMessage] = useState("");
+  const [repairMessage, setRepairMessage] = useState("");
 
   useEffect(() => {
     setModelVariant(aiToolsStatus.installInProgress && aiToolsStatus.requestedModelId === selectedItemId
@@ -363,6 +364,7 @@ export default function AiToolsSetupModal() {
     setHuggingFaceToken("");
     setStableAudioSelectedFolder("");
     setStableAudioSetupError("");
+    setRepairMessage("");
   }, [selectedItemId, showAiToolsSetup]);
 
   const catalog = useMemo(() => buildSetupCatalog(aiToolsStatus), [aiToolsStatus]);
@@ -502,15 +504,17 @@ export default function AiToolsSetupModal() {
   };
 
   const handleRepairStems = async () => {
-    await installAiTools({ userConfirmedDownload: true, repairRuntime: true,
+    const result = await installAiTools({ userConfirmedDownload: true, repairRuntime: true,
       selectedFeatures: ["stemSeparation"], requestedFeature: "stemSeparation" });
+    setRepairMessage(result?.error ?? result?.message ?? "");
   };
 
   const handlePrepareCompiler = async () => {
     setStableAudioSetupError("");
-    await installAiTools({ userConfirmedDownload: true, prepareOptimization: "compile", repairRuntime: true,
+    const result = await installAiTools({ userConfirmedDownload: true, prepareOptimization: "compile", repairRuntime: true,
       selectedFeatures: ["audioGeneration"], requestedFeature: "audioGeneration",
       modelId: STABLE_AUDIO_3_MODEL_ID, modelVariant: "original" });
+    setRepairMessage(result?.error ?? result?.message ?? "");
   };
 
   const handleReleaseMemory = async () => {
@@ -748,13 +752,7 @@ export default function AiToolsSetupModal() {
   return (
     <Modal isOpen={showAiToolsSetup} onClose={closeAiToolsSetup} size="xl">
       <ModalHeader title="AI Tools Setup" onClose={closeAiToolsSetup} />
-      {aiToolsStatus.runtimeMaintenance && ["attempting", "failed", "cancelled", "interrupted"].includes(aiToolsStatus.runtimeMaintenance.state) && (
-        <div role="status" aria-label="Automatic AI update" className="mx-4 mb-3 rounded border border-daw-accent/40 bg-daw-accent/10 p-3 text-sm leading-5 text-daw-text">
-          {aiToolsStatus.runtimeMaintenance.state === "attempting"
-            ? "OpenStudio is updating your installed AI tools for this version. Your downloaded models will be kept. You can cancel the update below."
-            : aiToolsStatus.runtimeMaintenance.message}
-        </div>
-      )}
+      {repairMessage && <p role="status" aria-label="AI runtime repair" className="mx-4 mb-3 text-sm text-daw-text">{repairMessage}</p>}
       {aiToolsStatus.installInProgress ? renderInstallProgress() : null}
       <ModalContent className="p-0">
         <div className="grid min-h-[620px] grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)]">
@@ -865,12 +863,10 @@ export default function AiToolsSetupModal() {
               {memoryReleasePending ? "Releasing memory..." : "Release idle AI memory"}
             </Button>
           ) : null}
-          {!aiToolsStatus.installInProgress ? (
-            selectedItem.featureId === "stemSeparation" && selectedItem.ready ? (
-              <Button variant="ghost" onClick={() => void handleRepairStems()} title="Rebuild the runtime and keep downloaded models.">
+          {!aiToolsStatus.installInProgress && selectedItem.featureId === "stemSeparation" ? (
+              <Button variant="ghost" onClick={() => void handleRepairStems()} title="Schedule repair for the next launch. Your downloaded models are kept.">
                 Repair Stem Separation
               </Button>
-            ) : null
           ) : null}
           {!aiToolsStatus.installInProgress ? (
             <Button variant="ghost" onClick={() => void handleReset()} icon={<RotateCcw size={14} />}>

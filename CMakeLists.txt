@@ -537,6 +537,8 @@ target_sources(OpenStudio PRIVATE
     Source/CrashReportWriter.cpp
     Source/RuntimeSafetyRegression.cpp
     Source/AIQualificationHarness.cpp
+    Source/AIRuntimeSession.cpp
+    Source/AIRuntimeMaintenanceWindow.cpp
     Source/ProjectFileStore.cpp
     Source/RecoveryJournal.cpp
     Source/RecordingRecovery.cpp

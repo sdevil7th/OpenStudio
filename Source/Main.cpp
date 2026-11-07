@@ -10,6 +10,8 @@
 #include "CrashDiagnostics.h"
 #include "RuntimeSafetyRegression.h"
 #include "AIQualificationHarness.h"
+#include "AIRuntimeSession.h"
+#include "AIRuntimeMaintenanceWindow.h"
 #include "RecordingRecoveryRegression.h"
 #include "MetronomeRegression.h"
 #include "FreePluginRegression.h"
@@ -1427,6 +1429,15 @@ public:
             // test child waits; it never opens the user's project or audio device.
             const juce::File fixtureDirectory(ownedWorkerFixture);
             if (!fixtureDirectory.isDirectory()) { setApplicationReturnValue(2); quit(); return; }
+            const auto sessionMode = getCommandLineOptionValue(commandLine, "--owned-ai-session");
+            if (sessionMode == "workstation" || sessionMode == "maintenance")
+            {
+                AIRuntimeMaintenance::SessionLease attempt;
+                const auto result = attempt.acquire(fixtureDirectory, sessionMode == "workstation"
+                    ? AIRuntimeMaintenance::SessionLease::Mode::workstation : AIRuntimeMaintenance::SessionLease::Mode::maintenance);
+                setApplicationReturnValue(result.wasOk() ? 0 : 3);
+                quit(); return;
+            }
             const auto stemDiagnostic = getCommandLineOptionValue(commandLine, "--owned-stem-diagnostic");
             if (stemDiagnostic.isNotEmpty())
             {
@@ -1484,6 +1495,14 @@ public:
         const auto namLiveProbe = getCommandLineOptionValue(commandLine, "--nam-live-callback-probe");
         if (namLiveProbe.isNotEmpty())
         {
+            const auto session = workstationLease.acquire(AIRuntimeMaintenance::dataRoot(), AIRuntimeMaintenance::SessionLease::Mode::workstation);
+            if (session.failed())
+            {
+                juce::Logger::writeToLog(session.getErrorMessage());
+                setApplicationReturnValue(2);
+                quit();
+                return;
+            }
             const auto output = getCommandLineOptionValue(commandLine, "--output-dir");
             const auto guitar = getCommandLineOptionValue(commandLine, "--guitar-preset");
             const auto bass = getCommandLineOptionValue(commandLine, "--bass-preset");
@@ -1816,6 +1835,17 @@ public:
         const bool focusedNAMOffline = namRackRegressionReportPath.isNotEmpty()
             && (juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_FUZZ_ONLY", {}) == "1"
                 || juce::SystemStats::getEnvironmentVariable("OPENSTUDIO_NAM_TWO_RACK_CPU_ONLY", {}) == "1");
+        const auto runtimeRoot = AIRuntimeMaintenance::dataRoot();
+        if (commandLine.trim().isEmpty())
+            AIRuntimeMaintenance::runRequestedMaintenance(runtimeRoot);
+        const auto session = workstationLease.acquire(runtimeRoot, AIRuntimeMaintenance::SessionLease::Mode::workstation);
+        if (session.failed())
+        {
+            juce::AlertWindow::showMessageBox(juce::MessageBoxIconType::WarningIcon, "OpenStudio", session.getErrorMessage());
+            setApplicationReturnValue(2);
+            quit();
+            return;
+        }
         audioEngine = std::make_unique<AudioEngine>(focusedNAMOffline || windowLifecycleOffline || renderExportRegressionHeadlessMode || projectQualificationPath.isNotEmpty() || recordingQualificationPath.isNotEmpty()
             ? AudioEngine::DeviceStartup::offline : AudioEngine::DeviceStartup::openHardware);
         audioEngine->onFXSlotsRemoved = [this](const juce::String& trackId,
@@ -3441,6 +3471,7 @@ private:
     }
 
     std::unique_ptr<juce::FileLogger> startupLogger;
+    AIRuntimeMaintenance::SessionLease workstationLease;
     std::unique_ptr<AudioEngine> audioEngine;
     std::unique_ptr<RealtimeQualificationReporter> qualificationReporter;
     AppUpdater appUpdater;

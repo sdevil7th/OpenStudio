@@ -1685,41 +1685,11 @@ Its existing-model/runtime fixtures and measured results are documented in the
 
 ### Automatic maintenance of installed stem runtimes (November 7, development)
 
-The main app's AI status service checks an existing managed stem runtime and
-model pair once per selected runtime in each app process. It compares import
-readiness, actual selected backend and core package versions with the app-local
-reviewed backend plan. NVIDIA requires CUDA; Linux AMD uses its reviewed ROCm
-architecture recipe. Platforms without a reviewed plan do not start maintenance.
-No first-use AI installation or generation checkpoint download is triggered.
-An explicit CPU-only setup preference remains opted out of automatic conversion;
-the separate per-job CPU-only selection remains available after CUDA migration.
+AI Tools Setup records an explicit request to repair an installed stem or compiler runtime. A normal launch without a request goes directly to the DAW. With a request, the app takes an exclusive per-user session lock before constructing the maintenance backend. Regular OpenStudio instances take shared locks before they open audio devices. Multiple DAW instances can coexist. A maintenance worker inherits the lock and retains it if its host exits early. Neither acquisition nor status polling is added to the recording callback.
 
-The check and update start only while transport, recording, rendering and AI
-ownership are idle. Setup uses the normal AI lease and retires an idle generation
-worker before staging a replacement. It keeps the selected runtime and model
-cache intact until validation and atomic selection. Installed shared generation
-libraries are discovered before importing Torch, so a broken import does not
-silently drop them from the replacement. Separate generation/compiler runtimes
-are outside this stem maintenance transaction.
+**Check and repair** compares the selected backend, import readiness and reviewed package versions. An incompatible candidate must execute on the expected backend before atomic activation. The old runtime and downloaded models remain available if validation fails. CPU-only preferences are respected. **Rebuild** explicitly permits retry after failure, cancellation or an interrupted attempt. **Open DAW** skips maintenance. Normal AI status refreshes do not run the maintenance inventory or claim an installation.
 
-Automatic setup requires its expected backend, disables backend fallback and
-executes a real device tensor operation with synchronized result verification
-before activation. CPU fallback remains a processing policy; it cannot count as
-a successful CUDA runtime update. AI Tools exposes progress, cancellation and
-failure. A short interprocess receipt claim prevents duplicate app windows from
-starting the same update. Attempts are keyed by app version, hardware backend,
-GPU name and reviewed recipe. Failure, cancellation or an interrupted attempt
-retains the previous selection and suppresses repeated automatic downloads for
-that key. Manual Repair remains available after resolving driver, network or disk
-problems. A changed app/recipe can try again; a healthy runtime is left alone.
-
-`qualify_ai_native.py --automatic-repair-regression` extends the native CI flow:
-fresh install and real six-stem separation, a reversible metadata incompatibility
-inside the marked test runtime, then app startup without a manual setup call,
-automatic replacement and real separation again. The native harness also checks
-busy deferral, original interpreter/model hashes and repeated status polling.
-Hardware and failure-path results are recorded separately in the November report;
-CI configuration is not evidence that an unrun remote workflow has passed.
+The native `--automatic-repair-regression` still exercises staging, activation, rollback and real separation using a private runtime. It also verifies exclusion in both launch orders. The historical hardware results below describe the installer on those particular machines.
 
 Native Linux CPU-to-ROCm migration, CPU-only preservation, failure/cancellation
 rollback and restart suppression were subsequently qualified on gfx1151; a

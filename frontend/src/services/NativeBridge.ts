@@ -1636,7 +1636,6 @@ export interface AiMusicModelStatus {
 }
 
 export interface AiToolsStatus {
-  runtimeMaintenance?: { state: string; message: string; expectedBackend: string; automatic: boolean } | null;
   resources?: AIResourceState;
     state:
       | "idle"

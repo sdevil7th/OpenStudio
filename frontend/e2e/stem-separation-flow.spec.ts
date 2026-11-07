@@ -174,36 +174,25 @@ test.describe("macOS stem processing", () => {
   });
 });
 
-test("automatic runtime update explains model retention, supports cancel, and needs no manual repair click", async ({ page }) => {
+test("stem repair is queued without starting setup in the DAW", async ({ page }) => {
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.evaluate(async () => {
     const storeUrl = "/src/store/useDAWStore.ts", bridgeUrl = "/src/services/NativeBridge.ts";
     const { useDAWStore } = await import(/* @vite-ignore */ storeUrl);
     const { nativeBridge } = await import(/* @vite-ignore */ bridgeUrl);
-    const ready = useDAWStore.getState().aiToolsStatus;
-    nativeBridge.getAiToolsStatus = async () => useDAWStore.getState().aiToolsStatus;
-    nativeBridge.refreshAiToolsStatus = async () => useDAWStore.getState().aiToolsStatus;
-    nativeBridge.cancelAiToolsInstall = async () => {
-      ++(window as any).__stemQA.cancels;
-      useDAWStore.setState({ aiToolsStatus: { ...ready, state: "cancelled", installInProgress: false,
-        runtimeMaintenance: { state: "cancelled", automatic: true, expectedBackend: "cuda",
-          message: "Automatic AI update was cancelled. Your previous runtime was retained." } } });
-    };
-    useDAWStore.setState({ aiToolsStatus: { ...ready, state: "installing", available: false, installInProgress: true,
-      runtimeMaintenance: { state: "attempting", automatic: true, expectedBackend: "cuda", message: "Updating installed AI tools automatically." } } });
+    nativeBridge.installAiTools = async () => ({
+      started: false, message: "AI maintenance is scheduled. Save your work, close all OpenStudio windows and reopen OpenStudio to continue.",
+    });
     useDAWStore.getState().openAiToolsSetup("stemSeparation");
   });
   await page.setViewportSize({ width: 390, height: 760 });
-  const notice = page.getByRole("status", { name: "Automatic AI update" });
-  await expect(notice).toContainText("Your downloaded models will be kept");
-  const box = (await notice.boundingBox())!;
-  expect(box.x).toBeGreaterThanOrEqual(0);
-  expect(box.x + box.width).toBeLessThanOrEqual(390);
-  const cancel = page.getByRole("button", { name: "Cancel Setup", exact: true });
-  await expect(cancel).toBeEnabled();
-  await cancel.click();
-  await expect(notice).toContainText("previous runtime was retained");
-  expect(await page.evaluate(() => (window as any).__stemQA.repairs.length)).toBe(0);
+  await page.getByRole("button", { name: "Repair Stem Separation" }).click();
+  const notice = page.getByRole("status", { name: "AI runtime repair" });
+  await expect(notice).toContainText("close all OpenStudio windows");
+  await expect(page.getByRole("button", { name: "Cancel Setup" })).toHaveCount(0);
+  const bounds = (await notice.boundingBox())!;
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
 });
 
 test.describe("Linux AMD stem processing", () => {
@@ -368,10 +357,7 @@ test("compiler setup becomes selectable after validated native preparation", asy
     (window as any).__JUCE__ = { backend: {
       installAiTools: async (payload: string) => {
         (window as any).__compilerRequests.push(JSON.parse(payload));
-        const before = useDAWStore.getState().aiToolsStatus;
-        return { started: true, status: { ...before, state: "ready", installInProgress: false,
-          musicModels: { ...before.musicModels, "stable-audio-3-medium": { installed: true, ready: true,
-            optimizations: { compile: { ready: true } } } } } };
+        return { started: false, message: "AI maintenance is scheduled. Reopen OpenStudio to continue." };
       },
     } };
     useDAWStore.getState().openAiToolsSetup("audioGeneration", "stable-audio-3-medium");
@@ -386,6 +372,17 @@ test("compiler setup becomes selectable after validated native preparation", asy
   expect(bounds.x).toBeGreaterThanOrEqual(0);
   expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
   await prepare.click();
+  await expect(page.getByRole("status", { name: "AI runtime repair" })).toContainText("scheduled");
+  await expect(compiled).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Cancel Setup" })).toHaveCount(0);
+  // The next DAW session sees the validated result through its ordinary status refresh.
+  await page.evaluate(async () => {
+    const storeUrl = "/src/store/useDAWStore.ts";
+    const { useDAWStore } = await import(/* @vite-ignore */ storeUrl);
+    const before = useDAWStore.getState().aiToolsStatus;
+    useDAWStore.getState().applyAiToolsStatusUpdate({ ...before, musicModels: { ...before.musicModels,
+      "stable-audio-3-medium": { ...before.musicModels["stable-audio-3-medium"], optimizations: { compile: { ready: true } } } } });
+  });
   await expect(compiled).toBeEnabled();
   await expect(page.getByRole("button", { name: "Repair compiler setup", exact: true })).toBeVisible();
   await page.getByLabel("Generation execution").selectOption("compile");

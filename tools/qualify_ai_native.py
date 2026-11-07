@@ -50,7 +50,7 @@ def require_gpu_placement(report: dict, expected_backend: str) -> None:
 
 
 def qualify_automatic_repair(root: Path, app: Path, config: dict, report: dict, timeout: int) -> None:
-    """Require startup maintenance and real separation of a deliberately incompatible owned runtime."""
+    """Require exclusive maintenance and real separation of a deliberately incompatible owned runtime."""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     original, hidden = hide_owned_separator_metadata(root, Path(report["activeRuntime"]))
     try:
@@ -66,8 +66,11 @@ def qualify_automatic_repair(root: Path, app: Path, config: dict, report: dict, 
                 stdout=log, stderr=subprocess.STDOUT, creationflags=flags, env=qualification_environment(root),
                 timeout=timeout + 60, check=False)
         automatic_report = json.loads((root / "native-result-automatic-upgrade.json").read_text(encoding="utf-8"))
-        if completed.returncode or automatic_report.get("status") != "pass" or not automatic_report.get("observedAutomaticInstall"):
-            raise RuntimeError("Automatic app-update repair did not activate and separate: " + str(automatic_report.get("error")))
+        if (completed.returncode or automatic_report.get("status") != "pass"
+                or not automatic_report.get("observedAutomaticInstall")
+                or automatic_report.get("busyDeferral") != "pass"
+                or automatic_report.get("recordingExcludedThroughoutRepair") is not True):
+            raise RuntimeError("Exclusive AI runtime repair did not activate and separate: " + str(automatic_report.get("error")))
         require_gpu_placement(automatic_report, config["expectedBackend"])
         print(json.dumps({"automaticRuntimeRepair":"pass","backend":automatic_report.get("backend")}),flush=True)
     finally:
@@ -90,7 +93,7 @@ def main():
     parser.add_argument("--chunk-duration", type=int, choices=[0, 30], default=0)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--automatic-repair-regression", action="store_true",
-                        help="After fresh setup, test app-startup repair of a reversible owned compatibility failure")
+                        help="After fresh setup, test exclusive maintenance on a reversible owned compatibility failure")
     args = parser.parse_args()
     root = Path(args.output_dir).resolve()
     root.mkdir(parents=True, exist_ok=False)

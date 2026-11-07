@@ -6,10 +6,11 @@ namespace OpenStudioAI
 // A failed command may print the GPU name in its error. Only successful stdout
 // is hardware evidence. Use argv directly, never a quoted shell command string.
 inline bool readCommandOutput(const juce::StringArray& arguments, juce::String& output,
-                              const juce::StringPairArray& environment = {}, double timeoutMs = 8000.0)
+                              const juce::StringPairArray& environment = {}, double timeoutMs = 8000.0,
+                              std::intptr_t inputHandle = -1)
 {
     OwnedChildProcess process;
-    if (!process.start(arguments, 1, environment)) return false;
+    if (!process.start(arguments, 1, environment, inputHandle)) return false;
     output.clear();
     const auto deadline = juce::Time::getMillisecondCounterHiRes() + timeoutMs;
     for (;;)
