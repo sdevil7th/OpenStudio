@@ -270,7 +270,7 @@ That publish-asset set contains:
 - `OpenStudio-appcast-linux-stable.xml`
 - `OpenStudio-checksums.txt`
 
-The website repo should fetch those assets after the desktop release publishes, place them into its deploy-input area, and then deploy `openstudio.org.in`.
+After the desktop release publishes, the website fetches the manifests and appcasts and deploys them to `openstudio.org.in`. Its download page links to the tag's `OpenStudio-checksums.txt` on GitHub. The published file also contains checksums for supplemental downloads added after manifest generation.
 
 The `publish-website` job dispatches that work after successful GitHub publication.
 It runs independently of `submit-store`, so a website credential or dispatch failure
