@@ -199,18 +199,28 @@ function Test-UrlReachable {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$resolvedMetadataDir = Join-Path $repoRoot $MetadataDir
+$resolvedMetadataDir = if ([IO.Path]::IsPathRooted($MetadataDir)) { $MetadataDir } else { Join-Path $repoRoot $MetadataDir }
 $releaseSiteBaseUrl = Get-NormalizedBaseUrl $ReleaseSiteUrl
 
 Assert-True (Test-Path $resolvedMetadataDir) "Metadata directory not found: $resolvedMetadataDir"
+& (Join-Path $PSScriptRoot "validate-release-metadata.ps1") -MetadataDir $resolvedMetadataDir -Channel $Channel
+$expectedManifest = Get-Content (Join-Path $resolvedMetadataDir "releases/$Channel/latest.json") -Raw | ConvertFrom-Json
+$checksumsPath = "OpenStudio-checksums.txt"
+$checksumsUrl = Join-RemoteUrl $releaseSiteBaseUrl $checksumsPath
+if ($expectedManifest.releasePageUrl -match '^(https://github\.com/[^/?#]+/[^/?#]+/releases)/tag/([^/?#]+)$') {
+    $checksumsUrl = "{0}/download/{1}/{2}" -f $Matches[1], $Matches[2], $checksumsPath
+}
 
 $remotePaths = @(
     "releases/latest.json",
     "releases/$Channel/latest.json",
     "appcast/windows-$Channel.xml",
     "appcast/macos-$Channel.xml",
-    "OpenStudio-checksums.txt"
+    $checksumsPath
 )
+if ($expectedManifest.platforms.linux) {
+    $remotePaths += "appcast/linux-$Channel.xml"
+}
 
 $localAiRuntimeRootManifestPath = Join-Path $resolvedMetadataDir "releases/ai-runtime/latest.json"
 $localAiRuntimeChannelManifestPath = Join-Path $resolvedMetadataDir ("releases/ai-runtime/{0}/latest.json" -f $Channel)
@@ -228,7 +238,10 @@ $expectedCacheControl = @{
     "releases/$Channel/latest.json" = "no-store"
     "appcast/windows-$Channel.xml" = "no-store"
     "appcast/macos-$Channel.xml" = "no-store"
-    "OpenStudio-checksums.txt" = "max-age=300"
+    "appcast/linux-$Channel.xml" = "no-store"
+}
+if ($checksumsUrl -eq (Join-RemoteUrl $releaseSiteBaseUrl $checksumsPath)) {
+    $expectedCacheControl[$checksumsPath] = "max-age=300"
 }
 
 if ($hasAiRuntimeMetadata) {
@@ -242,7 +255,7 @@ New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
 try {
     foreach ($relativePath in $remotePaths) {
-        $remoteUrl = Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath $relativePath
+        $remoteUrl = if ($relativePath -eq $checksumsPath) { $checksumsUrl } else { Join-RemoteUrl $releaseSiteBaseUrl $relativePath }
         $response = Invoke-RetryWebRequest -Url $remoteUrl
         $content = [string]$response.Content
         $targetPath = Join-Path $tempDir $relativePath
@@ -269,9 +282,13 @@ try {
     $remoteChannelJson = Get-Content (Join-Path $tempDir ("releases/{0}/latest.json" -f $Channel)) -Raw
     Assert-True ((Normalize-JsonText $localChannelJson) -eq (Normalize-JsonText $remoteChannelJson)) "Remote channel latest.json does not match local metadata."
 
-    $localChecksums = (Get-Content (Join-Path $resolvedMetadataDir "OpenStudio-checksums.txt") -Raw).Trim()
-    $remoteChecksums = (Get-Content (Join-Path $tempDir "OpenStudio-checksums.txt") -Raw).Trim()
-    Assert-True ($localChecksums -eq $remoteChecksums) "Remote OpenStudio-checksums.txt does not match local metadata."
+    # Publication appends checksums for the DEB, Support downloads and FFmpeg source.
+    $remoteChecksums = Get-Content (Join-Path $tempDir $checksumsPath)
+    foreach ($entry in (Get-Content (Join-Path $resolvedMetadataDir $checksumsPath))) {
+        if (-not [string]::IsNullOrWhiteSpace($entry)) {
+            Assert-True ($remoteChecksums -contains $entry) "Published checksum missing or changed: $entry"
+        }
+    }
 
     if ($hasAiRuntimeMetadata) {
         $localAiRuntimeRootJson = Get-Content $localAiRuntimeRootManifestPath -Raw
@@ -294,6 +311,12 @@ try {
         -Label "Remote macOS appcast"
 
     $remoteManifest = Get-Content (Join-Path $tempDir ("releases/{0}/latest.json" -f $Channel)) -Raw | ConvertFrom-Json
+    if ($remoteManifest.platforms.linux) {
+        $linuxAppcast = "appcast/linux-$Channel.xml"
+        Compare-AppcastText -ExpectedText (Get-Content (Join-Path $resolvedMetadataDir $linuxAppcast) -Raw) `
+            -ActualText (Get-Content (Join-Path $tempDir $linuxAppcast) -Raw) -Label "Remote Linux appcast"
+        Test-UrlReachable $remoteManifest.platforms.linux.url
+    }
     if ($remoteManifest.platforms.windows.url) {
         Test-UrlReachable -Url $remoteManifest.platforms.windows.url
     }
@@ -305,6 +328,9 @@ try {
         $remoteAiRuntimeManifest = Get-Content (Join-Path $tempDir ("releases/ai-runtime/{0}/latest.json" -f $Channel)) -Raw | ConvertFrom-Json
         if ($remoteAiRuntimeManifest.platforms.windows.url) {
             Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.windows.url
+        }
+        if ($remoteAiRuntimeManifest.platforms.windows.base.url) {
+            Test-UrlReachable $remoteAiRuntimeManifest.platforms.windows.base.url
         }
         if ($remoteAiRuntimeManifest.platforms.windows.backends.cuda.url) {
             Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.windows.backends.cuda.url
@@ -321,16 +347,32 @@ try {
         if ($remoteAiRuntimeManifest.platforms.macos.x64.url) {
             Test-UrlReachable -Url $remoteAiRuntimeManifest.platforms.macos.x64.url
         }
+        foreach ($entry in @($remoteAiRuntimeManifest.platforms.linux, $remoteAiRuntimeManifest.platforms.linux.x64, $remoteAiRuntimeManifest.platforms.linux.arm64)) {
+            if ($entry.url) { Test-UrlReachable $entry.url }
+        }
     }
 
     if ($ValidateRedirects) {
         Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/windows/latest")
         Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/macos/latest")
+        if ($remoteManifest.platforms.linux) {
+            Test-UrlReachable (Join-RemoteUrl $releaseSiteBaseUrl "download/linux/latest")
+        }
         if ($hasAiRuntimeMetadata) {
             Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/windows/latest")
-            Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/windows/directml/latest")
-            Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/windows/cuda/latest")
+            foreach ($backend in @("cuda", "directml")) {
+                if ($remoteAiRuntimeManifest.platforms.windows.backends.$backend.url) {
+                    Test-UrlReachable (Join-RemoteUrl $releaseSiteBaseUrl "download/ai-runtime/windows/$backend/latest")
+                }
+            }
             Test-UrlReachable -Url (Join-RemoteUrl -BaseUrl $releaseSiteBaseUrl -RelativePath "download/ai-runtime/macos/latest")
+            foreach ($platform in @("macos", "linux")) {
+                foreach ($arch in @("arm64", "x64")) {
+                    if ($remoteAiRuntimeManifest.platforms.$platform.$arch.url) {
+                        Test-UrlReachable (Join-RemoteUrl $releaseSiteBaseUrl "download/ai-runtime/$platform/$arch/latest")
+                    }
+                }
+            }
         }
     }
 

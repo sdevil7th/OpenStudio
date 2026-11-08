@@ -198,9 +198,10 @@ Linux Xvfb/Openbox evidence as X11/XWayland, not native Wayland qualification.
   - `OpenStudio-appcast-windows-stable.xml`
   - `OpenStudio-appcast-macos-stable.xml`
   - `OpenStudio-appcast-linux-stable.xml`
-- Confirm `OpenStudio-checksums.txt` matches the published binaries.
+- Confirm the checksum file attached to the GitHub release matches the published binaries.
 - Confirm `appcast/windows-stable.xml` points to the published Windows installer.
 - Confirm `appcast/macos-stable.xml` points to the published macOS DMG.
+- Confirm `appcast/linux-stable.xml` points to the published Linux AppImage when present.
 - Confirm AI runtime metadata points to the published GitHub AI runtime assets with the correct SHA-256 and size.
 - Confirm the website repo deploy has completed before validating `openstudio.org.in`.
 - Confirm the public metadata and appcast URLs on `openstudio.org.in` no longer return the SPA HTML shell.
