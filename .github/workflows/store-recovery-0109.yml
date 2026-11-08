@@ -1,0 +1,74 @@
+name: Complete the published 0.1.09 Microsoft Store submission
+on:
+  push:
+    tags: ['v-store-recovery-0.1.09-1']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  submit:
+    if: vars.OPENSTUDIO_STORE_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: microsoft-store
+    concurrency:
+      group: openstudio-microsoft-store-submission
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ecb2a1f70fb084f43ecb71ff70054ba2e5e0f8a2
+          persist-credentials: false
+
+      - name: Verify the published release and its original certification run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo=sdevil7th/OpenStudio
+          sha=ecb2a1f70fb084f43ecb71ff70054ba2e5e0f8a2
+          test "$GITHUB_REPOSITORY" = "$repo"
+          test "$GITHUB_REF" = refs/tags/v-store-recovery-0.1.09-1
+          test "$(git rev-parse HEAD)" = "$sha"
+          tag_object=$(gh api "repos/$repo/git/ref/tags/v0.1.09" --jq '.object.sha')
+          test "$(gh api "repos/$repo/git/tags/$tag_object" --jq '.object.sha')" = "$sha"
+          gh api "repos/$repo/releases/tags/v0.1.09" | jq -e '.published_at != null and .draft == false and .prerelease == false' >/dev/null
+          gh api "repos/$repo/actions/runs/42446028510" | jq -e --arg sha "$sha" \
+            '.event == "push" and .head_sha == $sha and .head_branch == "v0.1.09" and .path == ".github/workflows/release.yml"' >/dev/null
+          gh api "repos/$repo/actions/runs/42446028510/attempts/1/jobs?per_page=100" | jq -e \
+            '[.jobs[] | select(.conclusion == "success").name] | contains(["publish","build-windows","Certify the tag-built Microsoft Store package","Check Store readiness before publication"])' >/dev/null
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: microsoft-store-package
+          path: dist/store
+          run-id: 42446028510
+          github-token: ${{ github.token }}
+
+      - name: Validate and submit only the certified update
+        env:
+          MS_STORE_TENANT_ID: ${{ secrets.MS_STORE_TENANT_ID }}
+          MS_STORE_CLIENT_ID: ${{ secrets.MS_STORE_CLIENT_ID }}
+          MS_STORE_CLIENT_SECRET: ${{ secrets.MS_STORE_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '9fca8afa9765860a9bf04e7c32dbeee869fcc1f70a6eead133c82e04f6c8e372  dist/store/OpenStudio-0.1.9.0-x64.msix' | sha256sum --check --strict
+          args=(--version v0.1.09 --package-dir dist/store --notes-file docs/releases/0.1.09.md
+                --initial-submission-config packaging/msix/initial-submission.json
+                --publishing-config packaging/msix/release-publishing.json)
+          python3 tools/submit_store_release.py "${args[@]}" --report output/store-preflight.json --preflight
+          python3 tools/submit_store_release.py "${args[@]}" --report output/store-submission.json --submit
+
+      - name: Retain the submission evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: microsoft-store-submission-${{ github.run_attempt }}
+          path: |
+            output/store-preflight.json
+            output/store-submission.json
+          retention-days: 30
