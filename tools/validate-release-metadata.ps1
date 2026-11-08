@@ -114,6 +114,9 @@ function Parse-Checksums {
         if ($line -notmatch "^(?<hash>[a-fA-F0-9]{64})\s{2}(?<name>.+)$") {
             Fail ("Invalid checksum line in {0}: {1}" -f $Path, $line)
         }
+        if ($map.ContainsKey($Matches["name"])) {
+            Fail ("Duplicate checksum entry in {0}: {1}" -f $Path, $Matches["name"])
+        }
         $map[$Matches["name"]] = $Matches["hash"].ToLowerInvariant()
     }
     return $map
@@ -167,7 +170,10 @@ function Validate-ManifestBasics {
     }
 
     try {
-        [void][DateTimeOffset]::Parse($Manifest.publishedAt)
+        # Modern PowerShell already parses ISO JSON timestamps into DateTime.
+        if ($Manifest.publishedAt -isnot [datetime]) {
+            [void][DateTimeOffset]::Parse($Manifest.publishedAt, [CultureInfo]::InvariantCulture)
+        }
     } catch {
         Fail "$PathLabel publishedAt is not a valid timestamp: $($Manifest.publishedAt)"
     }
