@@ -72,9 +72,15 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
         statuses = dict.fromkeys(needs, "success")
         statuses.update(results or {})
         expression = job.get("if", "True")
-        # Actions adds success() implicitly unless a status function is present.
+        # Actions' implicit success() also considers indirect dependencies.
+        def ancestors(job_name):
+            parents = self.jobs[job_name].get("needs", [])
+            if isinstance(parents, str):
+                parents = [parents]
+            return set(parents).union(*(ancestors(parent) for parent in parents))
+
         if not re.search(r"\b(?:always|cancelled|failure|success)\(", expression):
-            if cancelled or any(statuses[need] != "success" for need in needs):
+            if cancelled or any(statuses.get(need, "success") != "success" for need in ancestors(name)):
                 return False
         values = {
             "vars.OPENSTUDIO_STORE_ENABLED": enabled,
@@ -104,6 +110,17 @@ class StoreReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(enabled=enabled, ref=ref):
                 self.assertFalse(self.job_runs("preflight-store", enabled=enabled, ref=ref))
                 self.assertFalse(self.job_runs("submit-store", enabled=enabled, ref=ref))
+
+    def test_publication_followups_run_with_the_other_store_deferred(self):
+        # v0.1.09 published successfully but GitHub skipped both follow-ups.
+        snap_off = {"qualify-snap": "skipped", "preflight-snap": "skipped"}
+        self.assertTrue(self.job_runs("publish-website", snap_off))
+        self.assertTrue(self.job_runs("submit-store", snap_off))
+        self.assertFalse(self.job_runs("submit-snap", snap_off))
+        microsoft_off = {"certify-store-package": "skipped", "preflight-store": "skipped"}
+        for job in ("publish-website", "submit-snap", "sync-snap-listing"):
+            self.assertTrue(self.job_runs(job, microsoft_off, enabled="false", snap_enabled="true"))
+            self.assertFalse(self.job_runs(job, microsoft_off, enabled="false", snap_enabled="true", cancelled=True))
 
     def test_store_readiness_failure_or_cancellation_blocks_release_publication(self):
         for status in ("failure", "cancelled", "skipped"):
