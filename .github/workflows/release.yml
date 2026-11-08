@@ -67,7 +67,10 @@ jobs:
   submit-snap:
     name: Submit Ubuntu App Center Snap release
     needs: [publish, preflight-snap, validate-release-notes]
-    if: vars.OPENSTUDIO_SNAP_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      ${{ !cancelled() && needs.publish.result == 'success' && needs.preflight-snap.result == 'success'
+          && needs.validate-release-notes.result == 'success'
+          && vars.OPENSTUDIO_SNAP_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     environment: snap-store
@@ -97,7 +100,9 @@ jobs:
   sync-snap-listing:
     name: Apply and verify the released Snap listing
     needs: [submit-snap, validate-release-notes]
-    if: vars.OPENSTUDIO_SNAP_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      ${{ !cancelled() && needs.submit-snap.result == 'success' && needs.validate-release-notes.result == 'success'
+          && vars.OPENSTUDIO_SNAP_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     environment: snap-store
@@ -1408,6 +1413,8 @@ jobs:
   publish-website:
     name: Trigger website release publication
     needs: publish
+    # The successful publish job can have a skipped optional Store ancestor.
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1437,7 +1444,10 @@ jobs:
   submit-store:
     name: Submit Microsoft Store release
     needs: [publish, build-windows, validate-release-notes]
-    if: vars.OPENSTUDIO_STORE_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      ${{ !cancelled() && needs.publish.result == 'success' && needs.build-windows.result == 'success'
+          && needs.validate-release-notes.result == 'success'
+          && vars.OPENSTUDIO_STORE_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment: microsoft-store
