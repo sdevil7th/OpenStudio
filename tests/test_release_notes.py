@@ -47,6 +47,18 @@ class ReleaseNotesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             notes.validate("0.1.01", ROOT / "packaging/release-notes-template.md")
 
+    def test_runtime_notes_are_separate_from_application_notes(self):
+        text=self.valid.replace("# OpenStudio 0.1.01", "# OpenStudio FFmpeg 8.0.1-openstudio.2", 1)
+        self.path.write_text(text,encoding="utf-8")
+        self.assertEqual(notes.validate_runtime("8.0.1-openstudio.2",self.path).strip(),text.strip())
+        with self.assertRaises(ValueError):notes.validate("0.1.01",self.path)
+        with self.assertRaises(ValueError):notes.validate_runtime("8.0.1-openstudio.3",self.path)
+        with self.assertRaises(ValueError):notes.validate_runtime("8.0.1",self.path)
+
+    def test_runtime_notes_reject_unfinished_text(self):
+        self.path.write_text(self.valid.replace("# OpenStudio 0.1.01", "# OpenStudio FFmpeg 8.0.1-openstudio.2", 1)+"\nTODO",encoding="utf-8")
+        with self.assertRaises(ValueError):notes.validate_runtime("8.0.1-openstudio.2",self.path)
+
 
 class DirectPackagingNotesTests(unittest.TestCase):
     def setUp(self):

@@ -18,6 +18,14 @@ def validate(version: str, path: Path) -> str:
     return validate_text(version, text)
 
 
+def validate_runtime(version: str, path: Path) -> str:
+    if not re.fullmatch(r"\d+\.\d+\.\d+-openstudio\.\d+", version):
+        raise ValueError("Runtime version must identify an immutable OpenStudio FFmpeg build.")
+    if "template" in path.name.lower():
+        raise ValueError("A release-notes template cannot be published.")
+    return validate_text(f"FFmpeg {version}", path.read_text(encoding="utf-8-sig"))
+
+
 def validate_text(version: str, text: str) -> str:
     version = version.removeprefix("v")
     text = text.strip()
@@ -39,19 +47,22 @@ def validate_text(version: str, text: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", required=True)
+    identity = parser.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--version")
+    identity.add_argument("--runtime-version")
     parser.add_argument("--notes-file", default="")
     parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
-    version = args.version.removeprefix("v")
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", version):
+    version = args.runtime_version or args.version.removeprefix("v")
+    if args.version and not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", version):
         parser.error("Invalid release version")
-    path = (ROOT / (args.notes_file or f"docs/releases/{version}.md")).resolve()
+    default_name = f"ffmpeg-runtime-{version}" if args.runtime_version else version
+    path = (ROOT / (args.notes_file or f"docs/releases/{default_name}.md")).resolve()
     try:
         relative = path.relative_to(ROOT).as_posix()
         if "\n" in relative or "\r" in relative:
             raise ValueError("Invalid release-note path.")
-        validate(version, path)
+        (validate_runtime if args.runtime_version else validate)(version, path)
         if args.github_output:
             with args.github_output.open("a", encoding="utf-8") as output:
                 output.write(f"notes_file={relative}\n")

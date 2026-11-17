@@ -10,3 +10,5 @@ thirdparty/signalsmith/LICENSE.txt text eol=lf
 thirdparty/signalsmith/signalsmith-linear/LICENSE.txt text eol=lf
 tests/fixtures/ace-rocm-startup/**/*.json text eol=lf
 tools/ai-compiler-runtime-requirements-windows.txt text eol=lf
+
+tools/build-windows-ffmpeg-runtime-native.sh text eol=lf

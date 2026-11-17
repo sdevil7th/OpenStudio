@@ -1,12 +1,17 @@
 {
   "schemaVersion": 1,
-  "runtimeVersion": "8.0.1-openstudio.1",
+  "runtimeVersion": "8.0.1-openstudio.2",
   "target": "windows-x86_64-ucrt",
   "toolchain": {
     "name": "llvm-mingw",
     "version": "20260826",
     "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260826/llvm-mingw-20260826-ucrt-ubuntu-22.04-x86_64.tar.xz",
-    "sha256": "cee8d2ce3da5145ce4dc882e70d0b0719a783d53a99752c60948fc0659975a65"
+    "sha256": "cee8d2ce3da5145ce4dc882e70d0b0719a783d53a99752c60948fc0659975a65",
+    "windows": {
+      "archive": "llvm-mingw-20260826-ucrt-x86_64.zip",
+      "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260826/llvm-mingw-20260826-ucrt-x86_64.zip",
+      "sha256": "ae601f4e0f72bbdf441ad2df8bb16f037e2e9251559ea6b37b4057aef39c06c3"
+    }
   },
   "buildTools": [
     {
@@ -50,6 +55,32 @@
       "url": "https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz",
       "sha256": "b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b",
       "license": "BSD-3-Clause"
+    }
+  ],
+  "windowsBuildTools": [
+    {
+      "name": "nasm",
+      "version": "2.16.03",
+      "archive": "nasm-2.16.03-win64.zip",
+      "url": "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip",
+      "sha256": "3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "name": "make",
+      "version": "4.4.1-3",
+      "archive": "make-4.4.1-3-x86_64.pkg.tar.zst",
+      "url": "https://repo.msys2.org/msys/x86_64/make-4.4.1-3-x86_64.pkg.tar.zst",
+      "sha256": "af0bdba17f06fe037f0194069adaa31a8fe45f1a11381501896aea1fae37bd5d",
+      "license": "GPL-3.0-or-later (build tool only)"
+    },
+    {
+      "name": "pkgconf",
+      "version": "3.0.9-1",
+      "archive": "mingw-w64-ucrt-x86_64-pkgconf-1~3.0.9-1-any.pkg.tar.zst",
+      "url": "https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-pkgconf-1~3.0.9-1-any.pkg.tar.zst",
+      "sha256": "4ea9bdd77df366333b973771c2ec377e77a4354e60c16a4556af7d849494366f",
+      "license": "ISC (build tool only)"
     }
   ]
 }

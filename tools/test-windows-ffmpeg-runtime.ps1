@@ -26,6 +26,8 @@ New-Item -ItemType Directory -Force -Path $runtimeDir, $fixtureDir | Out-Null
 try {
     Expand-Archive -LiteralPath $resolvedArchive -DestinationPath $runtimeDir -Force
     $ffmpeg = Join-Path $runtimeDir "ffmpeg.exe"
+    $ffprobe = Join-Path $runtimeDir "ffprobe.exe"
+    if(-not (Test-Path -LiteralPath $ffprobe)){throw 'Runtime archive must contain bundled ffprobe.exe.'}
     if (-not (Test-Path -LiteralPath $ffmpeg)) {
         throw "Runtime archive does not contain ffmpeg.exe at its root."
     }
@@ -82,6 +84,7 @@ try {
     if ($versionOutput -match "--enable-gpl|--enable-nonfree") { throw "FFmpeg build enabled a forbidden license mode." }
 
     $encoderOutput = Invoke-FFmpeg -Arguments @("-hide_banner", "-encoders")
+    if($encoderOutput -notmatch '(?m)\bh264_mf\b'){throw 'Required Media Foundation H.264 encoder is missing.'}
     foreach ($encoder in @("libmp3lame", "libvorbis", "flac", "pcm_s16le", "pcm_s24le", "pcm_f32le", "pcm_s16be", "pcm_s24be", "pcm_f32be", "mjpeg")) {
         if ($encoderOutput -notmatch "(?m)\b$([regex]::Escape($encoder))\b") { throw "Required encoder is missing: $encoder" }
     }
@@ -126,6 +129,13 @@ try {
     Invoke-FFmpeg -Arguments @("-hide_banner", "-loglevel", "error", "-i", $video, "-vn", "-c:a", "pcm_s24le", "-ar", "48000", "-y", $videoAudio) | Out-Null
     $videoFrame = Join-Path $fixtureDir "video frame.jpg"
     Invoke-FFmpeg -Arguments @("-hide_banner", "-loglevel", "error", "-ss", "0.5", "-i", $video, "-vf", "scale=160:90", "-frames:v", "1", "-q:v", "2", "-y", $videoFrame) | Out-Null
+    $h264 = Join-Path $fixtureDir 'edited H264 1080p60.mp4'
+    Invoke-FFmpeg -Arguments @('-hide_banner','-loglevel','error','-f','lavfi','-i','testsrc2=size=1920x1080:rate=60:duration=0.5','-f','lavfi','-i','sine=frequency=330:sample_rate=48000:duration=0.5','-c:v','h264_mf','-hw_encoding','0','-profile:v','100','-pix_fmt','nv12','-b:v','18000000','-bf','0','-c:a','aac','-shortest','-y',$h264) | Out-Null
+    $probeResult=& $ffprobe -v error -count_frames -show_streams -show_format -of json $h264 | ConvertFrom-Json
+    if($LASTEXITCODE -ne 0){throw 'Bundled FFprobe could not inspect the H.264 output.'}
+    $videoStream=$probeResult.streams | Where-Object codec_type -eq 'video'
+    if($videoStream.codec_name -ne 'h264' -or $videoStream.profile -ne 'High' -or $videoStream.width -ne 1920 -or $videoStream.height -ne 1080 -or $videoStream.nb_read_frames -ne '30'){throw 'H.264 output failed its codec/profile/frame checks.'}
+    Invoke-FFmpeg -Arguments @('-v','error','-xerror','-i',$h264,'-f','null','-') | Out-Null
 
     $videoOnly = Join-Path $fixtureDir "video without audio.mp4"
     Invoke-FFmpeg -Arguments @("-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10:duration=1", "-an", "-c:v", "mpeg4", "-y", $videoOnly) | Out-Null

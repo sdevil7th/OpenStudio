@@ -207,6 +207,10 @@ ffmpeg_configure=(
   "--disable-network"
   "--disable-programs"
   "--enable-ffmpeg"
+  "--enable-ffprobe"
+  "--enable-mediafoundation"
+  "--enable-d3d11va"
+  "--enable-encoder=h264_mf"
   "--enable-libmp3lame"
   "--enable-libvorbis"
 )
@@ -218,9 +222,11 @@ make -j"$jobs"
 make install
 cp ffbuild/config.mak "$corresponding_dir/build/ffmpeg-config.mak"
 cp config.h "$corresponding_dir/build/ffmpeg-config.h"
+cp config_components.h "$corresponding_dir/build/ffmpeg-config_components.h"
 popd >/dev/null
 
 cp "$prefix_dir/bin/ffmpeg.exe" "$runtime_dir/"
+cp "$prefix_dir/bin/ffprobe.exe" "$runtime_dir/"
 find "$prefix_dir/bin" -maxdepth 1 -type f -iname '*.dll' -exec cp {} "$runtime_dir/" \;
 
 cp "$source_dir/ffmpeg/COPYING.LGPLv2.1" "$runtime_dir/licenses/FFmpeg-COPYING.LGPLv2.1.txt"
@@ -233,6 +239,9 @@ cp "$lock_file" "$corresponding_dir/source-lock.json"
 cp -R "$patch_dir" "$corresponding_dir/patches"
 cp "$script_dir/build-windows-ffmpeg-runtime.sh" "$corresponding_dir/build/"
 cp "$script_dir/test-windows-ffmpeg-runtime.ps1" "$corresponding_dir/build/"
+cp "$script_dir/build-windows-ffmpeg-runtime-native.py" "$corresponding_dir/build/"
+cp "$script_dir/build-windows-ffmpeg-runtime-native.sh" "$corresponding_dir/build/"
+cp "$script_dir/package_ffmpeg_runtime.py" "$corresponding_dir/build/"
 
 runtime_version="$(read_lock_value runtimeVersion)"
 toolchain_version="$(read_lock_value toolchain.version)"
@@ -293,6 +302,7 @@ manifest = {
     "license": "LGPL-2.1-or-later",
     "gplComponentsEnabled": False,
     "nonFreeComponentsEnabled": False,
+    "capabilities": {"ffprobe": True, "h264MediaFoundation": True},
     "files": files,
 }
 (runtime_dir / "runtime-manifest.json").write_text(
