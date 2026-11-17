@@ -28,12 +28,22 @@ on:
       - "tools/validate-release-notes.py"
       - "docs/releases/ffmpeg-runtime-*.md"
   workflow_dispatch:
+    inputs:
+      qa_tag:
+        description: Private draft holding the local qualification input
+        required: false
+        type: string
+      input_sha256:
+        description: SHA256 of video-runtime-windows-qualification.zip
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   build:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.qa_tag == '' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -137,3 +147,47 @@ jobs:
             dist/ffmpeg-runtime/OpenStudio-FFmpeg-8.0.1-windows-x64.zip \
             dist/ffmpeg-runtime/OpenStudio-FFmpeg-8.0.1-complete-corresponding-source.zip \
             dist/ffmpeg-runtime/SHA256SUMS.txt
+
+  installed-windows:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.qa_tag != '' }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Fetch and verify private qualification input
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QA_TAG: ${{ inputs.qa_tag }}
+          INPUT_SHA256: ${{ inputs.input_sha256 }}
+        run: |
+          if ($env:QA_TAG -notmatch '^qa-video-runtime-[0-9]{8}-[0-9]+$') { throw 'Invalid qualification tag.' }
+          if ($env:INPUT_SHA256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid input hash.' }
+          gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq .isDraft | Set-Variable draft
+          if ($LASTEXITCODE -ne 0 -or $draft -ne 'true') { throw 'Qualification input must remain a private draft.' }
+          gh release download $env:QA_TAG --repo $env:GITHUB_REPOSITORY --pattern video-runtime-windows-qualification.zip --dir input
+          if ($LASTEXITCODE -ne 0) { throw 'Qualification download failed.' }
+          $zip = 'input/video-runtime-windows-qualification.zip'
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:INPUT_SHA256) { throw 'Input checksum mismatch.' }
+          Expand-Archive -LiteralPath $zip -DestinationPath qualification
+          python qualification/tools/verify-video-qualification-input.py qualification
+          if ($LASTEXITCODE -ne 0) { throw 'Qualification file hashes failed.' }
+      - name: Install packaging prerequisite
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+      - name: Package, install, test and uninstall Release candidate
+        shell: pwsh
+        run: |
+          ./qualification/tools/test-video-installed-release.ps1 -QualificationRoot qualification
+      - name: Retain qualification evidence and installer
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: video-runtime-installed-windows-evidence
+          path: |
+            qualification/evidence/
+            qualification/dist/windows/
+          if-no-files-found: warn
+          retention-days: 14
