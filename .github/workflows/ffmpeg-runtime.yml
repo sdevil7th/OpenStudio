@@ -175,6 +175,12 @@ jobs:
           Expand-Archive -LiteralPath $zip -DestinationPath qualification
           python qualification/tools/verify-video-qualification-input.py qualification
           if ($LASTEXITCODE -ne 0) { throw 'Qualification file hashes failed.' }
+          # The application input remains hash-verified. Automation is versioned
+          # by this QA branch so a connection failure can be diagnosed without
+          # rebuilding or substituting the tested application binaries.
+          foreach ($name in @('run-linked-video-ui-review.ps1','linked-video-ui-review.mjs','collect-webview-review-diagnostics.ps1')) {
+            Copy-Item -LiteralPath (Join-Path 'tools' $name) -Destination (Join-Path 'qualification/tools' $name)
+          }
       - name: Install packaging prerequisite
         shell: pwsh
         run: |
@@ -195,7 +201,10 @@ jobs:
           if (Test-Path -LiteralPath $installer) {
             gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq .isDraft | Set-Variable draft
             if ($LASTEXITCODE -ne 0 -or $draft -ne 'true') { throw 'Installer must remain private.' }
-            gh release upload $env:QA_TAG $installer --repo $env:GITHUB_REPOSITORY
+            # A diagnostic repeat must not overwrite the first private installer.
+            $copy=Join-Path (Split-Path $installer) ('OpenStudio-Setup-x64-'+$env:GITHUB_RUN_ID+'.exe')
+            Copy-Item -LiteralPath $installer -Destination $copy
+            gh release upload $env:QA_TAG $copy --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw 'Private installer upload failed.' }
           }
       - name: Retain qualification evidence
@@ -203,6 +212,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: video-runtime-installed-windows-evidence
-          path: qualification/evidence/
+          path: |
+            qualification/evidence/
+            !qualification/evidence/**/profile-*/**
           if-no-files-found: warn
           retention-days: 14
