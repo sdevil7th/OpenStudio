@@ -184,13 +184,25 @@ jobs:
         shell: pwsh
         run: |
           ./qualification/tools/test-video-installed-release.ps1 -QualificationRoot qualification
-      - name: Retain qualification evidence and installer
+      - name: Retain installer in the private draft
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QA_TAG: ${{ inputs.qa_tag }}
+        run: |
+          $installer='qualification/dist/windows/OpenStudio-Setup-x64.exe'
+          if (Test-Path -LiteralPath $installer) {
+            gh release view $env:QA_TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq .isDraft | Set-Variable draft
+            if ($LASTEXITCODE -ne 0 -or $draft -ne 'true') { throw 'Installer must remain private.' }
+            gh release upload $env:QA_TAG $installer --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw 'Private installer upload failed.' }
+          }
+      - name: Retain qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: video-runtime-installed-windows-evidence
-          path: |
-            qualification/evidence/
-            qualification/dist/windows/
+          path: qualification/evidence/
           if-no-files-found: warn
           retention-days: 14
