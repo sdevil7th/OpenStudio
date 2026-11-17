@@ -62,6 +62,8 @@ function Start-OwnedDesktopProcess {
         Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -120,13 +122,24 @@ namespace OpenStudio.Qualification
             if (job == IntPtr.Zero) throw new Win32Exception();
             var limits = new EXTENDED_LIMITS(); limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE
             PROCESS_INFORMATION process = new PROCESS_INFORMATION();
+            IntPtr environment = IntPtr.Zero;
             try {
                 if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(limits))) throw new Win32Exception();
                 var command = new StringBuilder(Quote(path));
                 foreach (string argument in arguments) command.Append(' ').Append(Quote(argument));
                 var startup = new STARTUPINFO(); startup.Size = (uint)Marshal.SizeOf(startup);
                 startup.Flags = 1; startup.ShowWindow = 0; // STARTF_USESHOWWINDOW, SW_HIDE
-                if (!CreateProcess(path, command, IntPtr.Zero, IntPtr.Zero, false, 4, IntPtr.Zero, null, ref startup, out process)) throw new Win32Exception();
+                // Forward the launcher's current managed environment explicitly.
+                // Inherited native blocks can omit the review's newly set flags.
+                var entries = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+                    entries[(string)entry.Key] = (string)entry.Value;
+                var block = new StringBuilder();
+                foreach (var entry in entries) block.Append(entry.Key).Append('=').Append(entry.Value).Append('\0');
+                block.Append('\0');
+                environment = Marshal.StringToHGlobalUni(block.ToString());
+                // CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT
+                if (!CreateProcess(path, command, IntPtr.Zero, IntPtr.Zero, false, 4 | 0x400, environment, null, ref startup, out process)) throw new Win32Exception();
                 if (!AssignProcessToJobObject(job, process.Process)) throw new Win32Exception();
                 child = Process.GetProcessById((int)process.ProcessId);
                 // Retain the process handle before resume, including very short-lived leaders.
@@ -138,6 +151,7 @@ namespace OpenStudio.Qualification
                 CloseHandle(job); job = IntPtr.Zero;
                 throw;
             } finally {
+                if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
                 if (process.Thread != IntPtr.Zero) CloseHandle(process.Thread);
                 if (process.Process != IntPtr.Zero) CloseHandle(process.Process);
             }

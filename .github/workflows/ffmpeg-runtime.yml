@@ -178,7 +178,7 @@ jobs:
           # The application input remains hash-verified. Automation is versioned
           # by this QA branch so a connection failure can be diagnosed without
           # rebuilding or substituting the tested application binaries.
-          foreach ($name in @('run-linked-video-ui-review.ps1','linked-video-ui-review.mjs','collect-webview-review-diagnostics.ps1')) {
+          foreach ($name in @('run-linked-video-ui-review.ps1','linked-video-ui-review.mjs','collect-webview-review-diagnostics.ps1','OwnedDesktopProcess.psm1')) {
             Copy-Item -LiteralPath (Join-Path 'tools' $name) -Destination (Join-Path 'qualification/tools' $name)
           }
       - name: Install packaging prerequisite
